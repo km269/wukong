@@ -1,0 +1,89 @@
+# Wukong AI Agent Configuration
+# Place this file at ~/.config/wukong/config.yaml or specify via --config flag.
+
+# Default provider to use (must match a provider name below)
+default_provider: openai
+
+# LLM Providers
+providers:
+  - name: openai
+    type: openai
+    base_url: https://api.openai.com/v1
+    api_key: ${OPENAI_API_KEY}
+    model: gpt-4o
+  - name: deepseek
+    type: openai
+    base_url: https://api.deepseek.com/v1
+    api_key: ${DEEPSEEK_API_KEY}
+    model: deepseek-chat
+  - name: ollama
+    type: openai
+    base_url: http://localhost:11434/v1
+    api_key: ollama
+    model: llama3
+  - name: lmstudio
+    type: openai
+    base_url: http://localhost:1234/v1
+    api_key: lmstudio
+    model: google/gemma-4-26b-a4b 
+
+# MCP Extensions
+extensions:
+  # Built-in developer extension (file read/write, command execution, code search)
+  - name: developer
+    type: builtin
+    enabled: true
+  # Example external MCP server via stdio
+  # - name: filesystem
+  #   type: external
+  #   transport: stdio
+  #   command: npx
+  #   args:
+  #     - -y
+  #     - "@modelcontextprotocol/server-filesystem"
+  #     - "/tmp"
+  #   enabled: false
+
+# Session configuration
+session:
+  # Storage backend: sqlite, memory
+  backend: sqlite
+  # SQLite database path (relative to config directory)
+  db_path: wukong.db
+  # Maximum events per session
+  event_limit: 500
+  # Session TTL (0 = no expiration)
+  ttl: 0s
+  # Enable session summarization
+  enable_summary: true
+  # Summary trigger: number of events before auto-summarizing
+  summary_trigger: 50
+
+# Memory configuration
+memory:
+  # Storage backend: sqlite, memory
+  backend: sqlite
+  db_path: wukong.db
+  # Maximum memories per user
+  max_memories: 100
+  # Enable auto-extract mode (recommended)
+  auto_extract: true
+
+# Todo configuration
+todo:
+  # Storage backend
+  backend: sqlite
+  db_path: wukong.db
+
+# Agent configuration
+agent:
+  # Maximum LLM calls per run (0 = unlimited)
+  max_llm_calls: 50
+  # Maximum tool iterations per run
+  max_tool_iterations: 30
+  # Enable parallel tool execution
+  parallel_tools: true
+  # Enable streaming output
+  streaming: true
+  # Maximum run duration (0 = no limit)
+  max_run_duration: 300s
