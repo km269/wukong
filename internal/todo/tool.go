@@ -9,7 +9,11 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3"
+
+	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/util"
 
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
@@ -27,26 +31,40 @@ type Task struct {
 
 // Store provides persistent storage for todo tasks.
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	pool *util.DatabasePool
 }
 
-// NewStore creates a new todo store with the given database path.
-func NewStore(dbPath string) (*Store, error) {
-	db, err := sql.Open("sqlite3", dbPath)
+// NewStore creates a new todo store using a shared database pool.
+func NewStore(
+	dbPath string,
+	pool *util.DatabasePool,
+) (*Store, error) {
+	if pool == nil {
+		resolvedPath := config.ResolvePath(dbPath)
+		pool = util.NewDatabasePool(resolvedPath)
+	}
+
+	db, err := pool.GetDB()
 	if err != nil {
-		return nil, fmt.Errorf("open database: %w", err)
+		return nil, fmt.Errorf("get db: %w", err)
 	}
 
 	if err := initSchema(db); err != nil {
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 
-	return &Store{db: db}, nil
+	return &Store{db: db, pool: pool}, nil
 }
 
 // Close closes the database connection.
 func (s *Store) Close() error {
-	return s.db.Close()
+	// Database lifecycle is managed by the shared pool.
+	// Only close if we own the pool.
+	if s.pool != nil {
+		return s.pool.Close()
+	}
+	return nil
 }
 
 // Create adds a new task to the store.
@@ -192,6 +210,14 @@ func NewTodoManager(store *Store) *TodoManager {
 	return &TodoManager{store: store}
 }
 
+// Close releases the underlying database connection.
+func (m *TodoManager) Close() error {
+	if m.store != nil {
+		return m.store.Close()
+	}
+	return nil
+}
+
 // Tools returns all todo-related function tools.
 func (m *TodoManager) Tools() []tool.Tool {
 	return []tool.Tool{
@@ -223,14 +249,25 @@ func (m *TodoManager) Tools() []tool.Tool {
 				"Mark a todo task as completed",
 			),
 		),
+		function.NewFunctionTool(
+			m.deleteTask,
+			function.WithName("todo_delete"),
+			function.WithDescription(
+				"Delete a todo task by its ID",
+			),
+		),
 	}
 }
 
 func (m *TodoManager) createTask(
 	ctx context.Context, req CreateTaskReq,
 ) (CreateTaskRsp, error) {
+	id := req.ID
+	if id == "" {
+		id = uuid.New().String()[:8]
+	}
 	task := &Task{
-		ID:          req.ID,
+		ID:          id,
 		Title:       req.Title,
 		Description: req.Description,
 	}
@@ -310,5 +347,31 @@ func (m *TodoManager) completeTask(
 	return CompleteTaskRsp{
 		Success: true,
 		Message: fmt.Sprintf("Task %q completed", req.ID),
+	}, nil
+}
+
+// DeleteTaskReq is the input for deleting a task.
+type DeleteTaskReq struct {
+	ID string `json:"id" jsonschema:"description=Task ID to delete"`
+}
+
+// DeleteTaskRsp is the output for deleting a task.
+type DeleteTaskRsp struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
+func (m *TodoManager) deleteTask(
+	ctx context.Context, req DeleteTaskReq,
+) (DeleteTaskRsp, error) {
+	if err := m.store.Delete(req.ID); err != nil {
+		return DeleteTaskRsp{
+			Success: false,
+			Message: fmt.Sprintf("Failed: %v", err),
+		}, err
+	}
+	return DeleteTaskRsp{
+		Success: true,
+		Message: fmt.Sprintf("Task %q deleted", req.ID),
 	}, nil
 }

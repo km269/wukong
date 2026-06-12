@@ -52,9 +52,13 @@ func RenderStatusBar(
 	model string,
 	width int,
 ) string {
+	sid := sessionID
+	if len(sid) > 8 {
+		sid = sid[:8]
+	}
 	left := fmt.Sprintf(
 		"⚡ Wukong | %s | %s",
-		sessionID[:8],
+		sid,
 		provider+"/"+model,
 	)
 

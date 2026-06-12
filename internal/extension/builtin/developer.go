@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -44,11 +45,21 @@ func NewDeveloperToolSet() *DeveloperToolSet {
 			),
 		),
 		function.NewFunctionTool(
+			ts.replaceInFile,
+			function.WithName("file_replace"),
+			function.WithDescription(
+				"Find and replace text in a file. Uses exact "+
+					"string matching. Prefer this over file_write "+
+					"for targeted edits to avoid rewriting entire files.",
+			),
+		),
+		function.NewFunctionTool(
 			ts.executeCommand,
 			function.WithName("command_execute"),
 			function.WithDescription(
 				"Execute a shell command and return its output. "+
-					"Use this to run build tools, tests, git commands, etc.",
+					"Use this to run build tools, tests, git commands, etc. "+
+					"Output is truncated if too long.",
 			),
 		),
 		function.NewFunctionTool(
@@ -56,7 +67,8 @@ func NewDeveloperToolSet() *DeveloperToolSet {
 			function.WithName("code_search"),
 			function.WithDescription(
 				"Search for code patterns in the project "+
-					"directory using ripgrep-like pattern matching.",
+					"directory using ripgrep. Automatically "+
+					"excludes common system directories.",
 			),
 		),
 		function.NewFunctionTool(
@@ -153,6 +165,62 @@ func (ts *DeveloperToolSet) writeFile(
 	}, nil
 }
 
+// FileReplaceReq is the input for find-and-replace in a file.
+type FileReplaceReq struct {
+	Path    string `json:"path" jsonschema:"description=Path to the file to modify"`
+	OldStr  string `json:"old_str" jsonschema:"description=Exact text to find and replace"`
+	NewStr  string `json:"new_str" jsonschema:"description=Text to replace with (use empty string to delete)"`
+}
+
+// FileReplaceRsp is the output for find-and-replace.
+type FileReplaceRsp struct {
+	Success     bool   `json:"success"`
+	Message     string `json:"message,omitempty"`
+	Occurrences int    `json:"occurrences"`
+	Error       string `json:"error,omitempty"`
+}
+
+func (ts *DeveloperToolSet) replaceInFile(
+	ctx context.Context, req FileReplaceReq,
+) (FileReplaceRsp, error) {
+	data, err := os.ReadFile(req.Path)
+	if err != nil {
+		return FileReplaceRsp{
+			Success: false,
+			Error:   err.Error(),
+		}, nil
+	}
+
+	content := string(data)
+	count := strings.Count(content, req.OldStr)
+	if count == 0 {
+		return FileReplaceRsp{
+			Success: false,
+			Error: fmt.Sprintf(
+				"old_str not found in %q", req.Path,
+			),
+		}, nil
+	}
+
+	newContent := strings.ReplaceAll(
+		content, req.OldStr, req.NewStr,
+	)
+
+	err = os.WriteFile(req.Path, []byte(newContent), 0644)
+	if err != nil {
+		return FileReplaceRsp{
+			Success: false,
+			Error:   err.Error(),
+		}, nil
+	}
+
+	return FileReplaceRsp{
+		Success:     true,
+		Message:     fmt.Sprintf("Replaced %d occurrence(s) in %q", count, req.Path),
+		Occurrences: count,
+	}, nil
+}
+
 // CommandExecuteReq is the input for executing a command.
 type CommandExecuteReq struct {
 	Command string `json:"command" jsonschema:"description=Shell command to execute"`
@@ -180,7 +248,19 @@ func (ts *DeveloperToolSet) executeCommand(
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(execCtx, "sh", "-c", req.Command)
+	// Use platform-appropriate shell:
+	// - Windows: cmd /C
+	// - Unix: sh -c
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.CommandContext(
+			execCtx, "cmd", "/C", req.Command,
+		)
+	} else {
+		cmd = exec.CommandContext(
+			execCtx, "sh", "-c", req.Command,
+		)
+	}
 	if req.WorkDir != "" {
 		cmd.Dir = req.WorkDir
 	}
@@ -202,10 +282,24 @@ func (ts *DeveloperToolSet) executeCommand(
 		}
 	}
 
+	stdoutStr := stdout.String()
+	stderrStr := stderr.String()
+
+	// Truncate long outputs
+	const maxOutput = 8000
+	if len(stdoutStr) > maxOutput {
+		stdoutStr = stdoutStr[:maxOutput] +
+			fmt.Sprintf("\n... (truncated, %d bytes total)", len(stdoutStr))
+	}
+	if len(stderrStr) > maxOutput {
+		stderrStr = stderrStr[:maxOutput] +
+			fmt.Sprintf("\n... (truncated, %d bytes total)", len(stderrStr))
+	}
+
 	return CommandExecuteRsp{
 		Success:  exitCode == 0,
-		Stdout:   stdout.String(),
-		Stderr:   stderr.String(),
+		Stdout:   stdoutStr,
+		Stderr:   stderrStr,
 		ExitCode: exitCode,
 	}, nil
 }
@@ -232,8 +326,24 @@ func (ts *DeveloperToolSet) searchCode(
 		searchPath = "."
 	}
 
+	// Use ripgrep with system file exclusion
 	cmd := exec.CommandContext(
 		ctx, "rg", "--no-heading", "-n",
+		"--glob", "!.git",
+		"--glob", "!node_modules",
+		"--glob", "!.venv",
+		"--glob", "!vendor",
+		"--glob", "!__pycache__",
+		"--glob", "!*.pyc",
+		"--glob", "!*.class",
+		"--glob", "!*.o",
+		"--glob", "!*.so",
+		"--glob", "!*.dll",
+		"--glob", "!*.exe",
+		"--glob", "!*.bin",
+		"--glob", "!*.zip",
+		"--glob", "!*.tar*",
+		"--glob", "!*.gz",
 		req.Pattern, searchPath,
 	)
 	output, err := cmd.Output()

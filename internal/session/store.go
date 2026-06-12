@@ -4,25 +4,39 @@
 package session
 
 import (
-	"database/sql"
 	"fmt"
 
 	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/util"
 
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 	sessionsqlite "trpc.group/trpc-go/trpc-agent-go/session/sqlite"
 )
 
+// SessionService wraps session.Service with a database handle for
+// proper cleanup when using SQLite backend.
+type SessionService struct {
+	session.Service
+	pool *util.DatabasePool
+}
+
 // NewSessionService creates a new session service based on configuration.
-func NewSessionService(cfg *config.SessionConfig) (session.Service, error) {
+// It accepts an optional shared DatabasePool; if nil and the backend is
+// SQLite, it creates its own pool from the config path.
+func NewSessionService(
+	cfg *config.SessionConfig,
+	pool *util.DatabasePool,
+) (*SessionService, error) {
 	switch cfg.Backend {
 	case "sqlite":
-		return newSQLiteService(cfg)
+		return newSQLiteService(cfg, pool)
 	case "memory":
-		return newInMemoryService(cfg), nil
+		return &SessionService{
+			Service: newInMemoryService(cfg),
+		}, nil
 	default:
 		return nil, fmt.Errorf(
 			"unsupported session backend: %s", cfg.Backend,
@@ -30,11 +44,33 @@ func NewSessionService(cfg *config.SessionConfig) (session.Service, error) {
 	}
 }
 
+// Close releases the underlying resources.
+func (s *SessionService) Close() error {
+	if closer, ok := s.Service.(interface{ Close() error }); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
 // newSQLiteService creates a SQLite-backed session service.
-func newSQLiteService(cfg *config.SessionConfig) (session.Service, error) {
-	db, err := sql.Open("sqlite3", cfg.DBPath)
+func newSQLiteService(
+	cfg *config.SessionConfig,
+	pool *util.DatabasePool,
+) (*SessionService, error) {
+	if pool == nil {
+		var err error
+		dbPath := config.ResolvePath(cfg.DBPath)
+		pool = util.NewDatabasePool(dbPath)
+		defer func() {
+			if err != nil {
+				pool.Close()
+			}
+		}()
+	}
+
+	db, err := pool.GetDB()
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite: %w", err)
+		return nil, fmt.Errorf("get db: %w", err)
 	}
 
 	opts := []sessionsqlite.ServiceOpt{
@@ -48,7 +84,10 @@ func newSQLiteService(cfg *config.SessionConfig) (session.Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create sqlite session: %w", err)
 	}
-	return svc, nil
+
+	// Note: db lifecycle is now managed by the pool, not by us.
+	// We keep a reference to the pool for lifecycle awareness.
+	return &SessionService{Service: svc, pool: pool}, nil
 }
 
 // newInMemoryService creates an in-memory session service.

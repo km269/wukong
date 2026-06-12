@@ -2,7 +2,7 @@
 # Place this file at ~/.config/wukong/config.yaml or specify via --config flag.
 
 # Default provider to use (must match a provider name below)
-default_provider: openai
+default_provider: lmstudio
 
 # LLM Providers
 providers:
@@ -11,19 +11,29 @@ providers:
     base_url: https://api.openai.com/v1
     api_key: ${OPENAI_API_KEY}
     model: gpt-4o
+  - name: anthropic
+    type: anthropic
+    base_url: https://api.anthropic.com/v1
+    api_key: ${ANTHROPIC_API_KEY}
+    model: claude-sonnet-4-20250514
+  - name: google
+    type: google
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    api_key: ${GOOGLE_API_KEY}
+    model: gemini-2.5-flash
   - name: deepseek
-    type: openai
+    type: deepseek
     base_url: https://api.deepseek.com/v1
     api_key: ${DEEPSEEK_API_KEY}
     model: deepseek-chat
   - name: ollama
-    type: openai
+    type: ollama
     base_url: http://localhost:11434/v1
     api_key: ollama
     model: llama3
   - name: lmstudio
-    type: openai
-    base_url: http://localhost:1234/v1
+    type: lmstudio
+    base_url: http://192.168.50.97:1234/v1
     api_key: lmstudio
     model: google/gemma-4-26b-a4b 
 
@@ -31,6 +41,34 @@ providers:
 extensions:
   # Built-in developer extension (file read/write, command execution, code search)
   - name: developer
+    type: builtin
+    enabled: true
+  # Computer Controller (web fetch, file cache, browser automation)
+  - name: computer_controller
+    type: builtin
+    enabled: true
+  # Memory extension (user preferences and knowledge)
+  - name: memory
+    type: builtin
+    enabled: true
+  # Auto Visualiser (charts, diagrams, tables)
+  - name: auto_visualiser
+    type: builtin
+    enabled: true
+  # Interactive Tutorial
+  - name: tutorial
+    type: builtin
+    enabled: true
+  # Top of Mind (persistent instruction injection)
+  - name: top_of_mind
+    type: builtin
+    enabled: true
+  # Code Mode (JavaScript code execution sandbox)
+  - name: code_mode
+    type: builtin
+    enabled: true
+  # Apps (custom HTML standalone apps)
+  - name: apps
     type: builtin
     enabled: true
   # Example external MCP server via stdio
@@ -87,3 +125,191 @@ agent:
   streaming: true
   # Maximum run duration (0 = no limit)
   max_run_duration: 300s
+  # Model temperature (0.0-2.0, lower = more deterministic)
+  temperature: 0.7
+  # Maximum output tokens per LLM call
+  max_tokens: 4096
+  # Tool call retry on transient failures
+  tool_retry_enabled: true
+  tool_retry_max_attempts: 3
+  tool_retry_initial_wait: 1s
+  tool_retry_backoff_factor: 2.0
+  # Inject post-tool prompt to guide agent after tool results
+  enable_post_tool_prompt: true
+
+# Security configuration
+security:
+  # Enable malware scanning for external extensions
+  malware_scan_enabled: true
+  # Default tool execution timeout
+  default_timeout: 30s
+  # Maximum timeout any tool can use
+  max_timeout: 300s
+  # Block dangerous commands (e.g., rm -rf /)
+  block_dangerous_commands: true
+  # List of blocked command patterns
+  blocked_commands:
+    - "rm -rf /"
+    - "dd if=/dev/zero"
+    - "mkfs."
+    - "> /dev/sda"
+    - "fork bomb"
+  # Require user approval for destructive operations (legacy flag)
+  require_approval: false
+  # Permission mode: auto, manual, smart, chat_only
+  permission_mode: smart
+  # Tool allowlist (empty = all allowed except denylist)
+  # allowlist:
+  #   - "read_file"
+  #   - "search_code"
+  # Tool denylist (these tools are always blocked)
+  # denylist:
+  #   - "unsafe_tool"
+
+# Context Revision configuration (Token optimization)
+revision:
+  # Enable automatic context revision
+  enabled: true
+  # Provider name for the smaller/faster revision model (empty = use default)
+  revision_provider: ""
+  # Model name for revision summaries (empty = use default provider's model)
+  revision_model: ""
+  # Max output tokens for command execution before truncation
+  max_command_output: 8000
+  # Enable semantic search for context retrieval
+  enable_semantic_search: false
+  # Strategy: "include_all" or "semantic"
+  search_strategy: include_all
+  # Maximum context window tokens
+  max_context_tokens: 64000
+  # Trim ratio (0.0-1.0) - how much to trim when exceeding max
+  trim_ratio: 0.3
+
+# Browser/Computer Controller configuration
+browser:
+  # Enable browser automation
+  enabled: true
+  # Browser type: "chromium", "firefox", "webkit"
+  browser_type: chromium
+  # Headless mode
+  headless: true
+  # Cache directory for file downloads
+  cache_dir: .wukong_cache
+  # Max download size in bytes (100MB)
+  max_download_size: 104857600
+  # Request timeout
+  timeout: 60s
+
+# Chat Recall configuration (cross-session history search)
+recall:
+  # Enable cross-session chat recall
+  enabled: true
+  # Storage backend: sqlite, memory
+  backend: sqlite
+  # Database path
+  db_path: wukong.db
+  # Max search results
+  max_results: 10
+  # Max stored messages per session for recall
+  max_messages_per_session: 200
+
+# Auto Visualiser configuration
+visualiser:
+  # Enable auto visualisation
+  enabled: true
+  # Output directory for generated images
+  output_dir: .wukong_visuals
+  # Max chart width in pixels
+  max_width: 1200
+  # Max chart height in pixels
+  max_height: 800
+
+# Tutorial configuration
+tutorial:
+  # Enable tutorial mode
+  enabled: true
+  # Tutorial language
+  language: zh
+
+# Top of Mind configuration (persistent instruction injection)
+top_of_mind:
+  # Enable Top of Mind
+  enabled: true
+  # File path for persistent instructions
+  instruction_file: .wukong_instructions.md
+  # Max instruction length
+  max_length: 2000
+
+# Code Mode configuration (JavaScript execution)
+code_mode:
+  # Enable Code Mode
+  enabled: true
+  # Execution timeout
+  timeout: 10s
+  # Max memory usage in MB
+  max_memory_mb: 128
+
+# Apps configuration (custom HTML standalone apps)
+apps:
+  # Enable Apps support
+  enabled: true
+  # Directory for app storage
+  app_dir: .wukong_apps
+
+# Summon configuration (sub-agent delegation)
+summon:
+  # Enable Summon
+  enabled: true
+  # Skills/recipes directory
+  skills_dir: .wukong_skills
+  # Max concurrent sub-agents
+  max_concurrent: 5
+
+# Workflow configuration (multi-mode agent orchestration)
+workflow:
+  # Execution mode: single, chain, parallel, cycle, graph
+  mode: single
+  # Max iterations for cycle/graph modes
+  max_iterations: 10
+
+# Telemetry configuration (OpenTelemetry distributed tracing)
+telemetry:
+  # Enable distributed tracing
+  enabled: false
+  # Exporter type: grpc, http, console
+  exporter_type: console
+  # OTLP collector endpoint
+  endpoint: localhost:4317
+  # Service name for resource attribution
+  service_name: wukong
+  # Service version
+  service_version: "1.0.0"
+  # Deployment environment: development, staging, production
+  environment: development
+  # Sampling rate (0.0-1.0, 1.0 = all traces)
+  sample_rate: 1.0
+
+# Skill configuration (Agent Skill system)
+# NOTE: Skill uses .wukong_agent_skills (separate from summon.skills_dir)
+# to avoid conflicts. Skill expects directories with SKILL.md files,
+# while Summon expects individual .md files.
+skill:
+  # Enable skill system
+  enabled: true
+  # Skills directory for SKILL.md files (per-directory format)
+  skills_dir: .wukong_agent_skills
+  # Auto-load skills at startup
+  auto_load: true
+  # Maximum number of skills to load
+  max_skills: 20
+
+# A2A Server configuration (expose agent to remote A2A clients)
+a2a_server:
+  # Enable A2A server
+  enabled: false
+  # Listen address
+  address: ":9090"
+  # Agent name exposed via A2A
+  agent_name: wukong
+  # Agent description
+  agent_description: "Wukong AI Agent - A2A service endpoint"

@@ -13,6 +13,41 @@ func RegisterBuiltins(cfg *config.WukongConfig) {
 			Type:    "builtin",
 			Enabled: true,
 		},
+		{
+			Name:    "computer_controller",
+			Type:    "builtin",
+			Enabled: cfg.Browser.Enabled,
+		},
+		{
+			Name:    "memory",
+			Type:    "builtin",
+			Enabled: true,
+		},
+		{
+			Name:    "auto_visualiser",
+			Type:    "builtin",
+			Enabled: cfg.Visualiser.Enabled,
+		},
+		{
+			Name:    "tutorial",
+			Type:    "builtin",
+			Enabled: cfg.Tutorial.Enabled,
+		},
+		{
+			Name:    "top_of_mind",
+			Type:    "builtin",
+			Enabled: cfg.TopOfMind.Enabled,
+		},
+		{
+			Name:    "code_mode",
+			Type:    "builtin",
+			Enabled: cfg.CodeMode.Enabled,
+		},
+		{
+			Name:    "apps",
+			Type:    "builtin",
+			Enabled: cfg.Apps.Enabled,
+		},
 	}
 
 	existing := make(map[string]bool)

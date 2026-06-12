@@ -6,6 +6,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -51,6 +52,10 @@ type Model struct {
 	// Streaming state
 	streaming     bool
 	currentStream string
+	streamCh      <-chan streamEvent
+
+	// Exit flag (set by /exit or /quit command)
+	quitRequested bool
 
 	// Layout
 	width  int
@@ -116,6 +121,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.handleCommand(input)
 					m.textarea.Reset()
 					m.updateViewport()
+					if m.quitRequested {
+						return m, tea.Quit
+					}
 					return m, nil
 				}
 
@@ -130,6 +138,46 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case refreshMsg:
+		m.updateViewport()
+		return m, nil
+
+	case streamingDeltaMsg:
+		m.currentStream += string(msg)
+		m.updateViewport()
+		return m, readStreamEvent(m.streamCh)
+
+	case toolCallStartMsg:
+		m.toolCalls = append(m.toolCalls, toolCallEntry{
+			Name:   msg.Name,
+			Args:   msg.Args,
+			Status: "running",
+		})
+		m.updateViewport()
+		return m, readStreamEvent(m.streamCh)
+
+	case toolCallResultMsg:
+		for i := len(m.toolCalls) - 1; i >= 0; i-- {
+			if m.toolCalls[i].Status == "running" {
+				m.toolCalls[i].Result = msg.Result
+				m.toolCalls[i].Status = "done"
+				break
+			}
+		}
+		m.updateViewport()
+		return m, nil
+
+	case streamingErrorMsg:
+		m.currentStream += string(msg)
+		m.updateViewport()
+		return m, readStreamEvent(m.streamCh)
+
+	case streamEndMsg:
+		m.streaming = false
+		if msg.Content != "" {
+			m.addMessage("assistant", msg.Content)
+		}
+		m.currentStream = ""
+		m.setStatus("Ready")
 		m.updateViewport()
 		return m, nil
 	}
@@ -234,14 +282,37 @@ func (m *Model) handleCommand(input string) {
 	trimmed := strings.TrimSpace(input)
 	switch {
 	case trimmed == "/exit" || trimmed == "/quit":
-		// handled by Ctrl+C
+		m.status = "Goodbye!"
+		m.quitRequested = true
+
+	case trimmed == "/exts":
+		var extNames []string
+		if m.cfg != nil {
+			for _, ext := range m.cfg.Extensions {
+				if ext.Enabled {
+					extNames = append(extNames, ext.Name)
+				}
+			}
+		}
+		content := "No extensions loaded."
+		if len(extNames) > 0 {
+			content = "Loaded Extensions:\n  " +
+				strings.Join(extNames, "\n  ")
+		}
+		m.messages = append(m.messages, chatEntry{
+			Role:    "assistant",
+			Content: content,
+		})
 
 	case trimmed == "/new":
-		m.sessionID = ""
+		// Generate a new session ID for a fresh conversation.
+		// The backend session service will create a new session
+		// on the next message with the new ID.
+		m.sessionID = generateSessionID()
 		m.messages = nil
 		m.toolCalls = nil
 		m.currentStream = ""
-		m.status = "New session"
+		m.status = "New session started"
 
 	case trimmed == "/clear":
 		m.messages = nil
@@ -250,23 +321,72 @@ func (m *Model) handleCommand(input string) {
 		m.viewport.SetContent("")
 		m.status = "Cleared"
 
+	case trimmed == "/model":
+		// Show current model/provider info
+		p := m.cfg.DefaultProviderConfig()
+		modelName := ""
+		if p != nil {
+			modelName = p.Model
+		}
+		m.messages = append(m.messages, chatEntry{
+			Role: "assistant",
+			Content: fmt.Sprintf(
+				"Current: %s / %s\n"+
+					"Usage: /model <model-name> to switch models",
+				m.cfg.DefaultProvider, modelName,
+			),
+		})
+
+	case strings.HasPrefix(trimmed, "/model "):
+		// Switch to a different model
+		newModel := strings.TrimSpace(
+			strings.TrimPrefix(trimmed, "/model"),
+		)
+		p := m.cfg.DefaultProviderConfig()
+		if p != nil {
+			oldModel := p.Model
+			p.Model = newModel
+			m.status = "Ready"
+			m.messages = append(m.messages, chatEntry{
+				Role: "assistant",
+				Content: fmt.Sprintf(
+					"Switched model: %s -> %s",
+					oldModel, newModel,
+				),
+			})
+		} else {
+			m.messages = append(m.messages, chatEntry{
+				Role:    "assistant",
+				Content: "No provider configured to switch models.",
+			})
+		}
+
 	case strings.HasPrefix(trimmed, "/help"):
 		m.messages = append(m.messages, chatEntry{
 			Role: "assistant",
 			Content: `Wukong Commands:
-  /new    Start a new session
-  /clear  Clear screen
-  /help   Show this help
-  /exit   Quit wukong
-  Ctrl+D  Send message
-  Ctrl+C  Quit
+  /new      Start a new session
+  /clear    Clear screen
+  /help     Show this help
+  /exts     List extensions
+  /model    Show or switch model (usage: /model [name])
+  /exit     Quit wukong
+  Ctrl+D    Send message
+  Ctrl+C    Quit
 
-Built-in Tools:
-  file_read, file_write  Read/write files
-  command_execute        Run shell commands
-  code_search            Search code patterns
-  directory_list         List files
-  todo_*                 Task management`,
+Built-in Extensions:
+  developer            File ops, commands, code search
+  computer_controller  Web fetch, file cache
+  memory               Remember preferences & knowledge
+  auto_visualiser      Charts, diagrams, tables
+  tutorial             Interactive tutorials
+
+Platform Extensions:
+  todo_*               Task management & tracking
+  recall_*             Cross-session history search
+  tom_*                Persistent instruction injection
+  code_*               JavaScript code execution
+  app_*                Custom HTML app management`,
 		})
 
 	default:
@@ -298,4 +418,11 @@ func StartTUI(
 	}
 
 	return nil
+}
+
+// generateSessionID creates a new unique session identifier.
+// Uses a timestamp-based prefix for sortability followed by random
+// bytes for uniqueness.
+func generateSessionID() string {
+	return fmt.Sprintf("sess-%x", time.Now().UnixNano())
 }

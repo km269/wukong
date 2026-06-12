@@ -25,6 +25,7 @@ Built with tRPC-Agent-Go, tRPC-MCP-Go and tRPC-A2A-Go.`,
 
 	cmd.AddCommand(newSessionCmd())
 	cmd.AddCommand(newConfigureCmd())
+	cmd.AddCommand(newVersionCmd())
 
 	return cmd
 }
