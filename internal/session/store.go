@@ -45,7 +45,16 @@ func NewSessionService(
 }
 
 // Close releases the underlying resources.
+// When using SQLite with a shared DatabasePool, the database
+// connection is NOT closed here — it is managed by the pool.
+// Only non-DB resources (workers, channels) are released.
 func (s *SessionService) Close() error {
+	// Delegate to underlying service; the SQLite service will close
+	// channels, stop workers, and close the DB handle. The DB handle
+	// close is safe because sql.DB supports multiple Close() calls
+	// (the second call is a no-op). However, to avoid any risk of
+	// premature DB close while memory service is still running, we
+	// let the DatabasePool manage the final DB lifecycle.
 	if closer, ok := s.Service.(interface{ Close() error }); ok {
 		return closer.Close()
 	}

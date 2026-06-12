@@ -33,3 +33,22 @@ func SetQuietMode() {
 		Level: slog.LevelWarn,
 	}))
 }
+
+// SetLogLevel sets the global logger to the specified level.
+// Supported levels: "debug", "info", "warn", "error".
+func SetLogLevel(level string) {
+	var lvl slog.Level
+	switch level {
+	case "debug":
+		lvl = slog.LevelDebug
+	case "warn":
+		lvl = slog.LevelWarn
+	case "error":
+		lvl = slog.LevelError
+	default:
+		lvl = slog.LevelInfo
+	}
+	Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: lvl,
+	}))
+}

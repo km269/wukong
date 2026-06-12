@@ -295,7 +295,7 @@ func setupSandbox(vm *goja.Runtime) *strings.Builder {
 			return goja.Undefined()
 		}
 		jsonStr := call.Arguments[0].String()
-		var result interface{}
+		var result any
 		if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
 			return goja.Undefined()
 		}

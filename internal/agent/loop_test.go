@@ -47,47 +47,47 @@ func TestIsCommandTool(t *testing.T) {
 func TestExtractCommandFromArgs(t *testing.T) {
 	tests := []struct {
 		name     string
-		args     map[string]interface{}
+		args     map[string]any
 		expected string
 	}{
 		{
 			name:     "extract command field",
-			args:     map[string]interface{}{"command": "ls -la"},
+			args:     map[string]any{"command": "ls -la"},
 			expected: "ls -la",
 		},
 		{
 			name:     "extract cmd field",
-			args:     map[string]interface{}{"cmd": "pwd"},
+			args:     map[string]any{"cmd": "pwd"},
 			expected: "pwd",
 		},
 		{
 			name:     "extract shell field",
-			args:     map[string]interface{}{"shell": "echo hello"},
+			args:     map[string]any{"shell": "echo hello"},
 			expected: "echo hello",
 		},
 		{
 			name:     "extract script field",
-			args:     map[string]interface{}{"script": "npm install"},
+			args:     map[string]any{"script": "npm install"},
 			expected: "npm install",
 		},
 		{
 			name:     "priority: command over cmd",
-			args:     map[string]interface{}{"command": "first", "cmd": "second"},
+			args:     map[string]any{"command": "first", "cmd": "second"},
 			expected: "first",
 		},
 		{
 			name:     "non-string value skipped",
-			args:     map[string]interface{}{"command": 12345},
+			args:     map[string]any{"command": 12345},
 			expected: "",
 		},
 		{
 			name:     "no command fields",
-			args:     map[string]interface{}{"url": "https://example.com"},
+			args:     map[string]any{"url": "https://example.com"},
 			expected: "",
 		},
 		{
 			name:     "empty args",
-			args:     map[string]interface{}{},
+			args:     map[string]any{},
 			expected: "",
 		},
 		{

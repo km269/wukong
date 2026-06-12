@@ -153,7 +153,7 @@ func (m *Manager) Refresh() error {
 		return fmt.Errorf("skill repository not initialized")
 	}
 
-	if refreshable, ok := interface{}(m.repository).(agentskill.RefreshableRepository); ok {
+	if refreshable, ok := any(m.repository).(agentskill.RefreshableRepository); ok {
 		if err := refreshable.Refresh(); err != nil {
 			return fmt.Errorf("refresh skills: %w", err)
 		}

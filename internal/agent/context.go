@@ -146,16 +146,24 @@ func (e *ContextRevisionEngine) AfterRun(
 
 	// Track recent outputs
 	if len(response) > 0 {
-		e.estimatedTokens += len(response) / 4
 		e.addRecentOutput(response)
 	}
 
-	// Update token estimate from actual events for accuracy.
+	// Update token estimate from actual event usage for accuracy.
 	// Each event carries its own token usage via Response.Usage.
+	// When Usage data is available, use the precise TotalTokens;
+	// otherwise fall back to a rough character-based estimate.
+	hasUsage := false
 	for _, evt := range evts {
 		if evt.Response != nil && evt.Response.Usage != nil {
 			e.estimatedTokens += evt.Response.Usage.TotalTokens
+			hasUsage = true
 		}
+	}
+	// Fallback: if no Usage data was reported, use character count / 4
+	// as a rough estimate to avoid under-counting.
+	if !hasUsage && len(response) > 0 {
+		e.estimatedTokens += len(response) / 4
 	}
 }
 

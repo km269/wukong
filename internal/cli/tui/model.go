@@ -57,6 +57,9 @@ type Model struct {
 	// Exit flag (set by /exit or /quit command)
 	quitRequested bool
 
+	// Model info for status bar
+	modelName string
+
 	// Layout
 	width  int
 	height int
@@ -82,16 +85,60 @@ func NewModel(cfg ModelConfig) *Model {
 
 	vp := viewport.New(80, 20)
 
-	return &Model{
-		viewport:  vp,
-		textarea:  ta,
-		userID:    cfg.UserID,
-		sessionID: cfg.SessionID,
-		loop:      cfg.Loop,
-		cfg:       cfg.Config,
-		messages:  make([]chatEntry, 0),
-		status:    "Ready",
+	// Build startup summary
+	startupMsg := buildStartupSummary(cfg.Config)
+
+	// Extract model name for status bar display
+	modelDisplay := cfg.Config.DefaultProvider
+	if p := cfg.Config.FindProvider(cfg.Config.DefaultProvider); p != nil && p.Model != "" {
+		modelDisplay = p.Model
 	}
+
+	return &Model{
+		viewport:   vp,
+		textarea:   ta,
+		userID:     cfg.UserID,
+		sessionID:  cfg.SessionID,
+		loop:       cfg.Loop,
+		cfg:        cfg.Config,
+		modelName:  modelDisplay,
+		messages: []chatEntry{
+			{Role: "system", Content: startupMsg},
+		},
+		status: "Ready",
+	}
+}
+
+// buildStartupSummary creates a human-readable config summary
+// displayed at the top of the chat on startup.
+func buildStartupSummary(cfg *config.WukongConfig) string {
+	provider := cfg.DefaultProvider
+	modelName := ""
+	if p := cfg.FindProvider(provider); p != nil {
+		modelName = p.Model
+	}
+
+	summary := "🟢 Wukong Ready\n" +
+		"  Provider: " + provider
+	if modelName != "" {
+		summary += "\n  Model:    " + modelName
+	}
+	summary += "\n  Log:      " + cfg.LogLevel
+	summary += "\n  Session:  " + cfg.Session.Backend +
+		" | Memory: " + cfg.Memory.Backend +
+		" | Recall: " + map[bool]string{true: "on", false: "off"}[cfg.Recall.Enabled]
+
+	if cfg.Agent.Planner != "" {
+		summary += "\n  Planner:  " + cfg.Agent.Planner
+	}
+	summary += "\n  Tools:    parallel=" +
+		map[bool]string{true: "on", false: "off"}[cfg.Agent.ParallelTools] +
+		" | tool_search=" +
+		map[bool]string{true: "on", false: "off"}[cfg.Agent.ToolSearchEnabled] +
+		" | guardrail=" +
+		map[bool]string{true: "on", false: "off"}[cfg.Security.GuardrailEnabled]
+
+	return summary
 }
 
 // Init implements tea.Model.

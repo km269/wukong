@@ -114,14 +114,14 @@ func (ts *ManagerToolSet) listExtensions(
 		case StatusError:
 			statusIcon = "✕"
 		}
-		sb.WriteString(fmt.Sprintf(
+		fmt.Fprintf(&sb,
 			"  %s %s [%s] (%d tools)",
 			statusIcon, ext.Name, ext.Type, ext.ToolCount,
-		))
+		)
 		if ext.Error != "" {
-			sb.WriteString(fmt.Sprintf(
+			fmt.Fprintf(&sb,
 				" - Error: %s", ext.Error,
-			))
+			)
 		}
 		sb.WriteString("\n")
 	}

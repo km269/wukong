@@ -315,7 +315,7 @@ func generateChartSVG(
 	barW := chartW / len(values)
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(
+	fmt.Fprintf(&sb,
 		`<svg width="%d" height="%d" xmlns="http://www.w3.org/2000/svg">
   <style>
     .bar { fill: #4A90D9; }
@@ -329,7 +329,7 @@ func generateChartSVG(
   <line x1="%d" y1="%d" x2="%d" y2="%d" class="axis"/>
 `, width, height, width/2, title,
 		margin, margin, margin, margin+chartH,
-		margin, margin+chartH, margin+chartW, margin+chartH))
+		margin, margin+chartH, margin+chartW, margin+chartH)
 
 	switch chartType {
 	case "bar":
@@ -337,14 +337,14 @@ func generateChartSVG(
 			barH := int(float64(chartH) * v / maxVal)
 			x := margin + i*barW + barW/4
 			y := margin + chartH - barH
-			sb.WriteString(fmt.Sprintf(
+			fmt.Fprintf(&sb,
 				`  <rect x="%d" y="%d" width="%d" height="%d" class="bar" rx="2"/>
   <text x="%d" y="%d" class="label">%s</text>
   <text x="%d" y="%d" class="label">%.1f</text>
 `,
 				x, y, barW/2, barH,
 				x+barW/4, margin+chartH+20, labels[i],
-				x+barW/4, y-5, v))
+				x+barW/4, y-5, v)
 		}
 	case "line":
 		points := make([]string, len(values))
@@ -353,20 +353,20 @@ func generateChartSVG(
 			y := margin + chartH - int(float64(chartH)*v/maxVal)
 			points[i] = fmt.Sprintf("%d,%d", x, y)
 		}
-		sb.WriteString(fmt.Sprintf(
+		fmt.Fprintf(&sb,
 			`  <polyline points="%s" fill="none" stroke="#4A90D9" stroke-width="2"/>
-`, strings.Join(points, " ")))
+`, strings.Join(points, " "))
 		for i, v := range values {
 			x := margin + i*barW + barW/2
 			y := margin + chartH - int(float64(chartH)*v/maxVal)
-			sb.WriteString(fmt.Sprintf(
+			fmt.Fprintf(&sb,
 				`  <circle cx="%d" cy="%d" r="4" fill="#4A90D9"/>
   <text x="%d" y="%d" class="label">%s</text>
   <text x="%d" y="%d" class="label">%.1f</text>
 `,
 				x, y,
 				x, margin+chartH+20, labels[i],
-				x, y-10, v))
+				x, y-10, v)
 		}
 	case "pie":
 		cx := float64(width) / 2.0
@@ -403,9 +403,9 @@ func generateChartSVG(
 				largeArc = 1
 			}
 
-			sb.WriteString(fmt.Sprintf(
+			fmt.Fprintf(&sb,
 				`  <path d="M%.1f,%.1f L%.1f,%.1f A%.1f,%.1f 0 %d,1 %.1f,%.1f Z" fill="%s" stroke="#fff" stroke-width="1"/>`+"\n",
-				cx, cy, x1, y1, r, r, largeArc, x2, y2, color))
+				cx, cy, x1, y1, r, r, largeArc, x2, y2, color)
 
 			// Label at the mid-angle of the slice
 			midAngle := (startAngle + endAngle) / 2.0
@@ -414,9 +414,9 @@ func generateChartSVG(
 			lx := cx + labelR*math.Cos(midRad)
 			ly := cy + labelR*math.Sin(midRad)
 			pct := v / total * 100
-			sb.WriteString(fmt.Sprintf(
+			fmt.Fprintf(&sb,
 				`  <text x="%.1f" y="%.1f" class="label" fill="#fff" font-size="11">%.0f%%</text>`+"\n",
-				lx, ly+4, pct))
+				lx, ly+4, pct)
 
 			startAngle = endAngle
 		}
@@ -424,25 +424,25 @@ func generateChartSVG(
 		for i, label := range labels {
 			legendY := cy + r + 20.0 + float64(15*i)
 			color := colors[i%len(colors)]
-			sb.WriteString(fmt.Sprintf(
+			fmt.Fprintf(&sb,
 				`  <rect x="%.1f" y="%.1f" width="10" height="10" fill="%s"/>`+"\n",
-				cx-r, legendY-9, color))
-			sb.WriteString(fmt.Sprintf(
+				cx-r, legendY-9, color)
+			fmt.Fprintf(&sb,
 				`  <text x="%.1f" y="%.1f" class="label">%s: %.1f</text>`+"\n",
-				cx-r+14, legendY, label, values[i]))
+				cx-r+14, legendY, label, values[i])
 		}
 	case "scatter":
 		for i, v := range values {
 			x := margin + i*barW + barW/2
 			y := margin + chartH - int(float64(chartH)*v/maxVal)
 			r := 5
-			sb.WriteString(fmt.Sprintf(
+			fmt.Fprintf(&sb,
 				`  <circle cx="%d" cy="%d" r="%d" fill="#FF6B6B" opacity="0.7"/>`+"\n",
-				x, y, r))
+				x, y, r)
 			if len(labels) > i {
-				sb.WriteString(fmt.Sprintf(
+				fmt.Fprintf(&sb,
 					`  <text x="%d" y="%d" class="label">%s</text>`+"\n",
-					x, margin+chartH+20, labels[i]))
+					x, margin+chartH+20, labels[i])
 			}
 		}
 	case "flow":
@@ -459,17 +459,17 @@ func generateChartSVG(
 				"#9B59B6", "#E67E22", "#1ABC9C", "#E74C3C",
 			}
 			color := colors[i%len(colors)]
-			sb.WriteString(fmt.Sprintf(
+			fmt.Fprintf(&sb,
 				`  <rect x="%d" y="%d" width="%d" height="%d" fill="%s" rx="4" opacity="0.8"/>`+"\n",
-				margin, y, bandW, bandH/2, color))
-			sb.WriteString(fmt.Sprintf(
+				margin, y, bandW, bandH/2, color)
+			fmt.Fprintf(&sb,
 				`  <text x="%d" y="%d" class="label" text-anchor="end">%s: %.1f</text>`+"\n",
-				margin+bandW-5, y+bandH/4+4, labels[i], v))
+				margin+bandW-5, y+bandH/4+4, labels[i], v)
 		}
 	default:
-		sb.WriteString(fmt.Sprintf(
+		fmt.Fprintf(&sb,
 			`  <text x="%d" y="%d" class="label">Chart type "%s" not fully supported yet</text>
-`, width/2, height/2, chartType))
+`, width/2, height/2, chartType)
 	}
 
 	sb.WriteString("\n</svg>")
@@ -540,13 +540,13 @@ func generateTableHTML(
 	sb.WriteString(title)
 	sb.WriteString("</h1>\n  <table>\n    <thead><tr>")
 	for _, h := range headers {
-		sb.WriteString(fmt.Sprintf("<th>%s</th>", h))
+		fmt.Fprintf(&sb, "<th>%s</th>", h)
 	}
 	sb.WriteString("</tr></thead>\n    <tbody>\n")
 	for _, row := range rows {
 		sb.WriteString("      <tr>")
 		for _, cell := range row {
-			sb.WriteString(fmt.Sprintf("<td>%s</td>", cell))
+			fmt.Fprintf(&sb, "<td>%s</td>", cell)
 		}
 		sb.WriteString("</tr>\n")
 	}

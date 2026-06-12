@@ -29,6 +29,12 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/memory"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/planner/builtin"
+	"trpc.group/trpc-go/trpc-agent-go/planner/react"
+	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail"
+	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/promptinjection"
+	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/promptinjection/review"
+	"trpc.group/trpc-go/trpc-agent-go/plugin/toolsearch"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
@@ -71,6 +77,15 @@ type CoreLoopConfig struct {
 	// TelemetryShutdown is called when the CoreLoop closes to flush
 	// and shut down the OpenTelemetry tracer provider.
 	TelemetryShutdown func(context.Context) error
+	// MemoryClose is called when the CoreLoop closes to stop memory
+	// auto-extraction workers. The shared database connection is NOT
+	// closed here — it is managed by DatabasePool.
+	MemoryClose func() error
+	// DBPoolClose is called when the CoreLoop closes to properly
+	// close the shared database pool after all services have shut
+	// down their workers. This ensures all pending writes are flushed
+	// and WAL is checkpointed before the process exits.
+	DBPoolClose func() error
 }
 
 // NewCoreLoop creates a new agent core loop.
@@ -101,14 +116,12 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 		}
 	} else {
 		// Standard single LLMAgent (existing behavior)
-		ag = createSingleAgent(cfg, allTools)
-	}
-
-	if ag == nil {
-		return nil, fmt.Errorf(
-			"failed to create agent (workflow mode: %s)",
-			workflowMode,
-		)
+		var singleErr error
+		ag, singleErr = createSingleAgent(cfg, allTools)
+		if singleErr != nil {
+			return nil, fmt.Errorf(
+				"create single agent: %w", singleErr)
+		}
 	}
 
 	// Create runner with session, memory, and artifact services
@@ -127,6 +140,71 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 		runnerOpts = append(runnerOpts,
 			runner.WithArtifactService(cfg.ArtifactService),
 		)
+	}
+
+	// Configure Tool Search plugin for automatic tool filtering.
+	// When enabled, the toolsearch plugin compresses the candidate
+	// tool list (TopK) before each model call to reduce token cost.
+	// This is registered at runner level so it applies to all agents.
+	if cfg.Config.Agent.ToolSearchEnabled {
+		mdl, err := cfg.Factory.CreateDefaultModel()
+		if err == nil {
+			maxTools := cfg.Config.Agent.ToolSearchMaxTools
+			if maxTools <= 0 {
+				maxTools = 20
+			}
+			ts, tsErr := toolsearch.New(mdl,
+				toolsearch.WithMaxTools(maxTools),
+				toolsearch.WithFailOpen(),
+			)
+			if tsErr != nil {
+				util.Logger.Warn(
+					"toolsearch creation failed, continuing without auto tool filtering",
+					slog.String("error", tsErr.Error()),
+				)
+			} else {
+				runnerOpts = append(runnerOpts,
+					runner.WithPlugins(ts),
+				)
+				util.Logger.Info("toolsearch plugin enabled",
+					slog.Int("max_tools", maxTools),
+				)
+			}
+		}
+	}
+
+	// Configure Prompt Injection guardrail.
+	// When enabled, user inputs are reviewed for injection attempts
+	// before being passed to the agent. This creates a lightweight
+	// agent+runner for the reviewer, separate from the main agent.
+	if cfg.Config.Security.GuardrailEnabled {
+		guardModel, gErr := cfg.Factory.CreateDefaultModel()
+		if gErr == nil && guardModel != nil {
+			guardRunner, grErr := createGuardrailRunner(
+				guardModel, cfg.Config,
+			)
+			if grErr == nil {
+				piReviewer, rErr := review.New(guardRunner)
+				if rErr == nil {
+					piPlugin, pErr := promptinjection.New(
+						promptinjection.WithReviewer(piReviewer),
+					)
+					if pErr == nil {
+						grPlugin, gErr2 := guardrail.New(
+							guardrail.WithPromptInjection(piPlugin),
+						)
+						if gErr2 == nil {
+							runnerOpts = append(runnerOpts,
+								runner.WithPlugins(grPlugin),
+							)
+							util.Logger.Info(
+								"guardrail plugin enabled (prompt injection detection)",
+							)
+						}
+					}
+				}
+			}
+		}
 	}
 
 	r := runner.NewRunner("wukong-app", ag, runnerOpts...)
@@ -159,19 +237,43 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 		recallStore: cfg.RecallStore,
 		closeFn: func() error {
 			var errs []error
+			// 1. Close memory service first — stops auto-extract
+			//    workers and flushes pending memory writes to DB.
+			if cfg.MemoryClose != nil {
+				if err := cfg.MemoryClose(); err != nil {
+					errs = append(errs, err)
+				}
+			}
+			// 2. Close runner — stops active runs and owned resources.
 			if err := r.Close(); err != nil {
 				errs = append(errs, err)
 			}
+			// 3. Close session service — stops summary workers,
+			//    closes channels, releases session-level resources.
 			if cfg.SessionService != nil {
-				if closer, ok := interface{}(cfg.SessionService).(interface{ Close() error }); ok {
+				if closer, ok := any(cfg.SessionService).(interface{ Close() error }); ok {
 					if err := closer.Close(); err != nil {
 						errs = append(errs, err)
 					}
 				}
 			}
-			// Flush and shut down telemetry
+			// 4. Flush and shut down telemetry.
 			if cfg.TelemetryShutdown != nil {
 				if err := cfg.TelemetryShutdown(context.Background()); err != nil {
+					errs = append(errs, err)
+				}
+			}
+			// 5. Close the shared database pool LAST — after all
+			//    services have stopped their workers and flushed
+			//    their writes. This ensures no pending transactions
+			//    are lost and the WAL is properly checkpointed.
+			//
+			//    A brief delay allows any in-flight auto-memory
+			//    extraction jobs to finish writing before the DB
+			//    connection is closed.
+			time.Sleep(100 * time.Millisecond)
+			if cfg.DBPoolClose != nil {
+				if err := cfg.DBPoolClose(); err != nil {
 					errs = append(errs, err)
 				}
 			}
@@ -229,7 +331,13 @@ func (l *CoreLoop) Run(
 		})
 	}
 
-	events, err := l.runner.Run(ctx, userID, sessionID, message)
+	runOpts := []agent.RunOption{}
+	if l.cfg.Agent.JSONRepairEnabled {
+		runOpts = append(runOpts,
+			agent.WithToolCallArgumentsJSONRepairEnabled(true),
+		)
+	}
+	events, err := l.runner.Run(ctx, userID, sessionID, message, runOpts...)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		span.RecordError(err)
@@ -267,6 +375,7 @@ func (l *CoreLoop) RunStream(
 	}
 
 	var responseText string
+	var textBuilder strings.Builder
 	var allEvents []event.Event
 	toolCallCount := 0
 	var eventCount int
@@ -295,7 +404,7 @@ func (l *CoreLoop) RunStream(
 		if evt.Response != nil && len(evt.Response.Choices) > 0 {
 			choice := evt.Response.Choices[0]
 			if choice.Delta.Content != "" {
-				responseText += choice.Delta.Content
+				textBuilder.WriteString(choice.Delta.Content)
 			}
 			// Count tool calls in this response
 			toolCallCount += len(choice.Message.ToolCalls)
@@ -306,11 +415,14 @@ func (l *CoreLoop) RunStream(
 			// Extract final result from state delta if available
 			if evt.StateDelta != nil {
 				if lastResp, ok := evt.StateDelta["last_response"]; ok {
-					responseText = string(lastResp)
+					textBuilder.Reset()
+					textBuilder.WriteString(string(lastResp))
 				}
 			}
 		}
 	}
+
+	responseText = textBuilder.String()
 
 	// Add metrics attributes to span
 	span.SetAttributes(
@@ -412,17 +524,14 @@ func NewSimpleLLMAgent(
 // configured options. This preserves the original agent creation logic.
 func createSingleAgent(
 	cfg CoreLoopConfig, allTools []tool.Tool,
-) agent.Agent {
+) (agent.Agent, error) {
 	mdl, err := cfg.Factory.CreateDefaultModel()
 	if err != nil {
-		util.Logger.Warn("failed to create default model",
-			"error", err.Error())
-		return nil
+		return nil, fmt.Errorf("create default model: %w", err)
 	}
 	if mdl == nil {
-		util.Logger.Warn(
+		return nil, fmt.Errorf(
 			"default model is nil, agent cannot be created")
-		return nil
 	}
 
 	genConfig := provider.GetDefaultGenerationConfig(&cfg.Config.Agent)
@@ -445,6 +554,15 @@ func createSingleAgent(
 		llmagent.WithAddCurrentTime(true),
 		llmagent.WithTimeFormat(time.RFC3339),
 	}
+
+	// Preload user memories into system prompt so the agent
+	// automatically knows about stored preferences and facts
+	// at the start of each conversation turn. With a budget of 10,
+	// small memory sets are loaded in full; larger sets use
+	// search-based retrieval. This is critical for memory to work.
+	agentOpts = append(agentOpts,
+		llmagent.WithPreloadMemory(10),
+	)
 
 	if len(allTools) > 0 {
 		agentOpts = append(agentOpts,
@@ -488,6 +606,42 @@ func createSingleAgent(
 			llmagent.WithEnablePostToolPrompt(true),
 		)
 	}
+	if cfg.Config.Agent.ContextCompaction {
+		agentOpts = append(agentOpts,
+			llmagent.WithEnableContextCompaction(true),
+		)
+	}
+
+	// Session recall: inject previous session context
+	// into the system prompt for cross-session awareness.
+	if cfg.Config.Agent.SessionRecallEnabled {
+		limit := cfg.Config.Agent.SessionRecallLimit
+		if limit <= 0 {
+			limit = 5
+		}
+		agentOpts = append(agentOpts,
+			llmagent.WithPreloadSessionRecall(limit),
+		)
+	}
+
+	// Configure Planner for structured planning and reasoning.
+	// BuiltinPlanner: for models with native thinking (Claude, Gemini)
+	// ReActPlanner: for models without thinking (legacy OpenAI, local models)
+	switch cfg.Config.Agent.Planner {
+	case "builtin":
+		plannerOpts := builtin.Options{}
+		if cfg.Config.Agent.ReasoningEffort != "" {
+			effort := cfg.Config.Agent.ReasoningEffort
+			plannerOpts.ReasoningEffort = &effort
+		}
+		plannerOpts.ThinkingEnabled = cfg.Config.Agent.ThinkingEnabled
+		plannerOpts.ThinkingTokens = cfg.Config.Agent.ThinkingTokens
+		planner := builtin.New(plannerOpts)
+		agentOpts = append(agentOpts, llmagent.WithPlanner(planner))
+	case "react":
+		planner := react.New()
+		agentOpts = append(agentOpts, llmagent.WithPlanner(planner))
+	}
 
 	agentCallbacks := buildAgentCallbacks(cfg.Config)
 	if agentCallbacks != nil {
@@ -508,7 +662,7 @@ func createSingleAgent(
 		)
 	}
 
-	return llmagent.New("wukong", agentOpts...)
+	return llmagent.New("wukong", agentOpts...), nil
 }
 
 // buildSystemInstruction builds the complete system instruction.
@@ -519,6 +673,9 @@ func buildSystemInstruction(
 	cfg *config.WukongConfig,
 	topOfMind string,
 ) string {
+	// cfg is reserved for future config-driven instruction customization.
+	_ = cfg
+
 	base := "You are Wukong, a helpful and capable AI agent. " +
 		"You have access to various tools that let you " +
 		"interact with the user's system. " +
@@ -531,7 +688,9 @@ func buildSystemInstruction(
 		"When executing commands, check their output carefully.\n\n" +
 
 		// Memory guidance
-		"You have access to memory tools " +
+		"Your memory about the user is automatically loaded " +
+		"into this prompt at the start of each conversation. " +
+		"You also have memory tools " +
 		"(memory_add, memory_search, memory_update, " +
 		"memory_delete, memory_load, memory_clear). " +
 		"Use them proactively to remember important user " +
@@ -539,8 +698,6 @@ func buildSystemInstruction(
 		"sessions. When the user tells you something about " +
 		"themselves (preferences, name, goals, projects, " +
 		"constraints), store it with memory_add. " +
-		"At the start of each conversation, use memory_load " +
-		"to recall what you already know about the user. " +
 		"Search with memory_search when you need to find " +
 		"specific remembered information."
 
@@ -703,7 +860,7 @@ func isCommandTool(toolName string) bool {
 // extractCommandFromArgs extracts a command string from tool arguments JSON.
 func extractCommandFromArgs(args []byte) string {
 	// Try to extract common command field names from JSON
-	var data map[string]interface{}
+	var data map[string]any
 	if err := json.Unmarshal(args, &data); err != nil {
 		return ""
 	}
@@ -761,4 +918,25 @@ func buildModelCallbacks() *model.Callbacks {
 		},
 	)
 	return callbacks
+}
+
+// createGuardrailRunner creates a minimal runner for the prompt
+// injection guardrail reviewer.
+func createGuardrailRunner(
+	mdl model.Model,
+	cfg *config.WukongConfig,
+) (runner.Runner, error) {
+	_ = cfg
+	reviewAgent := llmagent.New("guardrail-reviewer",
+		llmagent.WithModel(mdl),
+		llmagent.WithGenerationConfig(model.GenerationConfig{
+			MaxTokens:   intPtr(256),
+			Temperature: float64Ptr(0.0),
+			Stream:      false,
+		}),
+		llmagent.WithMaxLLMCalls(1),
+	)
+	return runner.NewRunner(
+		"wukong-guardrail", reviewAgent,
+	), nil
 }

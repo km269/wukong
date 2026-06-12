@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/km269/wukong/internal/config"
 )
 
@@ -115,3 +117,48 @@ func expandEnvVar(s string) string {
 // envLookup looks up an environment variable.
 // Uses os.LookupEnv for actual environment variable resolution.
 var envLookup = os.LookupEnv
+
+// ParseDeeplink is the public wrapper around parseDeeplink.
+func ParseDeeplink(rawURL string) (config.ExtensionConfig, error) {
+	return parseDeeplink(rawURL)
+}
+
+// ConfigToDeeplink converts an ExtensionConfig back to a deeplink URL
+// for registration via the extension manager.
+func ConfigToDeeplink(ext config.ExtensionConfig) string {
+	q := url.Values{}
+	q.Set("name", ext.Name)
+	q.Set("type", ext.Type)
+	if ext.Transport != "" {
+		q.Set("transport", ext.Transport)
+	}
+	if ext.Command != "" {
+		q.Set("command", ext.Command)
+	}
+	for _, arg := range ext.Args {
+		q.Add("args", arg)
+	}
+	if ext.URL != "" {
+		q.Set("url", ext.URL)
+	}
+	for k, v := range ext.Env {
+		q.Set("env."+k, v)
+	}
+	return "wukong://extension?" + q.Encode()
+}
+
+// extensionsFile represents the top-level structure of an
+// extensions YAML config file.
+type extensionsFile struct {
+	Extensions []config.ExtensionConfig `yaml:"extensions"`
+}
+
+// ParseExtensionsYAML parses a YAML file containing extension
+// configurations.
+func ParseExtensionsYAML(data []byte) ([]config.ExtensionConfig, error) {
+	var f extensionsFile
+	if err := yaml.Unmarshal(data, &f); err != nil {
+		return nil, fmt.Errorf("unmarshal extensions YAML: %w", err)
+	}
+	return f.Extensions, nil
+}

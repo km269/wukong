@@ -40,7 +40,7 @@ func NewMemoryToolSet(cfg *config.WukongConfig) *MemoryToolSet {
 // The svc parameter is interface{} for loose coupling with the
 // extension manager; it must be a memory.Service.
 func (ts *MemoryToolSet) SetMemoryService(
-	svc interface{}, appName, userID string,
+	svc any, appName, userID string,
 ) {
 	memSvc, ok := svc.(memory.Service)
 	if !ok {

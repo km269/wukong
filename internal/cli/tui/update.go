@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -75,10 +76,18 @@ func (m *Model) sendMessage(input string) tea.Cmd {
 			ctx, m.userID, m.sessionID, msg,
 		)
 		if err != nil {
-			streamCh <- streamEvent{
-				IsEnd:   true,
-				Content: "",
+			errMsg := err.Error()
+			// Provide user-friendly messages for common errors
+			if strings.Contains(errMsg, "context deadline exceeded") {
+				errMsg = "Request timed out — the model took too long to respond"
+			} else if strings.Contains(errMsg, "connectex") ||
+				strings.Contains(errMsg, "connection refused") {
+				errMsg = "Cannot connect to model — check network/provider"
 			}
+			streamCh <- streamEvent{
+				Err: "[Error: " + errMsg + "]\n",
+			}
+			streamCh <- streamEvent{IsEnd: true}
 			return
 		}
 

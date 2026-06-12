@@ -4,8 +4,10 @@
 package recall
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -32,11 +34,19 @@ type SearchResult struct {
 	Preview     string      `json:"preview"`
 }
 
+// Embedder defines the interface for generating text embeddings.
+// This allows recall to support semantic search via any embedder
+// implementation (OpenAI, Ollama, local models, etc.).
+type Embedder interface {
+	Embed(ctx context.Context, texts []string) ([][]float64, error)
+}
+
 // Store manages persistent storage for chat recall.
 type Store struct {
-	db   *sql.DB
-	pool *util.DatabasePool
-	cfg  *config.RecallConfig
+	db       *sql.DB
+	pool     *util.DatabasePool
+	cfg      *config.RecallConfig
+	embedder Embedder
 }
 
 // NewStore creates a new recall store using a shared database pool.
@@ -163,10 +173,10 @@ func (s *Store) searchLike(
 	rows, err := s.db.Query(
 		`SELECT id, session_id, user_id, role, content, created_at
 		 FROM chat_recall
-		 WHERE LOWER(content) LIKE ?
+		 WHERE user_id = ? AND LOWER(content) LIKE ?
 		 ORDER BY created_at DESC
 		 LIMIT ?`,
-		searchTerm, limit,
+		userID, searchTerm, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("search: %w", err)
@@ -347,6 +357,117 @@ func (s *Store) DeleteSession(sessionID string) error {
 		sessionID,
 	)
 	return err
+}
+
+// SetEmbedder configures an embedder for hybrid/semantic search.
+// When set and search_mode is "hybrid", search results from FTS5
+// are re-ranked using embedding cosine similarity for better
+// semantic matching. Set to nil to disable hybrid search.
+func (s *Store) SetEmbedder(e Embedder) {
+	s.embedder = e
+}
+
+// HasHybridSearch returns true when both hybrid mode is configured
+// and an embedder is available.
+func (s *Store) HasHybridSearch() bool {
+	return s.cfg.SearchMode == "hybrid" && s.embedder != nil
+}
+
+// SearchHybrid performs a hybrid search: FTS5 retrieval followed
+// by embedding-based semantic re-ranking. Returns the top-K results
+// ranked by combined score (BM25 + cosine similarity).
+func (s *Store) SearchHybrid(
+	ctx context.Context,
+	query, userID string, limit int,
+) ([]SearchResult, error) {
+	if s.embedder == nil {
+		return s.Search(query, userID, limit)
+	}
+
+	// Step 1: Retrieve candidates via FTS5 (wider pool for re-ranking)
+	const fts5Pool = 50
+	ftsResults, err := s.Search(query, userID, fts5Pool)
+	if err != nil {
+		return nil, fmt.Errorf("fts5 retrieval: %w", err)
+	}
+	if len(ftsResults) == 0 {
+		return nil, nil
+	}
+
+	// Step 2: Embed the query
+	queryVecs, err := s.embedder.Embed(ctx, []string{query})
+	if err != nil {
+		// Fall back to FTS5-only on embedder failure
+		if limit < len(ftsResults) {
+			return ftsResults[:limit], nil
+		}
+		return ftsResults, nil
+	}
+	if len(queryVecs) == 0 || len(queryVecs[0]) == 0 {
+		return ftsResults[:min(limit, len(ftsResults))], nil
+	}
+	queryVec := queryVecs[0]
+
+	// Step 3: Embed candidates and compute cosine similarity
+	type scoredResult struct {
+		result SearchResult
+		score  float64
+	}
+	var hybrid []scoredResult
+	for i, r := range ftsResults {
+		text := r.Message.Content
+		if len(text) > 500 {
+			text = text[:500]
+		}
+		candVecs, err := s.embedder.Embed(ctx, []string{text})
+		if err != nil {
+			continue
+		}
+		if len(candVecs) == 0 || len(candVecs[0]) == 0 {
+			continue
+		}
+		sim := cosineSimilarity(queryVec, candVecs[0])
+		// Combined score: 70% semantic + 30% BM25 (normalized)
+		combined := sim*0.7 + (1.0/float64(i+1))*0.3
+		r.Score = combined
+		hybrid = append(hybrid, scoredResult{result: r, score: combined})
+	}
+
+	// Step 4: Sort by combined score descending
+	for i := 0; i < len(hybrid)-1; i++ {
+		for j := i + 1; j < len(hybrid); j++ {
+			if hybrid[j].score > hybrid[i].score {
+				hybrid[i], hybrid[j] = hybrid[j], hybrid[i]
+			}
+		}
+	}
+
+	// Step 5: Return top-K
+	results := make([]SearchResult, 0, limit)
+	for i, sr := range hybrid {
+		if i >= limit {
+			break
+		}
+		results = append(results, sr.result)
+	}
+	return results, nil
+}
+
+// cosineSimilarity computes the cosine similarity between two vectors.
+func cosineSimilarity(a, b []float64) float64 {
+	if len(a) != len(b) || len(a) == 0 {
+		return 0
+	}
+	var dot, normA, normB float64
+	for i := range a {
+		dot += a[i] * b[i]
+		normA += a[i] * a[i]
+		normB += b[i] * b[i]
+	}
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }
 
 // Close closes the database connection.

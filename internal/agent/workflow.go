@@ -124,6 +124,13 @@ func (b *WorkflowBuilder) buildSingleAgent() (agent.Agent, error) {
 		opts = append(opts,
 			llmagent.WithEnableParallelTools(true))
 	}
+	if b.cfg.Agent.ContextCompaction {
+		opts = append(opts,
+			llmagent.WithEnableContextCompaction(true),
+		)
+	}
+	// Preload memory for cross-session awareness
+	opts = append(opts, llmagent.WithPreloadMemory(10))
 
 	return llmagent.New("wukong-single", opts...), nil
 }
@@ -296,46 +303,101 @@ func (b *WorkflowBuilder) buildParallelAgent(
 
 // buildCycleAgent creates a CycleAgent that runs a loop until
 // escalation or max iterations.
+//
+// Built-in cycle modes:
+//   - "default": planner → executor loop
+//   - "code_review": code_generator → code_reviewer → modify loop
+//
+// The code_review cycle is particularly useful for autonomous code
+// improvement: the generator writes code, the reviewer finds issues,
+// and the generator fixes them until the reviewer approves.
 func (b *WorkflowBuilder) buildCycleAgent(
 	wfCfg *OrchestrationConfig,
 ) (agent.Agent, error) {
-	planner := b.createSpecializedAgent(
-		"cycle-planner",
-		"You are a planning agent in a cycle workflow. "+
-			"Each iteration, assess the current state and "+
-			"decide the next action. If the task is complete, "+
-			"respond with 'TASK_COMPLETE'.",
-	)
-	executor := b.createSpecializedAgent(
-		"cycle-executor",
-		"You are an execution agent in a cycle workflow. "+
-			"Execute the planned action using available tools. "+
-			"Report the result clearly.",
-	)
+	// Determine cycle mode from config
+	mode := b.cfg.Workflow.CycleMode
+	if mode == "" {
+		mode = "default"
+	}
 
-	subAgents := []agent.Agent{planner, executor}
-	maxIter := wfCfg.MaxIterations
-	if maxIter <= 0 {
-		maxIter = 10
+	var subAgents []agent.Agent
+	var maxIter int
+	var escalationFn func(evt *event.Event) bool
+
+	switch mode {
+	case "code_review":
+		generator := b.createSpecializedAgent(
+			"code-generator",
+			"You are an expert code generator. "+
+				"Write clean, correct, well-documented code "+
+				"that meets the requirements. "+
+				"Use available tools to create and modify files. "+
+				"After writing code, respond with a summary "+
+				"of what you created.",
+		)
+		reviewer := b.createSpecializedAgent(
+			"code-reviewer",
+			"You are a strict code reviewer. "+
+				"Examine the generated code for: "+
+				"correctness, edge cases, security issues, "+
+				"performance problems, style violations, "+
+				"and missing error handling. "+
+				"Be specific about what needs to change and why. "+
+				"If the code is already perfect, respond with "+
+				"'CODE_APPROVED'. Otherwise, list specific "+
+				"improvements needed.",
+		)
+		subAgents = []agent.Agent{generator, reviewer}
+		maxIter = wfCfg.MaxIterations
+		if maxIter <= 0 {
+			maxIter = 5
+		}
+		escalationFn = func(evt *event.Event) bool {
+			if evt.Response != nil &&
+				len(evt.Response.Choices) > 0 {
+				content := evt.Response.Choices[0].
+					Message.Content
+				return containsKeyword(content, "CODE_APPROVED")
+			}
+			return false
+		}
+
+	default:
+		planner := b.createSpecializedAgent(
+			"cycle-planner",
+			"You are a planning agent in a cycle workflow. "+
+				"Each iteration, assess the current state and "+
+				"decide the next action. If the task is complete, "+
+				"respond with 'TASK_COMPLETE'.",
+		)
+		executor := b.createSpecializedAgent(
+			"cycle-executor",
+			"You are an execution agent in a cycle workflow. "+
+				"Execute the planned action using available tools. "+
+				"Report the result clearly.",
+		)
+		subAgents = []agent.Agent{planner, executor}
+		maxIter = wfCfg.MaxIterations
+		if maxIter <= 0 {
+			maxIter = 10
+		}
+		escalationFn = func(evt *event.Event) bool {
+			if evt.Response != nil &&
+				len(evt.Response.Choices) > 0 {
+				content := evt.Response.Choices[0].
+					Message.Content
+				return containsKeyword(
+					content, "TASK_COMPLETE",
+				)
+			}
+			return false
+		}
 	}
 
 	return cycleagent.New("wukong-cycle",
 		cycleagent.WithSubAgents(subAgents),
 		cycleagent.WithMaxIterations(maxIter),
-		cycleagent.WithEscalationFunc(
-			func(evt *event.Event) bool {
-				// Escalate when TASK_COMPLETE is detected
-				if evt.Response != nil &&
-					len(evt.Response.Choices) > 0 {
-					content := evt.Response.Choices[0].
-						Message.Content
-					return containsKeyword(
-						content, "TASK_COMPLETE",
-					)
-				}
-				return false
-			},
-		),
+		cycleagent.WithEscalationFunc(escalationFn),
 	), nil
 }
 
@@ -465,6 +527,11 @@ func (b *WorkflowBuilder) createSpecializedAgent(
 	if len(b.toolSets) > 0 {
 		opts = append(opts, llmagent.WithToolSets(b.toolSets))
 	}
+	if b.cfg.Agent.ContextCompaction {
+		opts = append(opts,
+			llmagent.WithEnableContextCompaction(true),
+		)
+	}
 
 	return llmagent.New(name, opts...)
 }
@@ -472,6 +539,9 @@ func (b *WorkflowBuilder) createSpecializedAgent(
 // containsKeyword checks if a string contains a keyword
 // (case-insensitive).
 func containsKeyword(s, keyword string) bool {
+	if keyword == "" {
+		return false
+	}
 	if len(keyword) > len(s) {
 		return false
 	}

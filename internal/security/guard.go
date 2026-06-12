@@ -81,20 +81,21 @@ func (g *Guard) CheckToolPermission(
 		)
 	}
 
-	// Check denylist first
+	// Check denylist first (case-insensitive)
+	toolLower := strings.ToLower(toolName)
 	for _, blocked := range g.cfg.Denylist {
-		if blocked == toolName || blocked == "*" {
+		if strings.ToLower(blocked) == toolLower || blocked == "*" {
 			return fmt.Errorf(
 				"tool %q is in the denylist", toolName,
 			)
 		}
 	}
 
-	// Check allowlist if configured
+	// Check allowlist if configured (case-insensitive)
 	if len(g.cfg.Allowlist) > 0 {
 		allowed := false
 		for _, a := range g.cfg.Allowlist {
-			if a == toolName || a == "*" {
+			if strings.ToLower(a) == toolLower || a == "*" {
 				allowed = true
 				break
 			}
@@ -153,25 +154,26 @@ func (g *Guard) NeedsApproval(toolName string, argsJSON []byte) bool {
 // isHighRiskOperation determines if a tool call is high-risk and
 // should require user approval in smart mode.
 func (g *Guard) isHighRiskOperation(toolName string, argsJSON []byte) bool {
-	// High-risk tool categories
+	// High-risk tool categories (case-insensitive).
+	toolLower := strings.ToLower(toolName)
 	highRiskTools := map[string]bool{
-		"bash":              true,
-		"execute_command":   true,
-		"run_command":       true,
-		"shell":             true,
-		"terminal":          true,
-		"command":           true,
-		"command_execute":   true,
-		"file_write":        true,
-		"file_replace":      true,
-		"file_delete":       true,
-		"browser_navigate":  true,
+		"bash":               true,
+		"execute_command":    true,
+		"run_command":        true,
+		"shell":              true,
+		"terminal":           true,
+		"command":            true,
+		"command_execute":    true,
+		"file_write":         true,
+		"file_replace":       true,
+		"file_delete":        true,
+		"browser_navigate":   true,
 		"browser_screenshot": true,
-		"apps_create":       true,
-		"apps_deploy":       true,
+		"apps_create":        true,
+		"apps_deploy":        true,
 	}
 
-	if highRiskTools[toolName] {
+	if highRiskTools[toolLower] {
 		// For command tools, check the actual command content
 		if isCommandTool(toolName) && len(argsJSON) > 0 {
 			cmd := extractCommandFromArgs(argsJSON)
@@ -441,7 +443,7 @@ func isCommandTool(toolName string) bool {
 
 // extractCommandFromArgs extracts a command string from tool arguments JSON.
 func extractCommandFromArgs(args []byte) string {
-	var data map[string]interface{}
+	var data map[string]any
 	if err := json.Unmarshal(args, &data); err != nil {
 		return ""
 	}

@@ -48,6 +48,16 @@ func RegisterBuiltins(cfg *config.WukongConfig) {
 			Type:    "builtin",
 			Enabled: cfg.Apps.Enabled,
 		},
+		{
+			Name:    "web",
+			Type:    "builtin",
+			Enabled: true,
+		},
+		{
+			Name:    "agent_tools",
+			Type:    "builtin",
+			Enabled: true,
+		},
 	}
 
 	existing := make(map[string]bool)

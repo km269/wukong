@@ -1,315 +1,327 @@
-# Wukong AI Agent Configuration
-# Place this file at ~/.config/wukong/config.yaml or specify via --config flag.
+# =============================================================================
+# Wukong Configuration
+# =============================================================================
+# 加载优先级（从高到低）:
+#   1. 环境变量 (WUKONG_ 前缀, 如 WUKONG_DEFAULT_PROVIDER)
+#   2. 命令行参数 (--config)
+#   3. 当前目录 ./config.yaml
+#   4. ~/.config/wukong/config.yaml
+#   5. /etc/wukong/config.yaml
+#
+# 环境变量引用语法: ${ENV_VAR} (运行时自动展开)
+# =============================================================================
 
-# Default provider to use (must match a provider name below)
-default_provider: lmstudio
+# 日志级别: debug | info | warn | error (CLI --debug/--quiet 覆盖)
+log_level: "info"
 
-# LLM Providers
+# ---------------------------------------------------------------------------
+# Default Provider - 默认使用的 AI 提供商
+# 必须与下方 providers 列表中某个 name 匹配
+# ---------------------------------------------------------------------------
+default_provider: "lmstudio"
+
+# ---------------------------------------------------------------------------
+# Providers - AI 模型提供商列表
+# 支持类型: openai, anthropic, google, deepseek, ollama, lmstudio
+# api_key 支持 ${ENV_VAR} 语法引用环境变量
+# ---------------------------------------------------------------------------
 providers:
-  - name: openai
-    type: openai
-    base_url: https://api.openai.com/v1
-    api_key: ${OPENAI_API_KEY}
-    model: gpt-4o
-  - name: anthropic
-    type: anthropic
-    base_url: https://api.anthropic.com/v1
-    api_key: ${ANTHROPIC_API_KEY}
-    model: claude-sonnet-4-20250514
-  - name: google
-    type: google
-    base_url: https://generativelanguage.googleapis.com/v1beta/openai
-    api_key: ${GOOGLE_API_KEY}
-    model: gemini-2.5-flash
-  - name: deepseek
-    type: deepseek
-    base_url: https://api.deepseek.com/v1
-    api_key: ${DEEPSEEK_API_KEY}
-    model: deepseek-chat
-  - name: ollama
-    type: ollama
-    base_url: http://localhost:11434/v1
-    api_key: ollama
-    model: llama3
-  - name: lmstudio
-    type: lmstudio
-    base_url: http://192.168.50.97:1234/v1
-    api_key: lmstudio
-    model: google/gemma-4-26b-a4b 
+  - name: "openai"
+    type: "openai"
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "https://api.openai.com/v1"
+    model: "gpt-4o"
 
-# MCP Extensions
-extensions:
-  # Built-in developer extension (file read/write, command execution, code search)
-  - name: developer
-    type: builtin
-    enabled: true
-  # Computer Controller (web fetch, file cache, browser automation)
-  - name: computer_controller
-    type: builtin
-    enabled: true
-  # Memory extension (user preferences and knowledge)
-  - name: memory
-    type: builtin
-    enabled: true
-  # Auto Visualiser (charts, diagrams, tables)
-  - name: auto_visualiser
-    type: builtin
-    enabled: true
-  # Interactive Tutorial
-  - name: tutorial
-    type: builtin
-    enabled: true
-  # Top of Mind (persistent instruction injection)
-  - name: top_of_mind
-    type: builtin
-    enabled: true
-  # Code Mode (JavaScript code execution sandbox)
-  - name: code_mode
-    type: builtin
-    enabled: true
-  # Apps (custom HTML standalone apps)
-  - name: apps
-    type: builtin
-    enabled: true
-  # Example external MCP server via stdio
-  # - name: filesystem
-  #   type: external
-  #   transport: stdio
-  #   command: npx
-  #   args:
-  #     - -y
-  #     - "@modelcontextprotocol/server-filesystem"
-  #     - "/tmp"
-  #   enabled: false
+  - name: "deepseek"
+    type: "deepseek"
+    api_key: "${DEEPSEEK_API_KEY}"
+    base_url: "https://api.deepseek.com"
+    model: "deepseek-chat"
 
-# Session configuration
-session:
-  # Storage backend: sqlite, memory
-  backend: sqlite
-  # SQLite database path (relative to config directory)
-  db_path: wukong.db
-  # Maximum events per session
-  event_limit: 500
-  # Session TTL (0 = no expiration)
-  ttl: 0s
-  # Enable session summarization
-  enable_summary: true
-  # Summary trigger: number of events before auto-summarizing
-  summary_trigger: 50
+  - name: "anthropic"
+    type: "anthropic"
+    api_key: "${ANTHROPIC_API_KEY}"
+    base_url: "https://api.anthropic.com"
+    model: "claude-sonnet-4-20250514"
 
-# Memory configuration
-memory:
-  # Storage backend: sqlite, memory
-  backend: sqlite
-  db_path: wukong.db
-  # Maximum memories per user
-  max_memories: 100
-  # Enable auto-extract mode (recommended)
-  auto_extract: true
+  - name: "ollama"
+    type: "ollama"
+    api_key: "ollama"
+    base_url: "http://localhost:11434/v1"
+    model: "llama3"
 
-# Todo configuration
-todo:
-  # Storage backend
-  backend: sqlite
-  db_path: wukong.db
+  - name: "lmstudio"
+    type: "lmstudio"
+    api_key: "lmstudio"
+    base_url: "http://192.168.50.97:1234/v1"
+    model: "google/gemma-4-26b-a4b"
 
-# Agent configuration
+# ---------------------------------------------------------------------------
+# Agent - 核心 Agent 行为配置
+# ---------------------------------------------------------------------------
 agent:
-  # Maximum LLM calls per run (0 = unlimited)
   max_llm_calls: 50
-  # Maximum tool iterations per run
   max_tool_iterations: 30
-  # Enable parallel tool execution
   parallel_tools: true
-  # Enable streaming output
   streaming: true
-  # Maximum run duration (0 = no limit)
-  max_run_duration: 300s
-  # Model temperature (0.0-2.0, lower = more deterministic)
+  max_run_duration: "300s"
   temperature: 0.7
-  # Maximum output tokens per LLM call
   max_tokens: 4096
-  # Tool call retry on transient failures
   tool_retry_enabled: true
   tool_retry_max_attempts: 3
-  tool_retry_initial_wait: 1s
+  tool_retry_initial_wait: "1s"
   tool_retry_backoff_factor: 2.0
-  # Inject post-tool prompt to guide agent after tool results
   enable_post_tool_prompt: true
+  # Planner - 结构化规划与推理
+  # builtin: 适合支持原生 thinking 的模型 (Claude/Gemini/OpenAI o-series)
+  # react:   适合不支持原生 thinking 的模型 (通过标签引导思考)
+  # 留空:    不启用 planner
+  planner: ""
+  # reasoning_effort: "medium"  # low / medium / high (仅 builtin planner)
+  # Tool Search - 自动工具筛选，减少 token 消耗
+  tool_search_enabled: false
+  # tool_search_max_tools: 20
+  # 上下文压缩 - 自动截断过长的工具结果
+  context_compaction: false
+  # Session Recall - 跨会话上下文预加载
+  session_recall_enabled: false
+  # session_recall_limit: 5
+  # JSON Repair - 修复非标准 JSON 工具参数
+  json_repair_enabled: false
 
-# Security configuration
+# ---------------------------------------------------------------------------
+# Security - 安全策略与工具权限
+# ---------------------------------------------------------------------------
 security:
-  # Enable malware scanning for external extensions
   malware_scan_enabled: true
-  # Default tool execution timeout
-  default_timeout: 30s
-  # Maximum timeout any tool can use
-  max_timeout: 300s
-  # Block dangerous commands (e.g., rm -rf /)
+  default_timeout: "30s"
+  max_timeout: "300s"
   block_dangerous_commands: true
-  # List of blocked command patterns
   blocked_commands:
     - "rm -rf /"
     - "dd if=/dev/zero"
     - "mkfs."
     - "> /dev/sda"
     - "fork bomb"
-  # Require user approval for destructive operations (legacy flag)
   require_approval: false
-  # Permission mode: auto, manual, smart, chat_only
-  permission_mode: smart
-  # Tool allowlist (empty = all allowed except denylist)
-  # allowlist:
-  #   - "read_file"
-  #   - "search_code"
-  # Tool denylist (these tools are always blocked)
-  # denylist:
-  #   - "unsafe_tool"
+  # 权限模式: auto | smart | manual | chat_only
+  permission_mode: "smart"
+  allowlist: []
+  denylist: []
+  # Guardrail - 提示注入检测 (增加延迟)
+  guardrail_enabled: false
 
-# Context Revision configuration (Token optimization)
-revision:
-  # Enable automatic context revision
+# ---------------------------------------------------------------------------
+# Session - 会话存储配置
+# ---------------------------------------------------------------------------
+session:
+  backend: "sqlite"
+  db_path: "wukong.db"
+  event_limit: 500
+  ttl: "0h"
+  enable_summary: true
+  summary_trigger: 50
+
+# ---------------------------------------------------------------------------
+# Memory - 长期记忆存储配置
+# ---------------------------------------------------------------------------
+memory:
+  backend: "sqlite"
+  db_path: "wukong.db"
+  max_memories: 100
+  auto_extract: true
+  extract_timeout: "120s"
+  # 可选的独立记忆提取模型配置。如果不设置，使用默认 provider。
+  # 建议使用更小/更快的模型（如 deepseek-chat）来降低成本和延迟。
+  # extractor_provider: "deepseek"
+  # extractor_model: "deepseek-chat"
+  # 自定义记忆提取 prompt。如果不设置，使用框架默认的长 prompt（280+行）。
+  # 对于本地小模型（如 LMStudio/Ollama），建议启用下面的精简 prompt，
+  # 取消注释即可使用。精简 prompt 强调：原子性、去重、不含主语前缀、具体性。
+  extractor_prompt: |
+    You are a Memory Manager. Extract concise memories from the conversation.
+    Today's date is {current_date}. Resolve ALL relative time references to absolute dates.
+
+    <rules>
+    1. **Atomicity**: One fact per memory. "User likes coffee and hiking" → two memories.
+    2. **No subject prefix**: Never start with "User", "The user", etc.
+       Good: "Enjoys hiking on weekends"
+       Good: "Works as a backend engineer at Google"
+       Bad:  "User enjoys hiking on weekends"
+    3. **Deduplication**: Before adding, check existing memories. If already captured
+       (even with different wording), do NOT add again. Use memory_update to correct.
+    4. **Specificity**: Include names, dates, places, quantities.
+       Good: "Favorite coffee shop is Blue Bottle on Market St."
+       Bad:  "Likes coffee"
+    5. **Episode vs Fact**:
+       - Episode (memory_kind="episode"): Something that HAPPENED with a time.
+         Always set event_time. Use for events, trips, meetings, activities.
+       - Fact (memory_kind="fact"): Stable attribute, preference, relationship.
+         Can also have event_time if time context exists.
+    6. **All speakers**: Extract info about EVERY person in the conversation,
+       not just the primary speaker. Attribute by name.
+    7. **Skip transient**: Do not create memories for "What time is it?" or greetings.
+    </rules>
+
+    Write memory content in the same language as the user's input.
+    Call multiple tools in parallel for efficiency.
+
+# ---------------------------------------------------------------------------
+# Todo - 任务跟踪存储配置
+# ---------------------------------------------------------------------------
+todo:
+  backend: "sqlite"
+  db_path: "wukong.db"
+
+# ---------------------------------------------------------------------------
+# Recall - 跨会话对话搜索配置
+# ---------------------------------------------------------------------------
+recall:
   enabled: true
-  # Provider name for the smaller/faster revision model (empty = use default)
+  backend: "sqlite"
+  db_path: "wukong.db"
+  max_results: 10
+  max_messages_per_session: 200
+  # 搜索模式: "fts5" (默认, 全文搜索), "hybrid" (语义+全文混合)
+  # hybrid 模式需要 embedding_provider 和 embedding_model
+  search_mode: "fts5"
+  # embedding_provider: "openai"    # 用于生成 embedding 的 provider
+  # embedding_model: "text-embedding-3-small"
+
+# ---------------------------------------------------------------------------
+# Revision - 上下文窗口管理配置
+# ---------------------------------------------------------------------------
+revision:
+  enabled: true
   revision_provider: ""
-  # Model name for revision summaries (empty = use default provider's model)
   revision_model: ""
-  # Max output tokens for command execution before truncation
   max_command_output: 8000
-  # Enable semantic search for context retrieval
   enable_semantic_search: false
-  # Strategy: "include_all" or "semantic"
-  search_strategy: include_all
-  # Maximum context window tokens
+  search_strategy: "include_all"
   max_context_tokens: 64000
-  # Trim ratio (0.0-1.0) - how much to trim when exceeding max
   trim_ratio: 0.3
 
-# Browser/Computer Controller configuration
+# ---------------------------------------------------------------------------
+# Browser - 浏览器自动化配置
+# ---------------------------------------------------------------------------
 browser:
-  # Enable browser automation
   enabled: true
-  # Browser type: "chromium", "firefox", "webkit"
-  browser_type: chromium
-  # Headless mode
+  browser_type: "chromium"
   headless: true
-  # Cache directory for file downloads
-  cache_dir: .wukong_cache
-  # Max download size in bytes (100MB)
+  cache_dir: ".wukong_cache"
   max_download_size: 104857600
-  # Request timeout
-  timeout: 60s
+  timeout: "60s"
 
-# Chat Recall configuration (cross-session history search)
-recall:
-  # Enable cross-session chat recall
-  enabled: true
-  # Storage backend: sqlite, memory
-  backend: sqlite
-  # Database path
-  db_path: wukong.db
-  # Max search results
-  max_results: 10
-  # Max stored messages per session for recall
-  max_messages_per_session: 200
-
-# Auto Visualiser configuration
+# ---------------------------------------------------------------------------
+# Visualiser - 图表生成配置
+# ---------------------------------------------------------------------------
 visualiser:
-  # Enable auto visualisation
   enabled: true
-  # Output directory for generated images
-  output_dir: .wukong_visuals
-  # Max chart width in pixels
+  output_dir: ".wukong_visuals"
   max_width: 1200
-  # Max chart height in pixels
   max_height: 800
 
-# Tutorial configuration
+# ---------------------------------------------------------------------------
+# Tutorial - 交互式教程配置
+# ---------------------------------------------------------------------------
 tutorial:
-  # Enable tutorial mode
   enabled: true
-  # Tutorial language
-  language: zh
+  language: "zh"
 
-# Top of Mind configuration (persistent instruction injection)
+# ---------------------------------------------------------------------------
+# Top of Mind - 持久化指令注入配置
+# ---------------------------------------------------------------------------
 top_of_mind:
-  # Enable Top of Mind
   enabled: true
-  # File path for persistent instructions
-  instruction_file: .wukong_instructions.md
-  # Max instruction length
+  instruction_file: ".wukong_instructions.md"
   max_length: 2000
 
-# Code Mode configuration (JavaScript execution)
+# ---------------------------------------------------------------------------
+# Code Mode - JavaScript 沙箱执行配置
+# ---------------------------------------------------------------------------
 code_mode:
-  # Enable Code Mode
   enabled: true
-  # Execution timeout
-  timeout: 10s
-  # Max memory usage in MB
+  timeout: "10s"
   max_memory_mb: 128
 
-# Apps configuration (custom HTML standalone apps)
+# ---------------------------------------------------------------------------
+# Apps - 自定义 HTML 应用配置
+# ---------------------------------------------------------------------------
 apps:
-  # Enable Apps support
   enabled: true
-  # Directory for app storage
-  app_dir: .wukong_apps
+  app_dir: ".wukong_apps"
 
-# Summon configuration (sub-agent delegation)
+# ---------------------------------------------------------------------------
+# Summon - 子代理调度配置
+# ---------------------------------------------------------------------------
 summon:
-  # Enable Summon
   enabled: true
-  # Skills/recipes directory
-  skills_dir: .wukong_skills
-  # Max concurrent sub-agents
+  skills_dir: ".wukong_skills"
   max_concurrent: 5
+  a2a_remotes: []
+  # a2a_remotes 示例:
+  #   - name: "code-reviewer"
+  #     description: "Reviews code for quality and security"
+  #     server_url: "http://localhost:8081"
+  #     auth_type: "api_key"
+  #     api_key: "${A2A_API_KEY}"
 
-# Workflow configuration (multi-mode agent orchestration)
-workflow:
-  # Execution mode: single, chain, parallel, cycle, graph
-  mode: single
-  # Max iterations for cycle/graph modes
-  max_iterations: 10
-
-# Telemetry configuration (OpenTelemetry distributed tracing)
-telemetry:
-  # Enable distributed tracing
-  enabled: false
-  # Exporter type: grpc, http, console
-  exporter_type: console
-  # OTLP collector endpoint
-  endpoint: localhost:4317
-  # Service name for resource attribution
-  service_name: wukong
-  # Service version
-  service_version: "1.0.0"
-  # Deployment environment: development, staging, production
-  environment: development
-  # Sampling rate (0.0-1.0, 1.0 = all traces)
-  sample_rate: 1.0
-
-# Skill configuration (Agent Skill system)
-# NOTE: Skill uses .wukong_agent_skills (separate from summon.skills_dir)
-# to avoid conflicts. Skill expects directories with SKILL.md files,
-# while Summon expects individual .md files.
+# ---------------------------------------------------------------------------
+# Skill - Agent Skill 仓库配置
+# ---------------------------------------------------------------------------
 skill:
-  # Enable skill system
   enabled: true
-  # Skills directory for SKILL.md files (per-directory format)
-  skills_dir: .wukong_agent_skills
-  # Auto-load skills at startup
+  skills_dir: ".wukong_agent_skills"
   auto_load: true
-  # Maximum number of skills to load
   max_skills: 20
 
-# A2A Server configuration (expose agent to remote A2A clients)
+# ---------------------------------------------------------------------------
+# Workflow - 多模式 Agent 编排配置
+# ---------------------------------------------------------------------------
+workflow:
+  mode: "single"
+  max_iterations: 10
+  # cycle_mode 仅在 mode="cycle" 时生效:
+  #   "default"      - planner → executor 循环
+  #   "code_review"  - 代码生成 → 审查 → 修改循环 (适合自主编码)
+  cycle_mode: "default"
+  sub_agents: []
+
+# ---------------------------------------------------------------------------
+# A2A Server - 本地 A2A 协议服务配置
+# ---------------------------------------------------------------------------
 a2a_server:
-  # Enable A2A server
   enabled: false
-  # Listen address
   address: ":9090"
-  # Agent name exposed via A2A
-  agent_name: wukong
-  # Agent description
+  agent_name: "wukong"
   agent_description: "Wukong AI Agent - A2A service endpoint"
+
+# ---------------------------------------------------------------------------
+# Extensions - MCP 扩展配置
+# ---------------------------------------------------------------------------
+extensions: []
+# extensions 示例:
+#   - name: "filesystem"
+#     type: "external"
+#     transport: "stdio"
+#     command: "npx"
+#     args: ["-y", "@anthropic/mcp-server-filesystem", "/tmp"]
+#     enabled: true
+#     timeout: "30s"
+#     mcp_broker: false  # 设为 true 则通过 MCP Broker 按需发现工具
+#
+#   - name: "developer"
+#     type: "builtin"
+#     enabled: true
+
+# ---------------------------------------------------------------------------
+# Telemetry - 遥测/可观测性配置
+# ---------------------------------------------------------------------------
+telemetry:
+  enabled: false
+  exporter_type: "console"
+  endpoint: "localhost:4317"
+  service_name: "wukong"
+  service_version: "1.0.0"
+  environment: "development"
+  sample_rate: 1.0

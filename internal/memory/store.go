@@ -6,6 +6,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -24,9 +25,10 @@ import (
 
 // MemoryManager wraps the memory service with config-driven creation.
 type MemoryManager struct {
-	svc  memory.Service
-	cfg  *config.MemoryConfig
-	pool *util.DatabasePool
+	svc      memory.Service
+	cfg      *config.MemoryConfig
+	pool     *util.DatabasePool
+	ownsPool bool
 }
 
 // NewMemoryManager creates a new memory manager based on configuration.
@@ -39,15 +41,27 @@ func NewMemoryManager(
 	extractorModel model.Model,
 	pool *util.DatabasePool,
 ) (*MemoryManager, error) {
+	ownsPool := pool == nil && cfg.Backend == "sqlite"
 	svc, p, err := createService(cfg, extractorModel, pool)
 	if err != nil {
 		return nil, fmt.Errorf("create memory service: %w", err)
 	}
-	return &MemoryManager{svc: svc, cfg: cfg, pool: p}, nil
+	return &MemoryManager{
+		svc:      svc,
+		cfg:      cfg,
+		pool:     p,
+		ownsPool: ownsPool,
+	}, nil
 }
 
 // Service returns the underlying memory service.
+// When using a shared DatabasePool (ownsPool=false), the service is
+// wrapped so that Close() on the wrapper does not close the shared
+// database connection.
 func (m *MemoryManager) Service() memory.Service {
+	if m.cfg.Backend == "sqlite" && !m.ownsPool {
+		return &noCloseDBWrapper{Service: m.svc}
+	}
 	return m.svc
 }
 
@@ -61,20 +75,91 @@ func (m *MemoryManager) Tools() []tool.Tool {
 // EnqueueAutoMemoryJob triggers automatic memory extraction from the
 // current session transcript. This should be called after each
 // conversation turn when auto_extract is enabled.
+//
+// IMPORTANT: The context passed by the tRPC runner may already be
+// cancelled (deadline exceeded) by the time the async worker picks up
+// the job. To give auto memory extraction its own independent timeout
+// (configured via extract_timeout), we replace the caller's context
+// with context.Background().
 func (m *MemoryManager) EnqueueAutoMemoryJob(
-	ctx context.Context, sess *session.Session,
+	_ context.Context, sess *session.Session,
 ) error {
-	return m.svc.EnqueueAutoMemoryJob(ctx, sess)
+	return m.svc.EnqueueAutoMemoryJob(context.Background(), sess)
 }
 
 // Close releases resources owned by the memory manager.
-// Note: the database connection is managed by the shared pool;
-// only the service-level resources are released here.
+// If the manager owns its database pool (created internally when no
+// shared pool was provided), the service and DB connection are both
+// closed. Otherwise, only the auto memory workers are stopped and
+// the shared DB is left untouched.
 func (m *MemoryManager) Close() error {
-	if m.svc != nil {
-		return m.svc.Close()
+	if m.svc == nil {
+		return nil
 	}
+	// Use the wrapper returned by Service() for closing. For shared-pool
+	// setups, Service() returns a noCloseDBWrapper whose Close() is a
+	// no-op (the underlying sqlite Service would close the shared DB if
+	// we called it directly, because sqlite.NewService owns the passed-in
+	// *sql.DB).
+	//
+	// The auto-memory workers will drain naturally because:
+	// 1. The runner is already closed (no new EnqueueAutoMemoryJob calls)
+	// 2. Pending jobs complete or time out on their own
+	// 3. DBPoolClose runs last, ensuring all writes are flushed
+	wrapped := m.Service()
+	err := wrapped.Close()
+	// If we own the pool, close it after the service is done.
+	if m.ownsPool && m.pool != nil {
+		if poolErr := m.pool.Close(); poolErr != nil && err == nil {
+			err = poolErr
+		}
+	}
+	return err
+}
+
+// noCloseDBWrapper wraps a memory.Service to prevent Close() from
+// closing the shared database connection. The database is owned by
+// the shared DatabasePool and must not be closed by individual
+// service consumers.
+//
+// Close() is a no-op because:
+//  1. The sqlite.Service was created with an external *sql.DB via
+//     NewService(db, ...). According to its documentation: "The service
+//     owns the passed-in db and will close it in Close()." Calling
+//     Close() on the underlying service would close the shared DB,
+//     breaking all other services (session, todo, recall).
+//  2. The auto memory workers drain naturally after the runner stops
+//     sending new EnqueueAutoMemoryJob calls. Pending jobs complete
+//     or time out. The 100ms delay before DBPoolClose in the closeFn
+//     ensures in-flight writes have a chance to complete.
+//  3. DBPoolClose runs last and properly checkpoints the WAL.
+//
+// All other methods are delegated directly.
+type noCloseDBWrapper struct {
+	memory.Service
+}
+
+func (w *noCloseDBWrapper) Close() error {
+	util.Logger.Debug("memory service Close() skipped to protect shared DB connection")
 	return nil
+}
+
+// EnqueueAutoMemoryJob wraps the underlying call and logs errors at
+// Warn level so extraction failures are visible with default log level.
+// The tRPC runner logs these at Debug level, which is invisible to users.
+//
+// Uses context.Background() to give auto memory extraction its own
+// independent timeout; the caller's context may already be cancelled
+// by the time the async worker processes the job.
+func (w *noCloseDBWrapper) EnqueueAutoMemoryJob(
+	_ context.Context, sess *session.Session,
+) error {
+	err := w.Service.EnqueueAutoMemoryJob(context.Background(), sess)
+	if err != nil {
+		util.Logger.Warn("auto memory extraction failed",
+			slog.String("error", err.Error()))
+	}
+	return err
 }
 
 func createService(
@@ -102,15 +187,14 @@ func newSQLiteService(
 	extractorModel model.Model,
 	pool *util.DatabasePool,
 ) (memory.Service, *util.DatabasePool, error) {
-	if pool == nil {
-		var err error
+	ownsPool := pool == nil
+	if ownsPool {
 		dbPath := config.ResolvePath(cfg.DBPath)
 		pool = util.NewDatabasePool(dbPath)
-		defer func() {
-			if err != nil {
-				pool.Close()
-			}
-		}()
+		// NOTE: Do NOT defer pool.Close() here. The caller
+		// (MemoryManager) takes ownership of the pool and will
+		// close it via MemoryManager.Close(). Closing it here
+		// would make the returned *sql.DB invalid.
 	}
 
 	db, err := pool.GetDB()
@@ -122,43 +206,68 @@ func newSQLiteService(
 		memorysqlite.WithMemoryLimit(cfg.MaxMemories),
 	}
 
-	// Enable auto memory extraction if configured
-	if cfg.AutoExtract && extractorModel != nil {
-		// Enable and expose the standard memory tools to the agent.
-		// WithToolEnabled must come BEFORE WithExtractor because
-		// ApplyAutoModeDefaults (triggered by WithExtractor) disables
-		// memory_load and memory_clear by default. Explicitly enabling
-		// them here marks them as user-set and prevents the override.
-		opts = append(opts,
-			memorysqlite.WithToolEnabled("memory_add", true),
-			memorysqlite.WithToolEnabled("memory_search", true),
-			memorysqlite.WithToolEnabled("memory_update", true),
-			memorysqlite.WithToolEnabled("memory_delete", true),
-			memorysqlite.WithToolEnabled("memory_load", true),
-			memorysqlite.WithToolEnabled("memory_clear", true),
-		)
-		opts = append(opts,
-			memorysqlite.WithAutoMemoryExposedTools(
-				"memory_add", "memory_search", "memory_update",
-				"memory_delete", "memory_load", "memory_clear",
-			),
-		)
+	// Always enable and expose all memory tools so the agent can
+	// manually call memory_add, memory_search, etc. regardless of
+	// whether auto_extract is configured. This ensures manual memory
+	// management always works even when the extractor model is
+	// unavailable.
+	//
+	// WithToolEnabled must come BEFORE WithExtractor because
+	// ApplyAutoModeDefaults (triggered by WithExtractor) disables
+	// memory_load and memory_clear by default. Explicitly enabling
+	// them here marks them as user-set and prevents the override.
+	opts = append(opts,
+		memorysqlite.WithToolEnabled("memory_add", true),
+		memorysqlite.WithToolEnabled("memory_search", true),
+		memorysqlite.WithToolEnabled("memory_update", true),
+		memorysqlite.WithToolEnabled("memory_delete", true),
+		memorysqlite.WithToolEnabled("memory_load", true),
+		memorysqlite.WithToolEnabled("memory_clear", true),
+	)
+	opts = append(opts,
+		memorysqlite.WithAutoMemoryExposedTools(
+			"memory_add", "memory_search", "memory_update",
+			"memory_delete", "memory_load", "memory_clear",
+		),
+	)
 
-		// Configure the extractor with a dedicated model
-		ext := extractor.NewExtractor(extractorModel)
+	// Enable auto memory extraction if configured and a model is
+	// available. Without an extractor model, auto extraction cannot
+	// work, but manual memory tools remain available.
+	if cfg.AutoExtract && extractorModel != nil {
+		extOpts := []extractor.Option{}
+		if cfg.ExtractorPrompt != "" {
+			extOpts = append(extOpts,
+				extractor.WithPrompt(cfg.ExtractorPrompt))
+		}
+		ext := extractor.NewExtractor(extractorModel, extOpts...)
 		opts = append(opts,
 			memorysqlite.WithExtractor(ext),
 		)
 
-		// Set memory job timeout
+		// Set memory job timeout from config (default: 60s).
+		timeout := cfg.ExtractTimeout
+		if timeout <= 0 {
+			timeout = 60 * time.Second
+		}
 		opts = append(opts,
-			memorysqlite.WithMemoryJobTimeout(30*time.Second),
+			memorysqlite.WithMemoryJobTimeout(timeout),
 		)
 
 		// Set async worker count
 		opts = append(opts,
 			memorysqlite.WithAsyncMemoryNum(3),
 		)
+
+		util.Logger.Info("auto memory extraction enabled",
+			slog.String("backend", cfg.Backend),
+			slog.Int("max_memories", cfg.MaxMemories))
+	} else if cfg.AutoExtract {
+		util.Logger.Warn("auto memory extraction disabled: "+
+			"no extractor model available. "+
+			"Manual memory tools (memory_add, memory_search) "+
+			"are still available. Check provider configuration.",
+			slog.String("backend", cfg.Backend))
 	}
 
 	svc, err := memorysqlite.NewService(db, opts...)
@@ -178,7 +287,12 @@ func newInMemoryService(
 	}
 
 	if cfg.AutoExtract && extractorModel != nil {
-		ext := extractor.NewExtractor(extractorModel)
+		extOpts := []extractor.Option{}
+		if cfg.ExtractorPrompt != "" {
+			extOpts = append(extOpts,
+				extractor.WithPrompt(cfg.ExtractorPrompt))
+		}
+		ext := extractor.NewExtractor(extractorModel, extOpts...)
 		opts = append(opts,
 			memoryinmemory.WithExtractor(ext),
 		)

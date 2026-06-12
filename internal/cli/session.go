@@ -80,9 +80,26 @@ func runSession(cmd *cobra.Command, args []string) error {
 	maxTokens, _ := cmd.Flags().GetInt("max-tokens")
 	noStream, _ := cmd.Flags().GetBool("no-stream")
 
+	// Build a reasonably unique user identifier.
+	// Priority: USER env var (Unix), USERDOMAIN\USERNAME (Windows),
+	// hostname fallback, "default" last resort.
 	userID := os.Getenv("USER")
 	if userID == "" {
-		userID = os.Getenv("USERNAME")
+		// On Windows, combine domain and username for uniqueness.
+		userDomain := os.Getenv("USERDOMAIN")
+		userName := os.Getenv("USERNAME")
+		if userDomain != "" && userName != "" {
+			userID = userDomain + "\\" + userName
+		} else if userName != "" && userName != "SYSTEM" {
+			userID = userName
+		}
+	}
+	if userID == "" || userID == "SYSTEM" {
+		// Fallback: use hostname so different machines get
+		// different IDs even when running as SYSTEM.
+		if hostname, err := os.Hostname(); err == nil {
+			userID = hostname
+		}
 	}
 	if userID == "" {
 		userID = "default"
@@ -115,7 +132,8 @@ func runSession(cmd *cobra.Command, args []string) error {
 
 	// Set up OS signal handling for graceful shutdown.
 	// On SIGINT/SIGTERM, the loop is closed and all resources
-	// (session, memory, telemetry, A2A server) are released.
+	// (session, memory, telemetry, A2A server, database pool)
+	// are released via the defer cleanup below.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -130,8 +148,14 @@ func runSession(cmd *cobra.Command, args []string) error {
 					"error", err.Error())
 			}
 		}
+		// Close the agent loop, which triggers the full cleanup
+		// chain: memory workers → runner → session → telemetry
+		// → database pool. This ensures all pending writes are
+		// flushed and the database is properly closed.
 		loop.Close()
-		os.Exit(0)
+		// Do NOT use os.Exit(0) here — let the main goroutine
+		// return naturally so defer cleanup and log flushing
+		// can complete.
 	}()
 
 	// Ensure cleanup on return
@@ -175,6 +199,10 @@ func bootstrapSession(
 	configPath, userID, sessionID, providerName, modelName string,
 	temperature float64, maxTokens int, noStream bool,
 ) (*config.WukongConfig, *agent.CoreLoop, *BootstrapState, error) {
+	// sessionID is used by the caller (runSession) for TUI initialization
+	// and is forwarded here for consistency but not consumed internally.
+	_ = sessionID
+
 	// Load config
 	loader, err := config.NewLoader(configPath)
 	if err != nil {
@@ -184,6 +212,16 @@ func bootstrapSession(
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("parse config: %w", err)
 	}
+
+	// Apply log level from config (CLI --debug/--quiet overrides
+	// are handled in PersistantPreRunE, so if neither is set,
+	// the config value takes effect).
+	if wukongCfg.LogLevel != "" {
+		util.SetLogLevel(wukongCfg.LogLevel)
+	}
+
+	// Validate and warn about common config issues
+	validateConfig(wukongCfg)
 
 	// Initialize telemetry (OpenTelemetry distributed tracing).
 	// This must be done early so all subsequent operations can
@@ -211,6 +249,11 @@ func bootstrapSession(
 	// All modules (session, memory, todo, recall) share the same
 	// database connection, avoiding the overhead and lifecycle
 	// complexity of multiple independent connections.
+	// NOTE: The pool path is resolved from session.db_path (default:
+	// "wukong.db"). Individual DBPath settings in memory/todo/recall
+	// config blocks are ignored when the shared pool is used.
+	// To use separate databases, subsystems must be configured with
+	// their own pools (currently not implemented).
 	dbPool := util.NewDatabasePool(
 		config.ResolvePath(wukongCfg.Session.DBPath),
 	)
@@ -224,15 +267,25 @@ func bootstrapSession(
 	}
 
 	// Create memory manager with auto-extract support.
-	// Use the default model as the extractor model for auto memory mode.
+	// If an extractor_provider or extractor_model is configured in
+	// the memory block, use that instead of the default provider.
+	// Using a smaller/faster model for memory extraction is recommended
+	// to reduce latency and cost.
 	var extractorModel model.Model
 	if wukongCfg.Memory.AutoExtract {
-		extractorModel, err = factory.CreateDefaultModel()
+		extractorModel, err = createExtractorModel(
+			factory, &wukongCfg.Memory, wukongCfg,
+		)
 		if err != nil {
-			util.Logger.Warn("failed to create extractor model, "+
-				"disabling auto memory extraction",
+			util.Logger.Warn("auto memory extraction: "+
+				"failed to create extractor model, "+
+				"auto-extract will be disabled. "+
+				"Manual memory tools remain available. "+
+				"Check that default_provider is configured "+
+				"correctly in config.yaml.",
+				"provider", wukongCfg.DefaultProvider,
 				"error", err.Error())
-			wukongCfg.Memory.AutoExtract = false
+			extractorModel = nil
 		}
 	}
 	memoryMgr, err := memory.NewMemoryManager(
@@ -298,6 +351,10 @@ func bootstrapSession(
 	if appsMgr != nil {
 		appsToolSet = builtin.NewAppsToolSet(appsMgr)
 	}
+
+	// Create AgentToolSet — wraps specialized sub-agents (code-reviewer,
+	// summarizer) as tools callable by the main agent.
+	agentToolSet := builtin.NewAgentToolSet(factory)
 
 	// Create Summon manager and register delegates as tools
 	summonMdl, err := factory.CreateDefaultModel()
@@ -421,6 +478,11 @@ func bootstrapSession(
 		toolSets = append(toolSets, appsToolSet)
 	}
 
+	// Add Agent tools (code-reviewer, summarizer)
+	if agentToolSet != nil && len(agentToolSet.Tools(nil)) > 0 {
+		toolSets = append(toolSets, agentToolSet)
+	}
+
 	// Add Summon delegate tools
 	if len(summonTools) > 0 {
 		functionTools = append(functionTools, summonTools...)
@@ -483,6 +545,8 @@ func bootstrapSession(
 		RevisionModel:         revisionModel,
 		TopOfMindInstructions: topOfMindInstructions,
 		TelemetryShutdown:     telShutdown,
+		MemoryClose:           memoryMgr.Close,
+		DBPoolClose:           dbPool.Close,
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create agent loop: %w", err)
@@ -558,6 +622,42 @@ func a2aRemoteToConfig(remote config.A2ARemoteConfig) *summon.A2AConfig {
 	return a2aCfg
 }
 
+// createExtractorModel creates a model for memory extraction.
+// If the memory config specifies an extractor_provider, that provider
+// is used; otherwise the default provider is used. This allows using
+// a smaller/cheaper model (e.g., deepseek-chat) for memory extraction
+// while keeping a more capable model for the main conversation.
+func createExtractorModel(
+	factory *provider.Factory,
+	memCfg *config.MemoryConfig,
+	wukongCfg *config.WukongConfig,
+) (model.Model, error) {
+	if memCfg.ExtractorProvider != "" {
+		// Use the dedicated extractor provider
+		extractorProvider := wukongCfg.FindProvider(
+			memCfg.ExtractorProvider,
+		)
+		if extractorProvider == nil {
+			return nil, fmt.Errorf(
+				"extractor_provider %q not found in providers list",
+				memCfg.ExtractorProvider,
+			)
+		}
+		// If extractor_model is also set, temporarily override
+		// the provider's default model for extraction.
+		if memCfg.ExtractorModel != "" {
+			originalModel := extractorProvider.Model
+			extractorProvider.Model = memCfg.ExtractorModel
+			defer func() {
+				extractorProvider.Model = originalModel
+			}()
+		}
+		return factory.CreateModel(memCfg.ExtractorProvider)
+	}
+	// Fall back to default provider
+	return factory.CreateDefaultModel()
+}
+
 // applyOverrides applies command-line overrides to config.
 func applyOverrides(
 	cfg *config.WukongConfig,
@@ -595,5 +695,68 @@ func applyOverrides(
 		cfg.Agent.Streaming = false
 	}
 }
+
+// validateConfig checks for common configuration mistakes and
+// emits warnings. This helps users diagnose issues before they
+// encounter runtime errors during a session.
+func validateConfig(cfg *config.WukongConfig) {
+	if cfg.DefaultProvider == "" {
+		util.Logger.Warn("no default_provider configured; " +
+			"set it in config.yaml or use --provider flag")
+		return
+	}
+
+	p := cfg.FindProvider(cfg.DefaultProvider)
+	if p == nil {
+		util.Logger.Warn("default_provider not found in providers list",
+			slog.String("configured", cfg.DefaultProvider))
+		return
+	}
+
+	if p.Model == "" {
+		util.Logger.Warn("no model configured for default provider; " +
+			"the provider may use a default model")
+	}
+
+	if p.APIKey == "" && p.Type != "ollama" && p.Type != "lmstudio" {
+		util.Logger.Warn("no API key configured for " + cfg.DefaultProvider +
+			"; set " + p.Name + ".api_key in config or via " +
+			strings.ToUpper(p.Name) + "_API_KEY env var")
+	}
+
+	if cfg.Agent.Planner == "builtin" &&
+		p.Type != "anthropic" && p.Type != "google" {
+		util.Logger.Warn("builtin planner requires a model with native " +
+			"thinking support (Claude/Gemini); current provider is " +
+			p.Type + " — consider using 'react' planner instead")
+	}
+
+	switch cfg.Agent.Planner {
+	case "builtin", "react":
+		util.Logger.Info("planner enabled: " + cfg.Agent.Planner)
+	default:
+		if cfg.Agent.Planner != "" {
+			util.Logger.Warn("unknown planner: " + cfg.Agent.Planner +
+				"; supported: builtin, react")
+		}
+	}
+
+	if cfg.Security.GuardrailEnabled {
+		util.Logger.Info("guardrail enabled — prompt injection detection active")
+	}
+
+	if cfg.Memory.AutoExtract &&
+		cfg.Memory.ExtractorProvider == "" &&
+		cfg.Memory.ExtractorModel == "" {
+		// Auto-extract uses the default provider; warn if that
+		// provider may be slow or expensive for extraction.
+		if p.Type == "lmstudio" || p.Type == "ollama" {
+			util.Logger.Info("auto-extract uses local " + p.Type +
+				" model — this may be slow; consider setting " +
+				"memory.extractor_provider to a faster model")
+		}
+	}
+}
+
 
 

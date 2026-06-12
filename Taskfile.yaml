@@ -1,0 +1,228 @@
+# Wukong Taskfile
+# https://taskfile.dev
+# A modern alternative to Makefile with better cross-platform support.
+#
+# Install Task: go install github.com/go-task/task/v3/cmd/task@latest
+#
+# Usage:
+#   task build        Build the wukong binary
+#   task test         Run all unit tests
+#   task lint         Run linter
+#   task clean        Remove build artifacts
+#   task install      Install wukong to $GOPATH/bin
+#   task release      Build release binaries for all platforms
+#   task help         Show all available tasks
+
+version: "3"
+
+vars:
+  APP_NAME: wukong
+  BUILD_DIR: build
+  COVERAGE_DIR: coverage
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo "0.1.0"
+  GIT_COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo "unknown"
+  BUILD_DATE:
+    sh: date -u '+%Y-%m-%d_%H:%M:%S' 2>/dev/null || echo "unknown"
+
+env:
+  GOFLAGS: "-trimpath"
+  CGO_ENABLED: "1"
+
+tasks:
+  # =========================================================================
+  # Development
+  # =========================================================================
+
+  build:
+    desc: Build the wukong binary for the current platform
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}
+      - |
+        go build {{.GOFLAGS}} -ldflags "-s -w \
+          -X github.com/km269/wukong/internal/cli.Version={{.VERSION}} \
+          -X github.com/km269/wukong/internal/cli.GitCommit={{.GIT_COMMIT}} \
+          -X github.com/km269/wukong/internal/cli.BuildDate={{.BUILD_DATE}}" \
+          -o {{.BUILD_DIR}}/{{.APP_NAME}} ./cmd/wukong/
+      - echo "Binary: {{.BUILD_DIR}}/{{.APP_NAME}}"
+
+  build-all:
+    desc: Build binaries for all supported platforms
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}
+      - task: build-platform
+        vars: {GOOS: linux, GOARCH: amd64, EXT: ""}
+      - task: build-platform
+        vars: {GOOS: linux, GOARCH: arm64, EXT: ""}
+      - task: build-platform
+        vars: {GOOS: darwin, GOARCH: amd64, EXT: ""}
+      - task: build-platform
+        vars: {GOOS: darwin, GOARCH: arm64, EXT: ""}
+      - task: build-platform
+        vars: {GOOS: windows, GOARCH: amd64, EXT: ".exe"}
+      - echo "Binaries in {{.BUILD_DIR}}/"
+
+  build-platform:
+    desc: Build for a specific platform
+    internal: true
+    cmds:
+      - |
+        GOOS={{.GOOS}} GOARCH={{.GOARCH}} go build {{.GOFLAGS}} \
+          -ldflags "-s -w \
+          -X github.com/km269/wukong/internal/cli.Version={{.VERSION}} \
+          -X github.com/km269/wukong/internal/cli.GitCommit={{.GIT_COMMIT}} \
+          -X github.com/km269/wukong/internal/cli.BuildDate={{.BUILD_DATE}}" \
+          -o {{.BUILD_DIR}}/{{.APP_NAME}}-{{.GOOS}}-{{.GOARCH}}{{.EXT}} \
+          ./cmd/wukong/
+
+  install:
+    desc: Install wukong to $GOPATH/bin
+    cmds:
+      - |
+        go install {{.GOFLAGS}} -ldflags "-s -w \
+          -X github.com/km269/wukong/internal/cli.Version={{.VERSION}} \
+          -X github.com/km269/wukong/internal/cli.GitCommit={{.GIT_COMMIT}} \
+          -X github.com/km269/wukong/internal/cli.BuildDate={{.BUILD_DATE}}" \
+          ./cmd/wukong/
+
+  run:
+    desc: Build and run wukong session
+    deps: [build]
+    cmds:
+      - ./{{.BUILD_DIR}}/{{.APP_NAME}} session
+
+  # =========================================================================
+  # Testing
+  # =========================================================================
+
+  test:
+    desc: Run all unit tests
+    cmds:
+      - go test -race -count=1 -timeout=60s ./...
+
+  test-short:
+    desc: Run unit tests (short mode)
+    cmds:
+      - go test -short -count=1 -timeout=30s ./...
+
+  test-verbose:
+    desc: Run unit tests with verbose output
+    cmds:
+      - go test -race -v -count=1 -timeout=60s ./...
+
+  test-coverage:
+    desc: Run tests with coverage report
+    cmds:
+      - mkdir -p {{.COVERAGE_DIR}}
+      - go test -race -count=1 -timeout=120s -coverprofile={{.COVERAGE_DIR}}/coverage.out -covermode=atomic ./...
+      - go tool cover -html={{.COVERAGE_DIR}}/coverage.out -o {{.COVERAGE_DIR}}/coverage.html
+      - echo "Coverage report: {{.COVERAGE_DIR}}/coverage.html"
+
+  test-coverage-func:
+    desc: Show per-function coverage
+    cmds:
+      - mkdir -p {{.COVERAGE_DIR}}
+      - go test -race -count=1 -timeout=120s -coverprofile={{.COVERAGE_DIR}}/coverage.out ./...
+      - go tool cover -func={{.COVERAGE_DIR}}/coverage.out
+
+  bench:
+    desc: Run benchmarks
+    cmds:
+      - go test -bench=. -benchmem -count=3 ./...
+
+  # =========================================================================
+  # Code Quality
+  # =========================================================================
+
+  fmt:
+    desc: Format code with gofmt
+    cmds:
+      - go fmt ./...
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - golangci-lint run --timeout=5m ./...
+
+  tidy:
+    desc: Run go mod tidy
+    cmds:
+      - go mod tidy
+
+  verify:
+    desc: Run all verification (fmt, vet, test)
+    cmds:
+      - task: fmt
+      - task: vet
+      - task: test
+
+  # =========================================================================
+  # Release
+  # =========================================================================
+
+  release:
+    desc: Build release binaries and create archives
+    deps: [build-all]
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}/release
+      - |
+        for f in {{.BUILD_DIR}}/{{.APP_NAME}}-*; do
+          base=$(basename "$f")
+          if command -v tar > /dev/null 2>&1; then
+            tar -czf "{{.BUILD_DIR}}/release/${base}.tar.gz" -C {{.BUILD_DIR}} "$base"
+          elif command -v zip > /dev/null 2>&1; then
+            zip -j "{{.BUILD_DIR}}/release/${base}.zip" "$f"
+          fi
+        done
+      - echo "Release files in {{.BUILD_DIR}}/release/"
+
+  # =========================================================================
+  # Docker
+  # =========================================================================
+
+  docker-build:
+    desc: Build Docker image
+    cmds:
+      - docker build -t {{.APP_NAME}}:{{.VERSION}} -f Dockerfile .
+      - docker tag {{.APP_NAME}}:{{.VERSION}} {{.APP_NAME}}:latest
+
+  docker-run:
+    desc: Run wukong in Docker
+    cmds:
+      - |
+        docker run --rm -it \
+          -v ${HOME}/.config/wukong:/root/.config/wukong \
+          -v ${PWD}:/workspace \
+          -w /workspace \
+          {{.APP_NAME}}:latest session
+
+  # =========================================================================
+  # Cleanup
+  # =========================================================================
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -rf {{.BUILD_DIR}} {{.COVERAGE_DIR}}
+      - go clean -cache -testcache
+
+  clean-all:
+    desc: Remove all generated files
+    deps: [clean]
+    cmds:
+      - rm -f wukong.db
+
+  # =========================================================================
+  # Help
+  # =========================================================================
+
+  help:
+    desc: Show all available tasks
+    cmds:
+      - task --list

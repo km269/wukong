@@ -13,6 +13,10 @@ import (
 	"time"
 
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/util"
+
+	mcpcfg "trpc.group/trpc-go/trpc-agent-go/tool/mcp"
+	"trpc.group/trpc-go/trpc-agent-go/tool/mcpbroker"
 
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -38,14 +42,79 @@ func NewManager(cfg *config.WukongConfig) *Manager {
 // Initialize loads and initializes all enabled extensions.
 func (m *Manager) Initialize(ctx context.Context) error {
 	enabled := m.cfg.EnabledExtensions()
+
+	// Collect broker-enabled external extensions for MCP Broker.
+	// These servers are registered into a single broker toolset
+	// instead of exposing all their tools individually.
+	var brokerServers map[string]mcpcfg.ConnectionConfig
 	for _, ext := range enabled {
+		if ext.Type == "external" && ext.MCPBroker {
+			if brokerServers == nil {
+				brokerServers = make(map[string]mcpcfg.ConnectionConfig)
+			}
+			brokerServers[ext.Name] = toMCPConnectionConfig(ext)
+			continue // Skip individual registration
+		}
 		if err := m.registerExtension(ctx, ext); err != nil {
 			return fmt.Errorf(
 				"register extension %q: %w", ext.Name, err,
 			)
 		}
 	}
+
+	// Register MCP Broker if any broker-enabled servers exist.
+	// The broker exposes 4 tools: mcp_list_servers, mcp_list_tools,
+	// mcp_inspect_tools, mcp_call — allowing on-demand discovery.
+	if len(brokerServers) > 0 {
+		broker := mcpbroker.New(
+			mcpbroker.WithServers(brokerServers),
+		)
+		m.mu.Lock()
+		m.toolSets["mcp_broker"] = &brokerToolSet{broker: broker}
+		m.status["mcp_broker"] = ExtensionInfo{
+			Name:         "mcp_broker",
+			Type:         "external",
+			Status:       StatusEnabled,
+			ToolCount:    4,
+			RegisteredAt: time.Now(),
+		}
+		m.mu.Unlock()
+		util.Logger.Info("MCP broker enabled",
+			"server_count", len(brokerServers))
+	}
+
 	return nil
+}
+
+// brokerToolSet wraps an mcpbroker.Broker to satisfy the
+// tool.ToolSet interface.
+type brokerToolSet struct {
+	broker *mcpbroker.Broker
+}
+
+func (b *brokerToolSet) Tools(_ context.Context) []tool.Tool {
+	return b.broker.Tools()
+}
+
+func (b *brokerToolSet) Name() string { return "mcp_broker" }
+
+func (b *brokerToolSet) Close() error { return nil }
+
+// toMCPConnectionConfig converts an ExtensionConfig to an MCP
+// connection configuration used by the MCP broker.
+func toMCPConnectionConfig(ext config.ExtensionConfig) mcpcfg.ConnectionConfig {
+	cc := mcpcfg.ConnectionConfig{
+		Transport: ext.Transport,
+		Timeout:   ext.Timeout,
+	}
+	switch ext.Transport {
+	case "stdio":
+		cc.Command = ext.Command
+		cc.Args = ext.Args
+	default:
+		cc.ServerURL = ext.URL
+	}
+	return cc
 }
 
 // ToolSets returns all active tool sets.
@@ -54,13 +123,12 @@ func (m *Manager) ToolSets() []tool.ToolSet {
 	defer m.mu.RUnlock()
 
 	result := make([]tool.ToolSet, 0, len(m.toolSets))
-	for name, ts := range m.toolSets {
+	for _, ts := range m.toolSets {
 		// Skip nil placeholders for extensions that are created
 		// during bootstrap (apps, code_mode, top_of_mind).
 		if ts == nil {
 			continue
 		}
-		_ = name
 		result = append(result, ts)
 	}
 	return result
@@ -165,7 +233,7 @@ func (m *Manager) RegisterFromDeeplink(
 
 // SetMemoryService injects the memory service into the memory toolset
 // if it's registered. Must be called after Initialize.
-func (m *Manager) SetMemoryService(svc interface{}, appName, userID string) {
+func (m *Manager) SetMemoryService(svc any, appName, userID string) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -178,7 +246,7 @@ func (m *Manager) SetMemoryService(svc interface{}, appName, userID string) {
 	// directly without a circular dependency. The MemoryToolSet implements
 	// SetMemoryService(memory.Service, string, string).
 	type memorySvcSetter interface {
-		SetMemoryService(svc interface{}, appName, userID string)
+		SetMemoryService(svc any, appName, userID string)
 	}
 	if setter, ok := ts.(memorySvcSetter); ok {
 		setter.SetMemoryService(svc, appName, userID)
@@ -248,7 +316,7 @@ func (m *Manager) registerExtensionLocked(
 
 	info := m.status[ext.Name]
 	info.Status = StatusEnabled
-	if ts, ok := m.toolSets[ext.Name]; ok {
+	if ts, ok := m.toolSets[ext.Name]; ok && ts != nil {
 		info.ToolCount = len(ts.Tools(ctx))
 	}
 	m.status[ext.Name] = info

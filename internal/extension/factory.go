@@ -30,7 +30,9 @@ func CreateBuiltinToolSet(
 		return builtin.NewVisualiserToolSet(cfg), nil
 	case "tutorial":
 		return builtin.NewTutorialToolSet(cfg), nil
-	case "apps", "code_mode", "top_of_mind":
+	case "web":
+		return builtin.NewWebToolSet(), nil
+	case "agent_tools", "apps", "code_mode", "top_of_mind":
 		// These are created in bootstrapSession with their
 		// runtime dependencies. The manager will hold a nil
 		// entry; session.go appends the real toolset.
