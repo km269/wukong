@@ -22,7 +22,7 @@ default_provider: "lmstudio"
 
 # ---------------------------------------------------------------------------
 # Providers - AI 模型提供商列表
-# 支持类型: openai, anthropic, google, deepseek, ollama, lmstudio
+# 支持类型: openai, anthropic, google, deepseek, ollama, lmstudio, acp
 # api_key 支持 ${ENV_VAR} 语法引用环境变量
 # ---------------------------------------------------------------------------
 providers:
@@ -55,6 +55,13 @@ providers:
     api_key: "lmstudio"
     base_url: "http://192.168.50.97:1234/v1"
     model: "google/gemma-4-26b-a4b"
+
+  # ACP 代理客户端协议 (Agent Client Protocol)
+  # 将 ACP 兼容的编码代理作为 LLM 提供商
+  - name: "acp-coder"
+    type: "acp"
+    agent_url: "http://localhost:4000"
+    model: "acp-default"
 
 # ---------------------------------------------------------------------------
 # Agent - 核心 Agent 行为配置
@@ -400,6 +407,27 @@ agui:
   enabled: true #false
   address: ":8080"            # 监听地址
   path: "/agui"               # SSE 端点路径
+
+# ---------------------------------------------------------------------------
+# ACP Server - Agent Client Protocol 服务端点
+# 支持 ACP 兼容的客户端应用原生连接到 Wukong
+# ---------------------------------------------------------------------------
+acp_server:
+  enabled: true                # 启用 ACP Server
+  address: ":9091"             # 监听地址
+  path: "/acp"                 # ACP 端点路径
+  enable_streaming: true       # SSE 流式响应
+  # auth_type: ""              # 认证方式: api_key / jwt / "" (无)
+  # api_key: "${ACP_API_KEY}"  # API Key (auth_type=api_key 时)
+
+# ---------------------------------------------------------------------------
+# ACP MCP Bridge - 将 Wukong 扩展作为 MCP Server 暴露给 ACP 代理
+# ACP 代理提供商通过此端点调用系统扩展工具
+# ---------------------------------------------------------------------------
+acp_mcp:
+  enabled: true                # 启用 MCP Bridge (ACP 代理调用扩展所需)
+  address: ":3400"             # MCP Server 监听地址
+  path: "/mcp"                 # MCP 端点路径
 
 # ---------------------------------------------------------------------------
 # Eval - 代理评估与回归测试

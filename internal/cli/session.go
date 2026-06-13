@@ -154,6 +154,17 @@ func runSession(cmd *cobra.Command, args []string) error {
 					"error", err.Error())
 			}
 		}
+		// Shutdown ACP server if running
+		if bootstrapState.ACPServer != nil {
+			bootstrapState.ACPServer.Stop()
+		}
+		// Shutdown ACP MCP Bridge if running
+		if bootstrapState.ACPMCPBridge != nil {
+			if err := bootstrapState.ACPMCPBridge.Stop(); err != nil {
+				util.Logger.Warn("acp mcp bridge stop error",
+					"error", err.Error())
+			}
+		}
 		// Shutdown knowledge manager
 		if bootstrapState.KnowledgeMgr != nil {
 			if err := bootstrapState.KnowledgeMgr.Close(); err != nil {
@@ -178,6 +189,15 @@ func runSession(cmd *cobra.Command, args []string) error {
 				context.Background(),
 			); err != nil {
 				util.Logger.Warn("A2A server stop error",
+					"error", err.Error())
+			}
+		}
+		if bootstrapState.ACPServer != nil {
+			bootstrapState.ACPServer.Stop()
+		}
+		if bootstrapState.ACPMCPBridge != nil {
+			if err := bootstrapState.ACPMCPBridge.Stop(); err != nil {
+				util.Logger.Warn("acp mcp bridge stop error",
 					"error", err.Error())
 			}
 		}
@@ -221,6 +241,8 @@ func runSession(cmd *cobra.Command, args []string) error {
 type BootstrapState struct {
 	A2AServer    *summon.A2AServer
 	AGUIServer   *server.AGUIServer
+	ACPServer    *server.ACPServer
+	ACPMCPBridge *extension.ACPMCPBridge
 	KnowledgeMgr *knowledge.Manager
 	ProjectMgr   *project.Manager
 }
@@ -344,6 +366,24 @@ func bootstrapSession(
 
 	// Register Extension Manager tool set
 	extToolSet := extension.NewManagerToolSet(extMgr, wukongCfg)
+
+	// Initialize ACP MCP Bridge — exposes Wukong extensions as
+	// an MCP Server for ACP agents to discover and call tools.
+	acpMCPBridge, acpMCPErr := extension.NewACPMCPBridge(
+		extMgr, &wukongCfg.ACPMCP,
+	)
+	if acpMCPErr != nil {
+		util.Logger.Warn("acp mcp bridge creation failed",
+			"error", acpMCPErr.Error())
+	} else if acpMCPBridge != nil {
+		if err := acpMCPBridge.Start(); err != nil {
+			util.Logger.Warn("acp mcp bridge start failed",
+				"error", err.Error())
+		} else {
+			// Set MCP address on factory for ACP providers.
+			factory.SetACPMCPAddr(acpMCPBridge.ACPMCPAddr())
+		}
+	}
 
 	// Create recall store
 	var recallStore *recall.Store
@@ -700,6 +740,35 @@ func bootstrapSession(
 				}
 			}()
 			state.AGUIServer = aguiSrv
+		}
+	}
+
+	// Initialize ACP Server if enabled.
+	// Exposes the agent via Agent Client Protocol endpoints
+	// for ACP-compatible client applications.
+	if wukongCfg.ACPServer.Enabled {
+		acpCfg := &server.ACPServerConfig{
+			Runner:          loop.GetRunner(),
+			Agent:           loop.GetAgent(),
+			Path:            wukongCfg.ACPServer.Path,
+			EnableStreaming: wukongCfg.ACPServer.EnableStreaming,
+		}
+		acpSrv, acpErr := server.NewACPServer(acpCfg)
+		if acpErr != nil {
+			util.Logger.Warn("ACP server creation failed",
+				"error", acpErr.Error())
+		} else {
+			acpAddr := wukongCfg.ACPServer.Address
+			if acpAddr == "" {
+				acpAddr = ":9091"
+			}
+			go func() {
+				if err := acpSrv.Start(acpAddr); err != nil {
+					util.Logger.Warn("ACP server failed",
+						"error", err.Error())
+				}
+			}()
+			state.ACPServer = acpSrv
 		}
 	}
 

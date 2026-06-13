@@ -122,6 +122,13 @@ type WukongConfig struct {
 	// AGUI configures the AG-UI SSE server for web-based chat UIs.
 	AGUI AGUIConfig `mapstructure:"agui"`
 
+	// ACPServer configures the Agent Client Protocol server endpoint.
+	ACPServer ACPServerConfig `mapstructure:"acp_server"`
+
+	// ACPMCP configures the MCP bridge that exposes extensions
+	// as an MCP Server for ACP agents.
+	ACPMCP ACPMCPConfig `mapstructure:"acp_mcp"`
+
 	// Telemetry configures OpenTelemetry observability.
 	Telemetry TelemetryConfig `mapstructure:"telemetry"`
 
@@ -149,7 +156,7 @@ type WukongConfig struct {
 type ProviderConfig struct {
 	// Name is the unique identifier for this provider (referenced by default_provider).
 	Name string `mapstructure:"name"`
-	// Type is the provider backend type (openai, anthropic, google, deepseek, ollama, lmstudio).
+	// Type is the provider backend type (openai, anthropic, google, deepseek, ollama, lmstudio, acp).
 	Type string `mapstructure:"type"`
 	// BaseURL is the API endpoint base URL (auto-filled for known providers if empty).
 	BaseURL string `mapstructure:"base_url"`
@@ -157,6 +164,17 @@ type ProviderConfig struct {
 	APIKey string `mapstructure:"api_key"`
 	// Model is the default model name for this provider.
 	Model string `mapstructure:"model"`
+
+	// ---- ACP-specific fields (only when Type="acp") ----
+
+	// AgentURL is the ACP agent server endpoint URL
+	// (e.g., "http://localhost:4000").
+	AgentURL string `mapstructure:"agent_url"`
+	// MCPPort is the port where the ACP MCP Bridge listens
+	// for incoming MCP tool calls from the ACP agent.
+	MCPPort string `mapstructure:"mcp_port"`
+	// AgentAuth is the authentication method for the ACP agent.
+	AgentAuth string `mapstructure:"agent_auth"`
 }
 
 // ============================================================================
@@ -811,6 +829,44 @@ type AGUIConfig struct {
 }
 
 // ============================================================================
+// ACP Server Configuration
+// ============================================================================
+
+// ACPServerConfig defines settings for the Agent Client Protocol (ACP)
+// server that exposes the agent to ACP-compatible client applications.
+type ACPServerConfig struct {
+	// Enabled starts the ACP server. Default: false.
+	Enabled bool `mapstructure:"enabled"`
+	// Address is the listen address (e.g., ":9091").
+	// Default: ":9091".
+	Address string `mapstructure:"address"`
+	// Path is the ACP endpoint path prefix.
+	// Default: "/acp".
+	Path string `mapstructure:"path"`
+	// EnableStreaming enables SSE streaming for ACP responses.
+	// Default: true.
+	EnableStreaming bool `mapstructure:"enable_streaming"`
+	// AuthType is the authentication method:
+	// "" (none), "api_key", "jwt".
+	AuthType string `mapstructure:"auth_type"`
+	// APIKey is the API key for api_key authentication.
+	APIKey string `mapstructure:"api_key"`
+}
+
+// ACPMCPConfig defines settings for the MCP Bridge that exposes
+// Wukong extensions as an MCP Server for ACP agents to call.
+type ACPMCPConfig struct {
+	// Enabled starts the MCP Bridge. Default: true.
+	Enabled bool `mapstructure:"enabled"`
+	// Address is the MCP Server listen address (e.g., ":3400").
+	// Default: ":3400".
+	Address string `mapstructure:"address"`
+	// Path is the MCP endpoint path prefix.
+	// Default: "/mcp".
+	Path string `mapstructure:"path"`
+}
+
+// ============================================================================
 // Evaluation Configuration
 // ============================================================================
 
@@ -1209,6 +1265,18 @@ func (l *Loader) setDefaults() {
 	l.v.SetDefault("agui.enabled", false)
 	l.v.SetDefault("agui.address", ":8080")
 	l.v.SetDefault("agui.path", "/agui")
+
+	// --- ACP Server defaults ---
+	l.v.SetDefault("acp_server.enabled", false)
+	l.v.SetDefault("acp_server.address", ":9091")
+	l.v.SetDefault("acp_server.path", "/acp")
+	l.v.SetDefault("acp_server.enable_streaming", true)
+	l.v.SetDefault("acp_server.auth_type", "")
+
+	// --- ACP MCP Bridge defaults ---
+	l.v.SetDefault("acp_mcp.enabled", true)
+	l.v.SetDefault("acp_mcp.address", ":3400")
+	l.v.SetDefault("acp_mcp.path", "/mcp")
 
 	// --- Eval defaults ---
 	l.v.SetDefault("eval.enabled", false)

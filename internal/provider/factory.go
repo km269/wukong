@@ -25,7 +25,13 @@ const (
 
 // Factory creates model instances from provider configuration.
 type Factory struct {
-	cfg *config.WukongConfig
+	cfg     *config.WukongConfig
+	mcpAddr string // ACP MCP bridge address (set externally)
+}
+
+// SetACPMCPAddr sets the MCP bridge address for ACP providers.
+func (f *Factory) SetACPMCPAddr(addr string) {
+	f.mcpAddr = addr
 }
 
 // NewFactory creates a new model provider factory.
@@ -56,6 +62,8 @@ func (f *Factory) CreateModel(name string) (model.Model, error) {
 	case "openai", "anthropic", "google", "deepseek",
 		"ollama", "lmstudio":
 		return f.createOpenAI(p), nil
+	case "acp":
+		return f.createACP(p)
 	default:
 		return nil, fmt.Errorf(
 			"unsupported provider type: %s", p.Type,
@@ -88,6 +96,27 @@ func (f *Factory) fillDefaultBaseURL(p *config.ProviderConfig) {
 	case "lmstudio":
 		p.BaseURL = LMStudioBaseURL
 	}
+}
+
+// createACP creates an ACP provider that connects to a remote
+// ACP-compatible agent.
+func (f *Factory) createACP(
+	p *config.ProviderConfig,
+) (model.Model, error) {
+	mcpAddr := f.mcpAddr
+	if p.MCPPort != "" {
+		mcpAddr = "http://localhost" + p.MCPPort + "/mcp"
+	}
+	prov, err := NewACPProvider(p, mcpAddr)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"create acp provider: %w", err)
+	}
+	util.Logger.Info("acp provider created",
+		"agent_url", p.AgentURL,
+		"mcp_addr", mcpAddr,
+	)
+	return prov, nil
 }
 
 // createOpenAI creates an OpenAI-compatible model instance.

@@ -180,7 +180,7 @@ func resolveInput(flagMsg string, args []string) string {
 }
 
 // cleanupBootstrap shuts down the bootstrapped resources.
-// For single-shot execution, we only need to stop the A2A server.
+// For single-shot execution, we only need to stop the A2A/ACP servers.
 // The CoreLoop.Close() triggers the full cleanup chain (memory,
 // runner, session, telemetry, dbpool).
 func cleanupBootstrap(state *BootstrapState) {
@@ -189,6 +189,12 @@ func cleanupBootstrap(state *BootstrapState) {
 	}
 	if state.A2AServer != nil {
 		_ = state.A2AServer.Stop(context.Background())
+	}
+	if state.ACPServer != nil {
+		state.ACPServer.Stop()
+	}
+	if state.ACPMCPBridge != nil {
+		_ = state.ACPMCPBridge.Stop()
 	}
 	if state.KnowledgeMgr != nil {
 		_ = state.KnowledgeMgr.Close()
