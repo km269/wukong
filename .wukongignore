@@ -1,0 +1,89 @@
+# .wukongignore — File Access Blacklist for Wukong AI Agent
+# Syntax: gitignore-compatible (lines starting with # are comments)
+#
+# When enabled (security.ignore_file_enabled: true in config.yaml),
+# Wukong's agent is BLOCKED from reading, writing, or executing
+# commands involving paths matching these patterns.
+#
+# Rules are checked against absolute paths and path components.
+#
+# Supported patterns:
+#   *.log       — matches any .log file in any location
+#   /secrets/   — matches files in /secrets/ directory (anchored)
+#   **/.env     — matches .env files anywhere
+#   !*.md       — negates a previous rule (allow .md files)
+#   node_modules/ — matches directory paths
+
+# ---------- OS & system files ----------
+/etc/shadow
+/etc/passwd
+/etc/sudoers
+/etc/ssl/private/
+/etc/ssh/
+/boot/
+/sys/
+/proc/
+
+# Windows system files
+C:\Windows\System32\
+C:\Windows\SysWOW64\
+C:\Windows\boot\
+C:\Windows\System32\config\
+
+# ---------- Sensitive data ----------
+# Credentials and secrets
+**/.env
+**/.env.*
+**/credentials
+**/credentials.*
+**/secrets.yaml
+**/secrets.yml
+**/secrets.json
+**/service-account*.json
+**/id_rsa
+**/id_ed25519
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+
+# SSH keys directory
+~/.ssh/
+
+# Cloud credentials
+~/.aws/
+~/.gcloud/
+~/.azure/
+~/.kube/
+
+# ---------- Version control internals ----------
+.git/config
+.git/objects/
+.git/refs/
+.git/logs/
+.git/hooks/
+
+# ---------- Package manager caches ----------
+node_modules/
+.terraform/
+__pycache__/
+*.pyc
+*.pyo
+*.class
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+
+# ---------- Temporary & build artifacts ----------
+*.tmp
+*.temp
+*.cache
+*.bak
+~*
+*.swp
+*.swo
+*master.key
+*credentials.yml.enc

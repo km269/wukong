@@ -56,6 +56,9 @@ func (m *Model) sendMessage(input string) tea.Cmd {
 	m.streaming = true
 	m.currentStream = ""
 
+	// Track first user instruction for project recovery.
+	m.trackProjectInstruction(input)
+
 	// Create cancelable context so Ctrl+C can interrupt the request.
 	ctx, cancel := context.WithCancel(context.Background())
 	m.streamCancel = cancel
@@ -190,6 +193,28 @@ func (m *Model) addMessage(role, content string) {
 // setStatus updates the agent status display.
 func (m *Model) setStatus(status string) {
 	m.status = status
+}
+
+// trackProjectInstruction records the first user message as the
+// project's "last instruction" for session recovery. Only the
+// first user message per session is recorded to avoid writing
+// on every single input.
+func (m *Model) trackProjectInstruction(input string) {
+	if m.instrRecorded || m.projectMgr == nil ||
+		m.workingDir == "" || input == "" {
+		return
+	}
+	m.instrRecorded = true
+
+	// The project package defines Manager.UpdateInstruction;
+	// we use interface{} to avoid an import cycle with the
+	// tui package.
+	type instructionUpdater interface {
+		UpdateInstruction(workingDir string, instruction string)
+	}
+	if updater, ok := m.projectMgr.(instructionUpdater); ok {
+		updater.UpdateInstruction(m.workingDir, input)
+	}
 }
 
 // refreshMsg signals the TUI to refresh the viewport.

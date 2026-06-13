@@ -29,6 +29,10 @@ type Guard struct {
 	// Runtime state
 	approvedCommands map[string]bool
 	blockedCount     int
+
+	// IgnoreMatcher provides file-access blacklisting via
+	// .wukongignore (gitignore-compatible syntax).
+	ignoreMatcher *IgnoreMatcher
 }
 
 // NewGuard creates a new security guard.
@@ -44,9 +48,12 @@ func NewGuard(cfg *config.SecurityConfig) *Guard {
 	if cfg.PermissionMode == "" {
 		cfg.PermissionMode = config.PermissionSmart
 	}
+	im := NewIgnoreMatcher(cfg.IgnoreFile, cfg.IgnoreFileEnabled)
+
 	return &Guard{
 		cfg:              cfg,
 		approvedCommands: make(map[string]bool),
+		ignoreMatcher:    im,
 	}
 }
 
@@ -374,6 +381,15 @@ func (g *Guard) GetBlockedCount() int {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return g.blockedCount
+}
+
+// CheckFilePath validates a file path against the .wukongignore
+// blacklist. Returns an IgnoreError if the path should be blocked.
+func (g *Guard) CheckFilePath(filePath string) error {
+	if g.ignoreMatcher == nil {
+		return nil
+	}
+	return g.ignoreMatcher.CheckFilePath(filePath)
 }
 
 // ExecuteSafe runs a command with security checks.

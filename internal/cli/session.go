@@ -23,6 +23,7 @@ import (
 	"github.com/km269/wukong/internal/knowledge"
 	"github.com/km269/wukong/internal/memory"
 	"github.com/km269/wukong/internal/observability"
+	"github.com/km269/wukong/internal/project"
 	"github.com/km269/wukong/internal/provider"
 	"github.com/km269/wukong/internal/recall"
 	"github.com/km269/wukong/internal/security"
@@ -111,6 +112,9 @@ func runSession(cmd *cobra.Command, args []string) error {
 		sessionID = uuid.New().String()
 	}
 
+	// Get current working directory for project tracking.
+	workingDir, _ := os.Getwd()
+
 	// Report model overrides if any
 	if provider != "" || modelName != "" {
 		parts := []string{}
@@ -186,6 +190,12 @@ func runSession(cmd *cobra.Command, args []string) error {
 		loop.Close()
 	}()
 
+	// Track the working directory for session recovery.
+	if bootstrapState.ProjectMgr != nil && workingDir != "" {
+		bootstrapState.ProjectMgr.TrackProject(
+			workingDir, sessionID, "")
+	}
+
 	p := wukongCfg.DefaultProviderConfig()
 	modelDisplay := ""
 	if p != nil {
@@ -193,14 +203,17 @@ func runSession(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf(
-		"Session: %s\nProvider: %s\nModel: %s\n\n",
+		"Session: %s\nProject: %s\nProvider: %s\nModel: %s\n\n",
 		sessionID[:8],
+		workingDir,
 		wukongCfg.DefaultProvider,
 		modelDisplay,
 	)
 
-	// Start TUI
-	return tui.StartTUI(wukongCfg, loop, userID, sessionID)
+	// Start TUI — pass projectMgr for instruction tracking.
+	return tui.StartTUI(
+		wukongCfg, loop, userID, sessionID,
+		workingDir, bootstrapState.ProjectMgr)
 }
 
 // BootstrapState holds resources created during bootstrap that need
@@ -209,6 +222,7 @@ type BootstrapState struct {
 	A2AServer    *summon.A2AServer
 	AGUIServer   *server.AGUIServer
 	KnowledgeMgr *knowledge.Manager
+	ProjectMgr   *project.Manager
 }
 
 // bootstrapSession initializes all components needed for a session.
@@ -621,8 +635,17 @@ func bootstrapSession(
 	// automatic protocol conversion, streaming, and session integration.
 	// The main agent and runner are shared with the A2A endpoint
 	// so remote clients get the full agent capabilities.
+	// Create project manager for working directory tracking.
+	projectMgr, prjErr := project.NewManager(wukongCfg)
+	if prjErr != nil {
+		util.Logger.Warn("project manager creation failed, "+
+			"project tracking disabled",
+			"error", prjErr.Error())
+	}
+
 	state := &BootstrapState{
 		KnowledgeMgr: knowledgeMgr,
+		ProjectMgr:   projectMgr,
 	}
 	if wukongCfg.A2AServer.Enabled {
 		hostAddr := wukongCfg.A2AServer.Address

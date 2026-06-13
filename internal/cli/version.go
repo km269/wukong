@@ -8,7 +8,7 @@ import (
 
 // Version information set at build time via ldflags.
 var (
-	Version   = "0.1.1"
+	Version   = "0.1.3"
 	GitCommit = "unknown"
 	BuildDate = "unknown"
 )

@@ -133,6 +133,10 @@ type WukongConfig struct {
 
 	// Observability configures enhanced observability (Langfuse, etc.).
 	Observability ObservabilityConfig `mapstructure:"observability"`
+
+	// ProjectDir is the directory for project tracking data.
+	// Default: ~/.config/wukong/ (resolved at runtime).
+	ProjectDir string `mapstructure:"project_dir"`
 }
 
 // ============================================================================
@@ -317,6 +321,24 @@ type AgentConfig struct {
 	// calls. When enabled, sub-agent responses are streamed to the
 	// user in real-time. Default: false.
 	AgentToolsStream bool `mapstructure:"agent_tools_stream"`
+	// SystemPromptDir is the directory containing .md prompt template
+	// files that are loaded and concatenated to form the agent's
+	// system instruction. Files are sorted by filename. Variables
+	// like {{.WorkingDir}} are substituted at runtime.
+	// When the directory is empty or contains no .md files, the
+	// built-in default instruction is used.
+	// Default: ~/.config/wukong/prompts/
+	SystemPromptDir string `mapstructure:"system_prompt_dir"`
+	// RecipeDir is the directory containing YAML recipe definitions
+	// for structured sub-agents. Each .yaml file defines a named
+	// sub-agent with its own instruction, tool list, and model
+	// configuration. Recipes are loaded at startup and registered
+	// as callable tools.
+	// Default: .wukong/recipes/
+	RecipeDir string `mapstructure:"recipe_dir"`
+	// RecipeEnabled controls whether YAML recipe sub-agents are
+	// loaded and registered. Default: true.
+	RecipeEnabled bool `mapstructure:"recipe_enabled"`
 }
 
 // ============================================================================
@@ -363,6 +385,15 @@ type SecurityConfig struct {
 	// tRPC guardrail plugin. Uses the default model for reviewing
 	// user inputs. Adds latency to each request.
 	GuardrailEnabled bool `mapstructure:"guardrail_enabled"`
+	// IgnoreFileEnabled enables file-access blacklisting via
+	// a .wukongignore file (gitignore-compatible syntax).
+	// When enabled, file_read, file_write, file_replace, and
+	// command_execute tools reject operations on paths matching
+	// patterns in the ignore file. Default: true.
+	IgnoreFileEnabled bool `mapstructure:"ignore_file_enabled"`
+	// IgnoreFile is the path to the ignore rules file.
+	// Default: .wukongignore (looked up in cwd and home dir).
+	IgnoreFile string `mapstructure:"ignore_file"`
 }
 
 // ============================================================================
@@ -1044,6 +1075,9 @@ func (l *Loader) setDefaults() {
 	l.v.SetDefault("agent.todo_enforcer_enabled", true)
 	l.v.SetDefault("agent.agent_tools_enabled", true)
 	l.v.SetDefault("agent.agent_tools_stream", false)
+	l.v.SetDefault("agent.system_prompt_dir", "~/.config/wukong/prompts/")
+	l.v.SetDefault("agent.recipe_dir", ".wukong/recipes/")
+	l.v.SetDefault("agent.recipe_enabled", true)
 
 	// --- Security defaults ---
 	l.v.SetDefault("security.malware_scan_enabled", true)
@@ -1056,6 +1090,8 @@ func (l *Loader) setDefaults() {
 	l.v.SetDefault("security.require_approval", false)
 	l.v.SetDefault("security.permission_mode", "smart")
 	l.v.SetDefault("security.guardrail_enabled", false)
+	l.v.SetDefault("security.ignore_file_enabled", true)
+	l.v.SetDefault("security.ignore_file", ".wukongignore")
 
 	// --- Session defaults ---
 	l.v.SetDefault("session.backend", "sqlite")
@@ -1186,6 +1222,9 @@ func (l *Loader) setDefaults() {
 
 	// --- Observability defaults ---
 	l.v.SetDefault("observability.langfuse_enabled", false)
+
+	// --- Project defaults ---
+	l.v.SetDefault("project_dir", "~/.config/wukong/")
 
 	// --- Telemetry defaults ---
 	l.v.SetDefault("telemetry.enabled", false)

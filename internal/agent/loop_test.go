@@ -120,7 +120,7 @@ func TestExtractCommandFromArgs(t *testing.T) {
 
 func TestBuildSystemInstruction_WithTopOfMind(t *testing.T) {
 	cfg := &config.WukongConfig{}
-	instruction := buildSystemInstruction(cfg, "Always use Chinese.")
+	instruction := buildSystemInstruction(cfg, "Always use Chinese.", "")
 	if instruction == "" {
 		t.Error("expected non-empty instruction with top of mind")
 	}
@@ -134,7 +134,7 @@ func TestBuildSystemInstruction_WithTopOfMind(t *testing.T) {
 
 func TestBuildSystemInstruction_WithoutTopOfMind(t *testing.T) {
 	cfg := &config.WukongConfig{}
-	instruction := buildSystemInstruction(cfg, "")
+	instruction := buildSystemInstruction(cfg, "", "")
 	if instruction == "" {
 		t.Error("expected non-empty instruction")
 	}

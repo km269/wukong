@@ -89,6 +89,11 @@ type CoreLoopConfig struct {
 	// down their workers. This ensures all pending writes are flushed
 	// and WAL is checkpointed before the process exits.
 	DBPoolClose func() error
+	// WorkingDir is the current working directory (for templates).
+	WorkingDir string
+	// SessionID and UserID are for template variable substitution.
+	SessionID string
+	UserID    string
 }
 
 // NewCoreLoop creates a new agent core loop.
@@ -96,6 +101,18 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 	// Collect all tools
 	var allTools []tool.Tool
 	allTools = append(allTools, cfg.FunctionTools...)
+
+	// Load YAML recipe sub-agents from configured directory.
+	// Recipes are defined as structured YAML files and become
+	// callable tools for the main agent.
+	recipeToolSet := NewRecipeToolSet(
+		cfg.Factory, &cfg.Config.Agent, allTools)
+	if recipeToolSet != nil && len(recipeToolSet.tools) > 0 {
+		allTools = append(allTools, recipeToolSet.tools...)
+		cfg.ToolSets = append(cfg.ToolSets, recipeToolSet)
+		util.Logger.Info("recipe: integrated sub-agents",
+			"count", len(recipeToolSet.tools))
+	}
 
 	// Add tRPC-native todo_write tool for structured task tracking.
 	// Tasks persist in Session state and survive across conversation turns.
@@ -559,7 +576,7 @@ func NewSimpleLLMAgent(
 		llmagent.WithGenerationConfig(genConfig),
 		llmagent.WithDescription(
 			fmt.Sprintf("Wukong %s - A2A endpoint", name)),
-		llmagent.WithInstruction(buildBaseInstruction()),
+		llmagent.WithInstruction(buildBaseInstruction("")),
 		llmagent.WithAddCurrentTime(true),
 	}
 	return llmagent.New("wukong-a2a-"+name, opts...)
@@ -581,8 +598,22 @@ func createSingleAgent(
 
 	genConfig := provider.GetDefaultGenerationConfig(&cfg.Config.Agent)
 
+	// Load prompt templates from configured directory.
+	// If templates exist, they replace the hardcoded base instruction.
+	// Variables like {{.WorkingDir}} are substituted at load time.
+	tmplMgr := NewPromptTemplateManager(cfg.Config)
+	templateVars := TemplateVars{
+		WorkingDir:   cfg.WorkingDir,
+		ModelName:    mdl.Info().Name,
+		ProviderName: cfg.Config.DefaultProvider,
+		SessionID:    cfg.SessionID,
+		UserName:     cfg.UserID,
+	}
+	templateText := tmplMgr.LoadTemplates(templateVars)
+
 	instructions := buildSystemInstruction(
 		cfg.Config, cfg.TopOfMindInstructions,
+		templateText,
 	)
 
 	agentOpts := []llmagent.Option{
@@ -752,17 +783,27 @@ func createSingleAgent(
 }
 
 // buildSystemInstruction builds the complete system instruction.
-// It combines the base instruction, memory guidance, and optional
-// Top of Mind persistent instructions. The framework placeholder
-// {current_time} is injected via WithAddCurrentTime(true).
+// It combines prompt templates (if available), the base instruction,
+// memory guidance, and optional Top of Mind persistent instructions.
+// The framework placeholder {current_time} is injected via
+// WithAddCurrentTime(true).
 func buildSystemInstruction(
 	cfg *config.WukongConfig,
 	topOfMind string,
+	templateText string,
 ) string {
-	// cfg is reserved for future config-driven instruction customization.
 	_ = cfg
 
-	base := "You are Wukong, a helpful and capable AI agent. " +
+	// Use template if provided; otherwise fall back to hardcoded base.
+	var base string
+	if templateText != "" {
+		base = templateText + "\n\n"
+		base += "You are Wukong, a helpful and capable AI agent. " +
+			"You have access to various tools that let you " +
+			"interact with the user's system. " +
+			"Respect the instructions above when using tools.\n\n"
+	} else {
+		base = "You are Wukong, a helpful and capable AI agent. " +
 		"You have access to various tools that let you " +
 		"interact with the user's system. " +
 		"Use tools proactively to complete tasks. " +
@@ -786,6 +827,7 @@ func buildSystemInstruction(
 		"constraints), store it with memory_add. " +
 		"Search with memory_search when you need to find " +
 		"specific remembered information."
+	}
 
 	// Inject Top of Mind persistent instructions if available
 	if topOfMind != "" {
@@ -898,6 +940,21 @@ func buildToolCallbacks(guard *security.Guard) *tool.Callbacks {
 					if err := guard.ValidateCommand(cmd); err != nil {
 						return nil, fmt.Errorf(
 							"command blocked by security: %w", err,
+						)
+					}
+				}
+			}
+
+			// For file-access tools, check against .wukongignore
+			if security.IsFileAccessTool(args.ToolName) &&
+				len(args.Arguments) > 0 {
+				paths := security.ExtractFilePathFromArgs(
+					args.Arguments)
+				for _, p := range paths {
+					if err := guard.CheckFilePath(p); err != nil {
+						return nil, fmt.Errorf(
+							"file access blocked by "+
+								".wukongignore: %w", err,
 						)
 					}
 				}

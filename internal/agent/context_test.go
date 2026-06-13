@@ -231,7 +231,7 @@ func TestContextManager_Delegation(t *testing.T) {
 
 func TestBuildSystemInstruction(t *testing.T) {
 	cfg := &config.WukongConfig{}
-	instruction := buildSystemInstruction(cfg, "")
+	instruction := buildSystemInstruction(cfg, "", "")
 	if instruction == "" {
 		t.Error("expected non-empty system instruction")
 	}

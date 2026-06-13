@@ -113,7 +113,7 @@ func (b *WorkflowBuilder) buildSingleAgent() (agent.Agent, error) {
 		llmagent.WithModel(b.model),
 		llmagent.WithGenerationConfig(b.genConfig),
 		llmagent.WithDescription("Wukong AI Agent - Single mode"),
-		llmagent.WithInstruction(buildBaseInstruction()),
+		llmagent.WithInstruction(buildBaseInstruction("")),
 		llmagent.WithAddCurrentTime(true),
 	}
 
@@ -619,7 +619,14 @@ func (b *WorkflowBuilder) buildTeamAgent(
 }
 
 // buildBaseInstruction returns the base system instruction.
-func buildBaseInstruction() string {
+// When templateText is non-empty, it is used as a prefix
+// before the hardcoded fallback instruction.
+func buildBaseInstruction(templateText string) string {
+	if templateText != "" {
+		return templateText + "\n\n" +
+			"You are Wukong, a helpful and capable AI agent. " +
+			"Respect the instructions above when using tools."
+	}
 	return "You are Wukong, a helpful and capable AI agent. " +
 		"You have access to various tools that let you " +
 		"interact with the user's system. " +

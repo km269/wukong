@@ -107,6 +107,14 @@ agent:
   # Agent Tools - 将子 Agent（code-reviewer, summarizer）包装为可调用工具
   agent_tools_enabled: true
   # agent_tools_stream: true  # 启用子Agent结果流式输出
+  # 系统提示词模板目录 (加载 .md 文件拼接为 system instruction)
+  # 空目录或不存在时回退到内置默认提示词
+  system_prompt_dir: "~/.config/wukong/prompts/"
+  # YAML Recipe 子代理定义目录 (结构化子代理配置)
+  # 每个 .yaml 文件定义一个命名子代理（instruction/tools/model）
+  # 默认可通过 system- 前缀工具调用
+  # recipe_dir: ".wukong/recipes/"
+  # recipe_enabled: true
 
 # ---------------------------------------------------------------------------
 # Security - 安全策略与工具权限
@@ -129,6 +137,10 @@ security:
   denylist: []
   # Guardrail - 提示注入检测 (增加延迟)
   guardrail_enabled: false
+  # .wukongignore 文件访问黑名单 (gitignore 兼容语法)
+  # 启用后，file_read/write/replace/command_execute 拒绝访问匹配路径
+  ignore_file_enabled: true
+  ignore_file: ".wukongignore"
 
 # ---------------------------------------------------------------------------
 # Session - 会话存储配置
@@ -456,3 +468,9 @@ artifact:
   # cos_bucket_url: "https://bucket.cos.region.myqcloud.com"
   # cos_secret_id: "${COS_SECRETID}"    # 或通过 COS_SECRETID 环境变量
   # cos_secret_key: "${COS_SECRETKEY}"  # 或通过 COS_SECRETKEY 环境变量
+
+# ---------------------------------------------------------------------------
+# Project - 项目追踪
+# 自动记录工作目录与最后会话，支持 quick-recovery
+# ---------------------------------------------------------------------------
+# project_dir: "~/.config/wukong/"  # 项目数据存储目录

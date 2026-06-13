@@ -66,6 +66,11 @@ type Model struct {
 	// Model info for status bar
 	modelName string
 
+	// Project tracking
+	workingDir    string
+	projectMgr    interface{} // *project.Manager (avoids import cycle)
+	instrRecorded bool
+
 	// Layout
 	width  int
 	height int
@@ -74,10 +79,12 @@ type Model struct {
 
 // ModelConfig holds dependencies for creating the TUI model.
 type ModelConfig struct {
-	Config    *config.WukongConfig
-	Loop      *agent.CoreLoop
-	UserID    string
-	SessionID string
+	Config     *config.WukongConfig
+	Loop       *agent.CoreLoop
+	UserID     string
+	SessionID  string
+	WorkingDir string
+	ProjectMgr interface{} // *project.Manager (avoids import cycle)
 }
 
 // NewModel creates a new Bubbletea TUI model.
@@ -101,13 +108,15 @@ func NewModel(cfg ModelConfig) *Model {
 	}
 
 	return &Model{
-		viewport:   vp,
-		textarea:   ta,
-		userID:     cfg.UserID,
-		sessionID:  cfg.SessionID,
-		loop:       cfg.Loop,
-		cfg:        cfg.Config,
-		modelName:  modelDisplay,
+		viewport:    vp,
+		textarea:    ta,
+		userID:      cfg.UserID,
+		sessionID:   cfg.SessionID,
+		loop:        cfg.Loop,
+		cfg:         cfg.Config,
+		modelName:   modelDisplay,
+		workingDir:  cfg.WorkingDir,
+		projectMgr:  cfg.ProjectMgr,
 		messages: []chatEntry{
 			{Role: "system", Content: startupMsg},
 		},
@@ -467,12 +476,16 @@ func StartTUI(
 	cfg *config.WukongConfig,
 	loop *agent.CoreLoop,
 	userID, sessionID string,
+	workingDir string,
+	projectMgr interface{},
 ) error {
 	m := NewModel(ModelConfig{
-		Config:    cfg,
-		Loop:      loop,
-		UserID:    userID,
-		SessionID: sessionID,
+		Config:     cfg,
+		Loop:       loop,
+		UserID:     userID,
+		SessionID:  sessionID,
+		WorkingDir: workingDir,
+		ProjectMgr: projectMgr,
 	})
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
