@@ -1,6 +1,6 @@
 # Wukong 🐵
 
-> **本地优先、可扩展的 AI Agent 平台** | Go 1.26 | tRPC 生态 | 10种工作流 | 12个内置扩展 | 7种Provider | ACP/A2A/MCP三协议 | 101源文件
+> **本地优先、可扩展的 AI Agent 平台** | Go 1.26 | tRPC 生态 | 3种执行模式 | 10种工作流 | 12个内置扩展 | 7种Provider | ACP/A2A/MCP三协议 | 101源文件
 
 Wukong 是一个本地优先、可扩展的 AI Agent 平台，基于 [tRPC-Agent-Go](https://github.com/trpc-group/trpc-agent-go) v1.10.0、[tRPC-MCP-Go](https://github.com/trpc-group/trpc-mcp-go) 和 [tRPC-A2A-Go](https://github.com/trpc-group/trpc-a2a-go) 构建。提供类似 Goose 的 CLI 交互体验，支持多种 LLM 后端、工具调用、浏览器自动化、长期记忆、RAG 知识检索等能力。
 
@@ -66,7 +66,7 @@ providers:
 ### 使用
 
 ```bash
-# 交互会话
+# 交互会话（TUI）
 ./wukong session
 
 # 指定 Provider 和模型
@@ -76,7 +76,13 @@ providers:
 ./wukong session --session-id <session-id-prefix>
 
 # 单次执行
-./wukong run "解释这个项目的架构"
+./wukong run -m "解释这个项目的架构"
+echo "优化 app.go" | ./wukong run
+
+# 多轮对话（Shell REPL，自动保持上下文）
+./wukong run -d
+./wukong run -d -p deepseek --model deepseek-chat
+./wukong run -d -s my-task          # 自定义 session，可随时恢复
 
 # 扩展管理
 ./wukong extension list             # 列出所有扩展
@@ -264,7 +270,7 @@ wukong/
 │   ├── apps/                    HTML应用文件管理
 │   ├── artifact/                inmemory/COS制品工厂
 │   ├── browser/                 HTTP+Chromedp(CDP)双模引擎
-│   ├── cli/+tui/                6子命令 · Bubbletea TUI
+│   ├── cli/+tui/                7子命令 · Bubbletea TUI · 对话模式REPL
 │   ├── codemode/                goja JS沙箱
 │   ├── config/                  Viper配置 · 30+配置段
 │   ├── eval/                    EvalSet/Metric/Evaluator

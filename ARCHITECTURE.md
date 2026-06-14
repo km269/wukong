@@ -1,6 +1,6 @@
 # Wukong 系统架构文档
 
-> **版本**: v0.5.0 | **Go**: 1.26 | **总源文件**: 101 (.go) + 31 (_test.go) | **~28,000 行**
+> **版本**: v0.5.1 | **Go**: 1.26 | **总源文件**: 101 (.go) + 31 (_test.go) | **~29,000 行**
 
 ---
 
@@ -25,8 +25,8 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│ CLI 层 │ cmd/wukong + cli/ + tui/ │ 6 子命令                          │
-│   session/configure/extension/eval/version/completion                 │
+│ CLI 层 │ cmd/wukong + cli/ + tui/ │ 7 子命令                          │
+│   session / run / configure / extension / eval / version / completion │
 ├──────────────────────────────────────────────────────────────────────┤
 │ 引导层 │ cli/session.go::bootstrapSession() │ ~30 子系统串行初始化     │
 ├──────────────────────────────────────────────────────────────────────┤
@@ -69,8 +69,8 @@ wukong/
 │   ├── browser/controller.go         浏览器自动化（HTTP+Chromedp）
 │   ├── cli/                          CLI命令层（11文件）
 │   │   ├── root.go                   Cobra根命令
-│   │   ├── session.go                交互会话引导
-│   │   ├── run.go                    单次执行模式
+│   │   ├── session.go                交互TUI会话引导
+│   │   ├── run.go                    单次执行 + 对话模式（-d）
 │   │   ├── configure.go              配置向导
 │   │   ├── extension.go              扩展管理命令
 │   │   ├── project.go                项目追踪/恢复
@@ -140,8 +140,38 @@ wukong/
 
 ## 2. 核心数据流
 
+### 2.1 TUI 模式 (`wukong session`)
+
 ```
-用户输入 → TUI
+用户输入 → TUI (Bubbletea)
+  → CoreLoop.RunStream(ctx, userID, sessionID, msg)
+    ├─ OTel Trace Span 开始
+    ├─ ContextManager.PrepareContext()           Token 预算检查 + 异步摘要触发
+    ├─ RecallStore.StoreMessage(user)             写入 FTS5 索引
+    └─ Runner.Run() → 工具循环 → 流式事件 → TUI 渲染
+```
+
+### 2.2 单次执行模式 (`wukong run -m "..."`)
+
+```
+CLI参数/stdin/管道 → resolveInput() → bootstrapSession()
+  → runOneShot() → RunStream() → streamToStdout() → 输出 → 退出
+```
+
+### 2.3 对话模式 (`wukong run -d`)
+
+```
+bootstrapSession() → 自动生成 sessionID
+  → runDialogue() → REPL 循环
+    ├─ "> " 提示 → 读取输入 → /exit 退出
+    ├─ runOneShot() → 流式输出到 stdout
+    └─ 同一 sessionID 保持上下文中
+```
+
+### 2.4 详细执行链路
+
+```
+用户输入 → TUI / runOneShot / Dialogue REPL
   → CoreLoop.RunStream(ctx, userID, sessionID, msg)
     ├─ OTel Trace Span 开始
     ├─ ContextManager.PrepareContext()           Token 预算检查 + 异步摘要触发
@@ -675,3 +705,4 @@ Signal/Return → defer
 | 13 | Project Tracking | 工作目录自动记录，会话快速恢复 |
 | 14 | ACP MCP Bridge | tRPC-MCP-Go Server 暴露扩展，ACP 代理透传调用 |
 | 15 | ACP Server + Provider | 标准 ACP 协议端点 + Provider 类型，双向集成 |
+| 16 | Dialogue Mode | `wukong run -d` 内置 REPL，复用 `runOneShot`，无需独立 TUI |

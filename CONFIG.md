@@ -829,12 +829,22 @@ eval:
 | CLI 参数 | 覆盖配置项 | 示例 |
 |---------|-----------|------|
 | `-p / --provider` | `default_provider` | `--provider deepseek` |
-| `-m / --model` | provider的`model` | `--model gpt-4o-mini` |
+| `-m / --message` | —（`run` 专用） | `-m "解释架构"` |
+| `--model` | provider的`model` | `--model gpt-4o-mini` |
 | `--temperature` | `agent.temperature` | `--temperature 0.5` |
 | `--max-tokens` | `agent.max_tokens` | `--max-tokens 8192` |
 | `--no-stream` | `agent.streaming = false` | `--no-stream` |
 | `-s / --session-id` | session ID | `--session-id abc12345` |
+| `-d / --dialogue` | 进入多轮对话模式（`run` 专用） | `-d` |
 | `-c / --config` | 配置文件路径 | `--config ./my-config.yaml` |
+
+### 执行模式对比
+
+| 模式 | 命令 | 交互 | 上下文保持 | 适用场景 |
+|------|------|------|-----------|---------|
+| **TUI** | `wukong session` | Bubbletea UI | 自动 | 日常开发对话 |
+| **单次** | `wukong run -m "..."` | 无 | 仅当 -s 指定 | 脚本/管道/CI |
+| **对话** | `wukong run -d` | Shell REPL | 自动 | 轻量多轮 |
 
 ---
 
