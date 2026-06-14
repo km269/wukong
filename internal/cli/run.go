@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -12,15 +13,16 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
-	"github.com/km269/wukong/internal/util"
+	"github.com/km269/wukong/internal/agent"
+	"github.com/km269/wukong/internal/config"
 
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 // newRunCmd creates the "wukong run" command for terminal integration.
-// It supports both --message flag and stdin pipe, enabling patterns
-// like: echo "refactor X" | wukong run  or  wukong run -m "fix Y".
+// It supports --message flag, stdin pipe, positional args, and
+// --dialogue mode for multi-turn shell conversations.
 func newRunCmd() *cobra.Command {
 	var (
 		configPath  string
@@ -31,34 +33,43 @@ func newRunCmd() *cobra.Command {
 		maxTokens   int
 		noStream    bool
 		sessionID   string
+		dialogue    bool
 	)
 
 	cmd := &cobra.Command{
-		Use:   "run [flags]",
-		Short: "Execute a single-shot agent request (no TUI)",
-		Long: `Run the AI agent on a single prompt and print the
-response to stdout. Ideal for terminal integration,
-shell pipelines, and scripting.
+		Use:   "run [flags] [message...]",
+		Short: "Execute an agent request (single-shot or dialogue mode)",
+		Long: `Run the AI agent on a prompt and print the response to stdout.
+
+Single-shot mode (default):
+  wukong run -m "explain this function"
+  echo "optimize app.go" | wukong run
+
+Dialogue mode (-d / --dialogue):
+  Start a multi-turn shell conversation with auto-generated
+  session ID. Type messages line by line. Ctrl+D or /exit to quit.
+
+  wukong run -d
+  wukong run -d -p deepseek --model deepseek-chat
 
 Examples:
   wukong run -m "explain this function"
-  echo "optimize app.go" | wukong run
-  wukong run --message "add comments" --model gpt-4o`,
+  wukong run -d                                     # start dialogue
+  wukong run -d -s my-task                          # dialogue with custom session
+  wukong run -d -p deepseek --model deepseek-chat   # dialogue with specific model`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			input := resolveInput(message, args)
-			if input == "" {
-				return fmt.Errorf(
-					"no input: use --message or pipe stdin")
-			}
 
 			if sessionID == "" {
 				sessionID = uuid.New().String()
 			}
 
-			// Bootstrap the full agent stack (same as interactive
-			// session but without TUI).
+			// Resolve userID for the runner and subsystems.
+			runUserID := resolveUserID()
+
+			// Bootstrap the full agent stack.
 			wukongCfg, loop, state, err := bootstrapSession(
-				configPath, "", sessionID,
+				configPath, runUserID, sessionID,
 				provider, modelName,
 				temperature, maxTokens, noStream,
 			)
@@ -67,8 +78,6 @@ Examples:
 					"bootstrap failed: %w", err)
 			}
 			defer func() {
-				// Close the agent loop first (triggers memory →
-				// runner → session → telemetry → dbpool chain).
 				if loop != nil {
 					loop.Close()
 				}
@@ -82,49 +91,36 @@ Examples:
 					workingDir, sessionID, input)
 			}
 
-			// Execute the agent call.
-			msg := model.NewUserMessage(input)
-			ctx := context.Background()
-
-			// Resolve userID for the runner.
-			runUserID := resolveUserID()
-			util.Logger.Info("run: userID resolved",
-				"user_id", runUserID,
-			)
-
-			// Stream to stdout if streaming is enabled.
-			if !noStream && wukongCfg.Agent.Streaming {
-				onEvent := func(evt *event.Event) error {
-					if evt.Response != nil &&
-						len(evt.Response.Choices) > 0 {
-						content := evt.Response.Choices[0].
-							Delta.Content
-						if content != "" {
-							fmt.Print(content)
-						}
+			// Dialogue mode: multi-turn REPL.
+			if dialogue {
+				// If -m or args were also given, process them
+				// as the first turn.
+				if input != "" {
+					if printErr := runOneShot(
+						wukongCfg, loop,
+						runUserID, sessionID,
+						input, noStream,
+					); printErr != nil {
+						fmt.Fprintln(os.Stderr,
+							"agent error:", printErr)
 					}
-					return nil
 				}
-				response, err := loop.RunStream(
-					ctx, runUserID, sessionID, msg, onEvent)
-				fmt.Println() // final newline
-				if err != nil {
-					return fmt.Errorf(
-						"agent error: %w", err)
-				}
-				_ = response
-			} else {
-				// Non-streaming: collect and print at end.
-				response, err := loop.RunStream(
-					ctx, runUserID, sessionID, msg, nil)
-				if err != nil {
-					return fmt.Errorf(
-						"agent error: %w", err)
-				}
-				fmt.Println(response)
+				return runDialogue(
+					wukongCfg, loop,
+					runUserID, sessionID, noStream,
+				)
 			}
 
-			return nil
+			// Single-shot mode: -m / args / stdin required.
+			if input == "" {
+				return fmt.Errorf(
+					"no input: use --message, positional args, pipe stdin, or --dialogue")
+			}
+			return runOneShot(
+				wukongCfg, loop,
+				runUserID, sessionID,
+				input, noStream,
+			)
 		},
 	}
 
@@ -158,24 +154,152 @@ Examples:
 
 	cmd.Flags().StringVarP(
 		&sessionID, "session-id", "s", "",
-		"Session ID (auto-generated if not specified)")
+		"Session ID for multi-turn context (auto-generated if not specified)")
+
+	cmd.Flags().BoolVarP(
+		&dialogue, "dialogue", "d", false,
+		"Enter multi-turn dialogue mode in the shell (Ctrl+D or /exit to quit)")
 
 	return cmd
 }
 
+// ==========================================================================
+// Single-shot execution
+// ==========================================================================
+
+// runOneShot executes a single prompt and prints the response.
+func runOneShot(
+	cfg *config.WukongConfig,
+	loop *agent.CoreLoop,
+	userID, sessionID, input string,
+	noStream bool,
+) error {
+	msg := model.NewUserMessage(input)
+	ctx := context.Background()
+
+	if !noStream && cfg.Agent.Streaming {
+		response, err := loop.RunStream(
+			ctx, userID, sessionID, msg,
+			streamToStdout,
+		)
+		fmt.Println() // final newline
+		_ = response
+		return err
+	}
+
+	response, err := loop.RunStream(
+		ctx, userID, sessionID, msg, nil)
+	fmt.Println(response)
+	return err
+}
+
+// streamToStdout prints streaming deltas to stdout.
+func streamToStdout(evt *event.Event) error {
+	if evt.Response != nil && len(evt.Response.Choices) > 0 {
+		content := evt.Response.Choices[0].Delta.Content
+		if content != "" {
+			fmt.Print(content)
+		}
+	}
+	return nil
+}
+
+// ==========================================================================
+// Dialogue mode (REPL in shell)
+// ==========================================================================
+
+// runDialogue starts a read-eval-print loop for multi-turn conversation.
+func runDialogue(
+	cfg *config.WukongConfig,
+	loop *agent.CoreLoop,
+	userID, sessionID string,
+	noStream bool,
+) error {
+	reader := bufio.NewReader(os.Stdin)
+
+	displaySession := sessionID
+	if len(displaySession) > 8 {
+		displaySession = displaySession[:8]
+	}
+
+	fmt.Printf(`
+╔══════════════════════════════════════════════╗
+║  Wukong Dialogue Mode                       ║
+║  Session: %s                          ║
+║  Type your message, Ctrl+D or /exit to quit ║
+╚══════════════════════════════════════════════╝
+`, displaySession)
+
+	for {
+		fmt.Print("\n> ")
+
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				fmt.Println("\nGoodbye.")
+				return nil
+			}
+			return fmt.Errorf("read input: %w", err)
+		}
+
+		input := strings.TrimSpace(line)
+
+		// Exit conditions.
+		if input == "" {
+			continue
+		}
+		if input == "/exit" || input == "/quit" {
+			fmt.Println("Goodbye.")
+			return nil
+		}
+		if input == "/session" {
+			fmt.Printf("Session ID: %s\n", sessionID)
+			continue
+		}
+		if input == "/clear" {
+			// Note: session context persists server-side.
+			// /clear just gives visual separation.
+			fmt.Print("\033[2J\033[H") // ANSI clear screen
+			continue
+		}
+		if input == "/help" {
+			fmt.Println(`
+Commands:
+  /exit, /quit   Exit dialogue mode
+  /session       Show current session ID
+  /clear         Clear terminal screen
+  /help          Show this help
+
+Session ID: ` + sessionID + `
+To resume later: wukong run -d -s ` + sessionID)
+			continue
+		}
+
+		fmt.Println()
+
+		// Execute the agent call within this dialogue turn.
+		printErr := runOneShot(
+			cfg, loop, userID, sessionID, input, noStream,
+		)
+		if printErr != nil {
+			fmt.Fprintf(os.Stderr,
+				"\nagent error: %v\n", printErr)
+		}
+	}
+}
+
+// ==========================================================================
+// Input resolution
+// ==========================================================================
+
 // resolveInput determines the prompt text from flag, args, or stdin.
 func resolveInput(flagMsg string, args []string) string {
-	// Priority 1: --message flag
 	if flagMsg != "" {
 		return flagMsg
 	}
-
-	// Priority 2: positional args concatenated
 	if len(args) > 0 {
 		return strings.Join(args, " ")
 	}
-
-	// Priority 3: stdin pipe (check if data is available)
 	stat, _ := os.Stdin.Stat()
 	if (stat.Mode() & os.ModeCharDevice) == 0 {
 		data, err := io.ReadAll(os.Stdin)
@@ -183,13 +307,14 @@ func resolveInput(flagMsg string, args []string) string {
 			return strings.TrimSpace(string(data))
 		}
 	}
-
 	return ""
 }
 
+// ==========================================================================
+// Helpers
+// ==========================================================================
+
 // resolveUserID determines a reasonably unique user identifier.
-// Priority: USER env var (Unix), USERDOMAIN\USERNAME (Windows),
-// hostname fallback, "default" last resort.
 func resolveUserID() string {
 	userID := os.Getenv("USER")
 	if userID == "" {
@@ -213,9 +338,6 @@ func resolveUserID() string {
 }
 
 // cleanupBootstrap shuts down the bootstrapped resources.
-// For single-shot execution, we only need to stop the A2A/ACP servers.
-// The CoreLoop.Close() triggers the full cleanup chain (memory,
-// runner, session, telemetry, dbpool).
 func cleanupBootstrap(state *BootstrapState) {
 	if state == nil {
 		return

@@ -8,9 +8,9 @@ import (
 
 // Version information set at build time via ldflags.
 var (
-	Version   = "0.1.5"
+	Version   = "0.1.6"
 	GitCommit = "unknown"
-	BuildDate = "2026-06-12"
+	BuildDate = "2026-06-14"
 )
 
 func newVersionCmd() *cobra.Command {
