@@ -127,6 +127,18 @@ func runSession(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Overrides: %s\n", strings.Join(parts, ", "))
 	}
 
+	// === Quick pre-load: show session info BEFORE full bootstrap ===
+	// This gives the user immediate feedback while subsystems load.
+	quickCfg := quickLoadConfig(configPath, provider, modelName)
+	fmt.Printf(
+		"Session: %s\nProject: %s\nProvider: %s\nModel: %s\n",
+		sessionID[:8],
+		workingDir,
+		quickCfg.provider,
+		quickCfg.model,
+	)
+	fmt.Println("Initializing subsystems...")
+
 	// Bootstrap the full system
 	wukongCfg, loop, bootstrapState, err := bootstrapSession(
 		configPath, userID, sessionID, provider, modelName,
@@ -216,19 +228,7 @@ func runSession(cmd *cobra.Command, args []string) error {
 			workingDir, sessionID, "")
 	}
 
-	p := wukongCfg.DefaultProviderConfig()
-	modelDisplay := ""
-	if p != nil {
-		modelDisplay = p.Model
-	}
-
-	fmt.Printf(
-		"Session: %s\nProject: %s\nProvider: %s\nModel: %s\n\n",
-		sessionID[:8],
-		workingDir,
-		wukongCfg.DefaultProvider,
-		modelDisplay,
-	)
+	fmt.Println() // blank line after bootstrap logs
 
 	// Start TUI — pass projectMgr for instruction tracking.
 	return tui.StartTUI(
@@ -863,6 +863,43 @@ func applyOverrides(
 	if noStream {
 		cfg.Agent.Streaming = false
 	}
+}
+
+// validateConfig checks for common configuration mistakes and
+// quickConfig holds minimal session info for immediate display.
+type quickConfig struct {
+	provider string
+	model    string
+}
+
+// quickLoadConfig performs a minimal config load to get provider
+// and model info before the full bootstrap. This gives the user
+// immediate feedback without waiting for all subsystems to start.
+func quickLoadConfig(
+	configPath, cliProvider, cliModel string,
+) quickConfig {
+	loader, err := config.NewLoader(configPath)
+	if err != nil {
+		return quickConfig{provider: "unknown", model: "unknown"}
+	}
+	cfg, err := loader.Load()
+	if err != nil {
+		return quickConfig{provider: "unknown", model: "unknown"}
+	}
+
+	provider := cliProvider
+	if provider == "" {
+		provider = cfg.DefaultProvider
+	}
+
+	model := cliModel
+	if model == "" {
+		if p := cfg.FindProvider(provider); p != nil {
+			model = p.Model
+		}
+	}
+
+	return quickConfig{provider: provider, model: model}
 }
 
 // validateConfig checks for common configuration mistakes and
