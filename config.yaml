@@ -86,7 +86,7 @@ agent:
   planner: ""
   # reasoning_effort: "medium"  # low / medium / high (仅 builtin planner)
   # Tool Search - 自动工具筛选，减少 token 消耗
-  tool_search_enabled: false
+  tool_search_enabled: true #false
   # tool_search_max_tools: 20
   # 上下文压缩 - 自动截断过长的工具结果，防止上下文溢出
   # 启后执行两遍压缩：
