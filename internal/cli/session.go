@@ -27,6 +27,7 @@ import (
 	"github.com/km269/wukong/internal/provider"
 	"github.com/km269/wukong/internal/recall"
 	"github.com/km269/wukong/internal/security"
+	"github.com/km269/wukong/internal/evolution"
 	"github.com/km269/wukong/internal/server"
 	wksession "github.com/km269/wukong/internal/session"
 	"github.com/km269/wukong/internal/skill"
@@ -455,6 +456,33 @@ func bootstrapSession(
 			"error", err.Error())
 	}
 
+	// Initialize the Skill Evolution engine.
+	// When enabled, skill execution traces are captured and analyzed
+	// by an LLM to detect issues and automatically patch SKILL.md files.
+	var evoEngine *evolution.EvolutionEngine
+	if wukongCfg.Evolution.Enabled {
+		evoEngine, err = evolution.NewEngine(evolution.EngineConfig{
+			Config:  wukongCfg,
+			Factory: factory,
+			DBPool:  dbPool,
+		})
+		if err != nil {
+			util.Logger.Warn("evolution engine init failed",
+				"error", err.Error())
+		} else {
+			// Wire evolution hook into skill manager so traces
+			// are captured when skill agents execute.
+			// Adapter converts skill.SkillExecutionTrace to
+			// evolution.ExecutionTrace.
+			skillMgr.SetEvolutionHook(
+				&skillEvoAdapter{engine: evoEngine},
+			)
+			// Set the skill manager as refresher so the engine
+			// can trigger hot-reload after patches are applied.
+			evoEngine.SetRefresher(skillMgr)
+		}
+	}
+
 	// Register Skill agents as Summon delegates so the main agent
 	// can delegate to specialized skill agents. Each skill is
 	// loaded as a sub-agent and wrapped with concurrency control.
@@ -664,6 +692,7 @@ func bootstrapSession(
 		TopOfMindInstructions: topOfMindInstructions,
 		TelemetryShutdown:     combinedShutdown,
 		MemoryClose:           memoryMgr.Close,
+		EvolutionClose:        evoEngineClose(evoEngine),
 		DBPoolClose:           dbPool.Close,
 	})
 	if err != nil {
@@ -962,6 +991,45 @@ func validateConfig(cfg *config.WukongConfig) {
 				"memory.extractor_provider to a faster model")
 		}
 	}
+}
+
+// evoEngineClose returns a close function for the evolution engine,
+// or nil if the engine is nil (not enabled).
+func evoEngineClose(engine *evolution.EvolutionEngine) func() error {
+	if engine == nil {
+		return nil
+	}
+	return engine.Close
+}
+
+// skillEvoAdapter converts skill.SkillExecutionTrace to
+// evolution.ExecutionTrace and forwards it to the evolution engine.
+// This avoids import cycles between the skill and evolution packages.
+type skillEvoAdapter struct {
+	engine *evolution.EvolutionEngine
+}
+
+func (a *skillEvoAdapter) RecordExecution(
+	trace *skill.SkillExecutionTrace,
+) {
+	if a.engine == nil || trace == nil {
+		return
+	}
+	a.engine.RecordExecution(&evolution.ExecutionTrace{
+		SkillName:    trace.SkillName,
+		SkillFile:    trace.SkillFile,
+		SessionID:    trace.SessionID,
+		UserID:       trace.UserID,
+		StartTime:    trace.StartTime,
+		EndTime:      trace.EndTime,
+		Duration:     trace.Duration,
+		LLMCalls:     trace.LLMCalls,
+		Error:        trace.Error,
+		ErrorCount:   trace.ErrorCount,
+		FinalOutput:  trace.FinalOutput,
+		OutputLength: trace.OutputLength,
+		Success:      trace.Success,
+	})
 }
 
 

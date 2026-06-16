@@ -1,0 +1,16 @@
+# Build output
+wukong.exe
+main.exe
+
+# gse Chinese dictionary workaround (see dict loading in gse module)
+github.com/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

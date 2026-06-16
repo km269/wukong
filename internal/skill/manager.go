@@ -14,7 +14,9 @@ package skill
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
+	"time"
 
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/util"
@@ -26,12 +28,52 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
+// SkillEvolutionHook is implemented by the evolution engine to
+// capture skill execution traces after each skill invocation.
+type SkillEvolutionHook interface {
+	RecordExecution(trace *SkillExecutionTrace)
+}
+
+// SkillExecutionTrace mirrors evolution.ExecutionTrace to avoid
+// import cycles between packages.
+type SkillExecutionTrace struct {
+	SkillName    string
+	SkillFile    string
+	SessionID    string
+	UserID       string
+	StartTime    time.Time
+	EndTime      time.Time
+	Duration     time.Duration
+	LLMCalls     int
+	Error        string
+	ErrorCount   int
+	FinalOutput  string
+	OutputLength int
+	Success      bool
+}
+
 // Manager manages the lifecycle of agent skills, including
 // discovery, loading, and agent creation from skills.
 type Manager struct {
 	cfg        config.SkillConfig
 	repository *agentskill.FSRepository
 	summaries  []agentskill.Summary
+	evoHook    SkillEvolutionHook // optional evolution hook
+}
+
+// SkillsDir returns the configured skills directory.
+// Implements the evolution.SkillRefresher interface pattern.
+func (m *Manager) SkillsDir() string {
+	if m.cfg.SkillsDir != "" {
+		return m.cfg.SkillsDir
+	}
+	return ".wukong_agent_skills"
+}
+
+// SetEvolutionHook sets the evolution hook for trace capture.
+// The hook is invoked from CreateSkillAgent's AfterAgent callback.
+func (m *Manager) SetEvolutionHook(hook SkillEvolutionHook) {
+	m.evoHook = hook
 }
 
 // NewManager creates a new skill manager.
@@ -111,7 +153,8 @@ func (m *Manager) HasSkill(name string) bool {
 
 // CreateSkillAgent creates an LLMAgent from a loaded skill.
 // The agent is configured with the skill's instruction and
-// the provided model and tools.
+// the provided model and tools. If an evolution hook is set,
+// an AfterAgent callback is registered to capture execution traces.
 func (m *Manager) CreateSkillAgent(
 	ctx context.Context,
 	name string,
@@ -143,7 +186,87 @@ func (m *Manager) CreateSkillAgent(
 		opts = append(opts, llmagent.WithTools(tools))
 	}
 
+	// Register evolution trace capture if hook is set
+	if m.evoHook != nil {
+		skillName := name
+		hook := m.evoHook
+		callbacks := agent.NewCallbacks()
+		callbacks.RegisterAfterAgent(
+			func(aCtx context.Context,
+				args *agent.AfterAgentArgs,
+			) (*agent.AfterAgentResult, error) {
+				captureEvolutionTrace(
+					aCtx, args, skillName, hook,
+				)
+				return nil, nil
+			},
+		)
+		opts = append(opts,
+			llmagent.WithAgentCallbacks(callbacks))
+	}
+
 	return llmagent.New("skill-"+name, opts...), nil
+}
+
+// captureEvolutionTrace extracts execution data from AfterAgentArgs
+// and forwards it to the evolution hook.
+func captureEvolutionTrace(
+	ctx context.Context,
+	args *agent.AfterAgentArgs,
+	skillName string,
+	hook SkillEvolutionHook,
+) {
+	if args == nil || args.Invocation == nil {
+		return
+	}
+
+	invocation := args.Invocation
+	now := time.Now()
+
+	trace := &SkillExecutionTrace{
+		SkillName: skillName,
+		EndTime:   now,
+	}
+
+	// Approximate start time from invocation state if available,
+	// otherwise use EndTime (duration will be 0).
+	if startAt, ok := invocation.GetState("start_at"); ok {
+		if t, ok := startAt.(time.Time); ok {
+			trace.StartTime = t
+			trace.Duration = now.Sub(t)
+		}
+	}
+	if trace.StartTime.IsZero() {
+		trace.StartTime = now
+	}
+
+	if args.Error != nil {
+		trace.Error = args.Error.Error()
+		trace.ErrorCount = 1
+	}
+
+	// Extract final output from invocation state
+	if lastResp, ok := invocation.GetState("last_response"); ok {
+		if s, ok := lastResp.([]byte); ok {
+			trace.FinalOutput = string(s)
+			trace.OutputLength = len(s)
+		} else if s, ok := lastResp.(string); ok {
+			trace.FinalOutput = s
+			trace.OutputLength = len(s)
+		}
+	}
+
+	trace.Success = trace.Error == "" &&
+		trace.OutputLength > 0
+
+	// Log trace capture for debugging
+	util.Logger.Debug("evolution: captured skill trace",
+		slog.String("skill", skillName),
+		slog.Bool("success", trace.Success),
+		slog.Int("output_len", trace.OutputLength),
+	)
+
+	hook.RecordExecution(trace)
 }
 
 // Refresh reloads the skill repository to pick up new or updated

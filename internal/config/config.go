@@ -107,6 +107,11 @@ type WukongConfig struct {
 	// Skill configures the tRPC Agent Skill repository system.
 	Skill SkillConfig `mapstructure:"skill"`
 
+	// Evolution configures the skill self-evolution system.
+	// When enabled, skill execution traces are analyzed by an LLM,
+	// and SKILL.md files are automatically patched for improvement.
+	Evolution EvolutionConfig `mapstructure:"evolution"`
+
 	// Knowledge configures the RAG knowledge retrieval system.
 	Knowledge KnowledgeConfig `mapstructure:"knowledge"`
 
@@ -686,6 +691,42 @@ type SkillConfig struct {
 	MaxSkills int `mapstructure:"max_skills"`
 }
 
+// EvolutionConfig defines the skill self-evolution system settings.
+// When enabled, skill execution traces are analyzed after each run,
+// and problematic skills are automatically patched to improve accuracy.
+type EvolutionConfig struct {
+	// Enabled enables the skill evolution system. Default: false.
+	Enabled bool `mapstructure:"enabled"`
+	// AutoPatch automatically applies patches without user confirmation.
+	// When false, patches are only logged as suggestions. Default: false.
+	AutoPatch bool `mapstructure:"auto_patch"`
+	// AnalysisProvider is the provider name for the evolution analysis model.
+	// If empty, the default provider is used. A smaller/faster model is
+	// recommended (e.g., "deepseek" with deepseek-chat).
+	AnalysisProvider string `mapstructure:"analysis_provider"`
+	// AnalysisModel is the model name for evolution analysis. If empty,
+	// the provider's default model is used.
+	AnalysisModel string `mapstructure:"analysis_model"`
+	// MinConfidence is the minimum confidence (0.0-1.0) required to
+	// accept a patch suggestion. Default: 0.7.
+	MinConfidence float64 `mapstructure:"min_confidence"`
+	// CooldownPeriod is the minimum interval between two patches for
+	// the same skill. Prevents rapid patching loops. Default: "30m".
+	CooldownPeriod time.Duration `mapstructure:"cooldown_period"`
+	// MaxPatchesPerDay limits the total patches applied per skill
+	// within 24 hours. Default: 10.
+	MaxPatchesPerDay int `mapstructure:"max_patches_per_day"`
+	// MaxVersionsKept is the maximum number of historical versions
+	// to retain per skill. Older versions are pruned. Default: 10.
+	MaxVersionsKept int `mapstructure:"max_versions_kept"`
+	// MaxPatchSize limits the maximum patch size in bytes.
+	// Default: 8192 (8KB).
+	MaxPatchSize int `mapstructure:"max_patch_size"`
+	// AnalysisTimeout is the timeout for each evolution analysis job.
+	// Default: "60s".
+	AnalysisTimeout time.Duration `mapstructure:"analysis_timeout"`
+}
+
 // ============================================================================
 // Knowledge/RAG Configuration
 // ============================================================================
@@ -1231,6 +1272,18 @@ func (l *Loader) setDefaults() {
 	l.v.SetDefault("skill.skills_dir", ".wukong_agent_skills")
 	l.v.SetDefault("skill.auto_load", true)
 	l.v.SetDefault("skill.max_skills", 20)
+
+	// --- Evolution defaults ---
+	l.v.SetDefault("evolution.enabled", false)
+	l.v.SetDefault("evolution.auto_patch", false)
+	l.v.SetDefault("evolution.analysis_provider", "")
+	l.v.SetDefault("evolution.analysis_model", "")
+	l.v.SetDefault("evolution.min_confidence", 0.7)
+	l.v.SetDefault("evolution.cooldown_period", "30m")
+	l.v.SetDefault("evolution.max_patches_per_day", 10)
+	l.v.SetDefault("evolution.max_versions_kept", 10)
+	l.v.SetDefault("evolution.max_patch_size", 8192)
+	l.v.SetDefault("evolution.analysis_timeout", "60s")
 
 	// --- Knowledge defaults ---
 	l.v.SetDefault("knowledge.enabled", false)

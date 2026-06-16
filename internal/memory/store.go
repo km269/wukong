@@ -75,6 +75,12 @@ func NewMemoryManager(
 	mm.svc = svc
 	mm.pool = p
 
+	util.Logger.Info("memory manager started",
+		slog.String("backend", cfg.Backend),
+		slog.Bool("auto_extract", cfg.AutoExtract),
+		slog.Bool("extractor_model_ready", extractorModel != nil),
+		slog.Int("max_memories", cfg.MaxMemories))
+
 	// Wrap extraction jobs to track in-flight count.
 	if cfg.AutoExtract && extractorModel != nil {
 		mm.svc = &trackingMemoryService{

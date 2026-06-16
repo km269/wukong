@@ -84,6 +84,10 @@ type CoreLoopConfig struct {
 	// auto-extraction workers. The shared database connection is NOT
 	// closed here — it is managed by DatabasePool.
 	MemoryClose func() error
+	// EvolutionClose is called when the CoreLoop closes to stop the
+	// skill evolution engine's background analysis worker. It must
+	// be called before DBPoolClose since evolution uses the shared DB.
+	EvolutionClose func() error
 	// DBPoolClose is called when the CoreLoop closes to properly
 	// close the shared database pool after all services have shut
 	// down their workers. This ensures all pending writes are flushed
@@ -294,17 +298,24 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 			if err := r.Close(); err != nil {
 				errs = append(errs, err)
 			}
-			// 2. Close memory service — waits for in-flight
+			// 2. Close evolution engine — stops background
+			//    analysis worker and waits for in-flight jobs.
+			if cfg.EvolutionClose != nil {
+				if err := cfg.EvolutionClose(); err != nil {
+					errs = append(errs, err)
+				}
+			}
+			// 3. Close memory service — waits for in-flight
 			//    extraction jobs to complete (up to 5s timeout),
 			//    then stops auto-extract workers. The shared DB
 			//    connection is NOT closed here; it is managed by
-			//    the pool (step 5).
+			//    the pool (step 6).
 			if cfg.MemoryClose != nil {
 				if err := cfg.MemoryClose(); err != nil {
 					errs = append(errs, err)
 				}
 			}
-			// 3. Close session service — stops summary workers,
+			// 4. Close session service — stops summary workers,
 			//    closes channels, releases session-level resources.
 			if cfg.SessionService != nil {
 				if closer, ok := any(cfg.SessionService).(interface{ Close() error }); ok {
@@ -313,14 +324,14 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 					}
 				}
 			}
-			// 4. Flush and shut down telemetry (including
+			// 5. Flush and shut down telemetry (including
 			//    Langfuse if enabled).
 			if cfg.TelemetryShutdown != nil {
 				if err := cfg.TelemetryShutdown(context.Background()); err != nil {
 					errs = append(errs, err)
 				}
 			}
-			// 5. Close the shared database pool LAST — after all
+			// 6. Close the shared database pool LAST — after all
 			//    services have stopped their workers and flushed
 			//    their writes. This ensures no pending transactions
 			//    are lost and the WAL is properly checkpointed.

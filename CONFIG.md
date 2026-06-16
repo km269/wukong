@@ -1,6 +1,6 @@
 # Wukong 配置参考手册
 
-> **配置文件**: `config.yaml` | **加载器**: Viper (spf13/viper) | **配置段**: 30+ | **CLI+ENV覆盖支持**
+> **配置文件**: `config.yaml` | **加载器**: Viper (spf13/viper) | **配置段**: 29 | **CLI+ENV覆盖支持**
 
 ---
 
@@ -540,7 +540,74 @@ description: 我的自定义技能
 
 ---
 
-## 18. Knowledge (RAG) 配置
+## 18. Evolution 技能自进化配置 🆕
+
+```yaml
+evolution:
+  enabled: false                     # 启用技能进化系统
+  auto_patch: false                  # 自动应用补丁（false=仅记录建议）
+  analysis_provider: ""              # 分析模型 provider（空=使用默认 provider）
+  analysis_model: ""                 # 分析模型名（空=使用 provider 默认模型）
+  min_confidence: 0.7                # 接受补丁的最低置信度 (0.0-1.0)
+  cooldown_period: "30m"             # 同技能两次修补的最短间隔
+  max_patches_per_day: 10            # 每技能每日最大修补次数
+  max_versions_kept: 10              # 保留的历史版本数上限
+  max_patch_size: 8192               # 补丁最大大小（字节）
+  analysis_timeout: "60s"            # 分析超时时间
+```
+
+### 核心闭环
+
+```
+技能执行 → AfterAgent回调采集轨迹 → 异步分析通道
+  → LLM分析问题并生成 PatchSuggestion → 安全校验
+  → 备份 SKILL.vNNN.md → 追加补丁到 SKILL.md
+  → SQLite记录版本 → 触发 Refresh() → 下次使用新版
+```
+
+### 安全控制
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `enabled` | false | 默认禁用，需手动开启 |
+| `auto_patch` | false | false=仅记录建议不修改文件，true=自动应用 |
+| `min_confidence` | 0.7 | LLM 生成的补丁置信度低于此值自动拒绝 |
+| `cooldown_period` | 30m | 同一技能两次修补的最小间隔，防止频繁修改 |
+| `max_patches_per_day` | 10 | 每个技能每天最多修补次数 |
+| `max_versions_kept` | 10 | 每个技能保留的历史版本数 |
+| `max_patch_size` | 8192 | 超过此大小的补丁自动拒绝 |
+| `analysis_timeout` | 60s | 单次分析超时时间 |
+
+### 追踪与版本存储
+
+进化系统使用 SQLite 存储执行轨迹和版本历史：
+
+```
+wukong.db
+├── evolution_history   — 每次分析的完整记录（skill_name, session_id, success, patch_applied, confidence）
+└── evolution_versions  — 每个技能的所有历史版本内容（skill_name, version, content, sha256）
+```
+
+### 启用示例
+
+```yaml
+# 谨慎模式：仅记录建议，不自动修改
+evolution:
+  enabled: true
+  auto_patch: false
+
+# 自动模式：信任度较高时自动修补
+evolution:
+  enabled: true
+  auto_patch: true
+  min_confidence: 0.8
+  analysis_provider: "deepseek"    # 使用便宜的模型做分析
+  analysis_model: "deepseek-chat"
+```
+
+---
+
+## 19. Knowledge (RAG) 配置
 
 ```yaml
 knowledge:
@@ -567,7 +634,7 @@ knowledge:
 
 ---
 
-## 19. Workflow 工作流配置
+## 20. Workflow 工作流配置
 
 ```yaml
 workflow:
@@ -608,7 +675,7 @@ workflow:
 
 ---
 
-## 20. Dify 平台集成
+## 21. Dify 平台集成
 
 ```yaml
 dify:
@@ -622,7 +689,7 @@ dify:
 
 ---
 
-## 21. A2A Server 配置
+## 22. A2A Server 配置
 
 ```yaml
 a2a_server:
@@ -636,7 +703,7 @@ a2a_server:
 
 ---
 
-## 22. AG-UI Server 配置
+## 23. AG-UI Server 配置
 
 ```yaml
 agui:
@@ -649,7 +716,7 @@ agui:
 
 ---
 
-## 22-A. ACP Server 配置
+## 23-A. ACP Server 配置
 
 ```yaml
 acp_server:
@@ -686,7 +753,7 @@ data: {"session_id":"...","full_text":"Complete response..."}
 
 ---
 
-## 22-B. ACP MCP Bridge 配置
+## 23-B. ACP MCP Bridge 配置
 
 ```yaml
 acp_mcp:
@@ -701,7 +768,7 @@ acp_mcp:
 
 ---
 
-## 23. Extensions 扩展管理
+## 24. Extensions 扩展管理
 
 ```yaml
 extensions: []                         # 外部MCP扩展列表（内置扩展自动注册）
@@ -752,7 +819,7 @@ extensions:
 
 ---
 
-## 24. Telemetry 遥测
+## 25. Telemetry 遥测
 
 ```yaml
 telemetry:
@@ -767,7 +834,7 @@ telemetry:
 
 ---
 
-## 25. Observability 可观测性
+## 26. Observability 可观测性
 
 ```yaml
 observability:
@@ -781,7 +848,7 @@ observability:
 
 ---
 
-## 26. Artifact 制品存储
+## 27. Artifact 制品存储
 
 ```yaml
 artifact:
@@ -795,7 +862,7 @@ artifact:
 
 ---
 
-## 27. Eval 评估
+## 28. Eval 评估
 
 ```yaml
 eval:
@@ -814,7 +881,7 @@ eval:
 
 ---
 
-## 28. Project 项目追踪
+## 29. Project 项目追踪
 
 ```yaml
 # project_dir: "~/.config/wukong/"      # 项目数据存储目录

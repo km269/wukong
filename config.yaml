@@ -170,7 +170,7 @@ memory:
   backend: "sqlite"
   db_path: "wukong.db"
   max_memories: 100
-  auto_extract: false
+  auto_extract: true
   extract_timeout: "120s"
   # 可选的独立记忆提取模型配置。如果不设置，使用默认 provider。
   # 建议使用更小/更快的模型（如 deepseek-chat）来降低成本和延迟。
@@ -330,6 +330,22 @@ skill:
   max_skills: 20
 
 # ---------------------------------------------------------------------------
+# Evolution - 技能自进化配置
+# 启用后，技能执行轨迹会被 LLM 分析，发现问题后自动修补 SKILL.md
+# ---------------------------------------------------------------------------
+evolution:
+  enabled: false                     # 启用技能进化系统
+  auto_patch: false                  # 自动应用补丁（false=仅记录建议）
+  analysis_provider: ""              # 分析模型 provider（空=使用默认 provider）
+  analysis_model: ""                 # 分析模型名（空=使用 provider 默认模型）
+  min_confidence: 0.7                # 接受补丁的最低置信度 (0.0-1.0)
+  cooldown_period: "30m"             # 同技能两次修补的最短间隔
+  max_patches_per_day: 10            # 每技能每日最大修补次数
+  max_versions_kept: 10              # 保留的历史版本数上限
+  max_patch_size: 8192               # 补丁最大大小（字节）
+  analysis_timeout: "60s"            # 分析超时时间
+
+# ---------------------------------------------------------------------------
 # Knowledge - RAG 知识库检索配置
 # ---------------------------------------------------------------------------
 knowledge:
@@ -394,7 +410,7 @@ dify:
 # 使用 tRPC-Agent-Go server/a2a，自动处理协议转换和流式支持
 # ---------------------------------------------------------------------------
 a2a_server:
-  enabled: false
+  enabled: true #false
   address: ":9090"
   agent_name: "wukong"
   agent_description: "Wukong AI Agent - A2A service endpoint"
@@ -501,4 +517,4 @@ artifact:
 # Project - 项目追踪
 # 自动记录工作目录与最后会话，支持 quick-recovery
 # ---------------------------------------------------------------------------
-# project_dir: "~/.config/wukong/"  # 项目数据存储目录
+project_dir: "~/.config/wukong/"  # 项目数据存储目录
