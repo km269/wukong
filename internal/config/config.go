@@ -80,6 +80,23 @@ type WukongConfig struct {
 	// Recall configures cross-session chat history search.
 	Recall RecallConfig `mapstructure:"recall"`
 
+	// Cortex configures the CortexDB-based intelligent recall and
+	// knowledge storage. When enabled, replaces the raw SQLite FTS5
+	// recall with CortexDB's unified vector + full-text search.
+	Cortex CortexConfig `mapstructure:"cortex"`
+
+	// MemoryFlow configures CortexDB MemoryFlow for conversation
+	// transcript recording, wake-up context, and fact promotion.
+	MemoryFlow MemoryFlowConfig `mapstructure:"memoryflow"`
+
+	// GraphFlow configures CortexDB GraphFlow for entity/relation
+	// extraction and knowledge graph construction from conversations.
+	GraphFlow GraphFlowConfig `mapstructure:"graphflow"`
+
+	// ImportFlow configures CortexDB ImportFlow for structured
+	// data import (DDL → KG mapping, CSV → RAG+KG).
+	ImportFlow ImportFlowConfig `mapstructure:"importflow"`
+
 	// Revision configures context window management and token optimization.
 	Revision RevisionConfig `mapstructure:"revision"`
 
@@ -519,6 +536,91 @@ type RecallConfig struct {
 	// EmbeddingModel is the specific embedding model name.
 	// If empty, uses the provider's default model.
 	EmbeddingModel string `mapstructure:"embedding_model"`
+}
+
+// CortexConfig defines the CortexDB-based intelligent recall and
+// knowledge storage settings. When enabled, replaces the raw SQLite
+// FTS5 recall with CortexDB's unified vector + full-text + knowledge
+// graph capabilities.
+type CortexConfig struct {
+	// Enabled enables CortexDB-backed recall and knowledge storage.
+	// When true, the cortex store replaces the default recall store.
+	Enabled bool `mapstructure:"enabled"`
+	// DBPath is the path to the CortexDB database file.
+	// Default: "cortex.db".
+	DBPath string `mapstructure:"db_path"`
+	// MaxResults is the maximum search results returned.
+	// Default: 10.
+	MaxResults int `mapstructure:"max_results"`
+	// MaxMessagesPerSession is the maximum stored messages per session.
+	// Default: 200.
+	MaxMessagesPerSession int `mapstructure:"max_messages_per_session"`
+
+	// EmbeddingBaseURL is the OpenAI-compatible API base URL for
+	// the embedding model. Default: uses the provider's base_url.
+	EmbeddingBaseURL string `mapstructure:"embedding_base_url"`
+	// EmbeddingAPIKey is the API key for the embedding service.
+	// Supports ${ENV_VAR} expansion. If empty, uses the provider's API key.
+	EmbeddingAPIKey string `mapstructure:"embedding_api_key"`
+	// EmbeddingModel is the specific embedding model name.
+	// Default: "text-embedding-3-small".
+	EmbeddingModel string `mapstructure:"embedding_model"`
+}
+
+// MemoryFlowConfig defines the CortexDB MemoryFlow settings for
+// conversation transcript recording, wake-up context generation,
+// and fact promotion from conversations to long-term knowledge.
+type MemoryFlowConfig struct {
+	// Enabled enables MemoryFlow-based context enrichment.
+	Enabled bool `mapstructure:"enabled"`
+	// DBPath is the path to the CortexDB database file for MemoryFlow.
+	// Default: "memoryflow.db".
+	DBPath string `mapstructure:"db_path"`
+	// Namespace groups memories under a logical domain.
+	// Default: "assistant".
+	Namespace string `mapstructure:"namespace"`
+	// EmbeddingDimensions specifies the vector dimension for
+	// semantic search. Use 0 for auto-detection.
+	// Default: 0 (auto).
+	EmbeddingDimensions int `mapstructure:"embedding_dimensions"`
+	// PlannerModel is the model used for retrieval strategy planning.
+	// Uses a fast/cheap model (e.g., gpt-4o-mini).
+	// If empty, deterministic heuristics are used.
+	PlannerModel string `mapstructure:"planner_model"`
+	// ExtractorModel is the model used for transcript fact extraction.
+	// If empty, deterministic heuristics are used.
+	ExtractorModel string `mapstructure:"extractor_model"`
+}
+
+// GraphFlowConfig defines the CortexDB GraphFlow settings for
+// entity/relationship extraction and knowledge graph construction
+// from conversation transcripts.
+type GraphFlowConfig struct {
+	// Enabled enables knowledge graph construction.
+	Enabled bool `mapstructure:"enabled"`
+	// DBPath is the path to the CortexDB file for GraphFlow.
+	// Default: "graphflow.db".
+	DBPath string `mapstructure:"db_path"`
+	// ExtractorModel is the model for LLM-driven entity extraction.
+	// If empty, heuristic extraction is used.
+	ExtractorModel string `mapstructure:"extractor_model"`
+	// MaxCharsPerDoc is the maximum characters per document for
+	// extraction. Large documents are truncated.
+	// Default: 8000.
+	MaxCharsPerDoc int `mapstructure:"max_chars_per_doc"`
+	// AutoExtract enables automatic entity extraction after each
+	// conversation turn (when MemoryFlow is also active).
+	AutoExtract bool `mapstructure:"auto_extract"`
+}
+
+// ImportFlowConfig defines the CortexDB ImportFlow settings for
+// structured data import (DDL → KG mapping, CSV → RAG+KG).
+type ImportFlowConfig struct {
+	// Enabled enables structured data import.
+	Enabled bool `mapstructure:"enabled"`
+	// DBPath is the path to the CortexDB file for ImportFlow.
+	// Default: "importflow.db".
+	DBPath string `mapstructure:"db_path"`
 }
 
 // ============================================================================
@@ -1227,6 +1329,29 @@ func (l *Loader) setDefaults() {
 	l.v.SetDefault("recall.max_messages_per_session", 200)
 	l.v.SetDefault("recall.search_mode", "fts5")
 
+	// --- Cortex defaults ---
+	l.v.SetDefault("cortex.enabled", false)
+	l.v.SetDefault("cortex.db_path", "wukong.db")
+	l.v.SetDefault("cortex.max_results", 10)
+	l.v.SetDefault("cortex.max_messages_per_session", 200)
+	l.v.SetDefault("cortex.embedding_model", "text-embedding-3-small")
+
+	// --- MemoryFlow defaults ---
+	l.v.SetDefault("memoryflow.enabled", false)
+	l.v.SetDefault("memoryflow.db_path", "wukong.db")
+	l.v.SetDefault("memoryflow.namespace", "assistant")
+	l.v.SetDefault("memoryflow.embedding_dimensions", 0)
+
+	// --- GraphFlow defaults ---
+	l.v.SetDefault("graphflow.enabled", false)
+	l.v.SetDefault("graphflow.db_path", "wukong.db")
+	l.v.SetDefault("graphflow.max_chars_per_doc", 8000)
+	l.v.SetDefault("graphflow.auto_extract", false)
+
+	// --- ImportFlow defaults ---
+	l.v.SetDefault("importflow.enabled", false)
+	l.v.SetDefault("importflow.db_path", "wukong.db")
+
 	// --- Revision defaults ---
 	l.v.SetDefault("revision.enabled", true)
 	l.v.SetDefault("revision.enable_llm_summarize", false)
@@ -1280,7 +1405,7 @@ func (l *Loader) setDefaults() {
 
 	// --- Skill defaults ---
 	l.v.SetDefault("skill.enabled", true)
-	l.v.SetDefault("skill.skills_dir", ".wukong_agent_skills")
+	l.v.SetDefault("skill.skills_dir", ".wukong_skills")       // 与 summon 共享技能目录
 	l.v.SetDefault("skill.auto_load", true)
 	l.v.SetDefault("skill.max_skills", 20)
 
@@ -1314,6 +1439,7 @@ func (l *Loader) setDefaults() {
 	// --- Workflow defaults ---
 	l.v.SetDefault("workflow.mode", "single")
 	l.v.SetDefault("workflow.max_iterations", 10)
+	l.v.SetDefault("workflow.cycle_mode", "default")
 	l.v.SetDefault("workflow.stream_mode", "none")
 	l.v.SetDefault("workflow.cache_enabled", false)
 	l.v.SetDefault("workflow.engine", "bsp")

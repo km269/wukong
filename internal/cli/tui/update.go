@@ -110,6 +110,14 @@ func (m *Model) sendMessage(input string) tea.Cmd {
 				len(evt.Response.Choices) > 0 {
 				choice := evt.Response.Choices[0]
 
+				// Skip tool response events — their raw JSON
+				// should not leak into the displayed output.
+				if choice.Message.Role == "tool" ||
+					evt.Response.Object ==
+						"tool.response" {
+					continue
+				}
+
 				if choice.Delta.Content != "" {
 					fullContent += choice.Delta.Content
 					streamCh <- streamEvent{
@@ -117,7 +125,23 @@ func (m *Model) sendMessage(input string) tea.Cmd {
 					}
 				}
 
-				for _, tc := range choice.Message.ToolCalls {
+				// Fallback: if no delta streaming, capture
+				// content from Message.Content (non-streaming).
+				if fullContent == "" &&
+					choice.Message.Content != "" {
+					fullContent = choice.Message.Content
+					streamCh <- streamEvent{
+						Delta: choice.Message.Content,
+					}
+				}
+
+				// Collect tool calls from both Message (batch)
+				// and Delta (streaming) to avoid missing any.
+				toolCalls := choice.Message.ToolCalls
+				if len(toolCalls) == 0 {
+					toolCalls = choice.Delta.ToolCalls
+				}
+				for _, tc := range toolCalls {
 					argsJSON := "{}"
 					if tc.Function.Arguments != nil {
 						argsJSON = string(tc.Function.Arguments)
@@ -221,7 +245,8 @@ func (m *Model) trackProjectInstruction(input string) {
 type refreshMsg struct{}
 
 // defaultTimeoutMinutes is the default run timeout in minutes.
-const defaultTimeoutMinutes = 5
+// Increased for large local models (26B+) that may take 10+ min.
+const defaultTimeoutMinutes = 30
 
 // friendlyError maps common error strings to user-friendly messages.
 func friendlyError(errMsg string) string {

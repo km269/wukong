@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -17,6 +18,9 @@ import (
 	"github.com/km269/wukong/internal/cli/tui"
 	"github.com/km269/wukong/internal/codemode"
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/cortex"
+	"github.com/liliang-cn/cortexdb/v2/pkg/graphflow"
+	"github.com/liliang-cn/cortexdb/v2/pkg/memoryflow"
 	"github.com/km269/wukong/internal/extension"
 	"github.com/km269/wukong/internal/extension/builtin"
 	artifacts "github.com/km269/wukong/internal/artifact"
@@ -39,6 +43,8 @@ import (
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
+
+	tRPCMemory "trpc.group/trpc-go/trpc-agent-go/memory"
 )
 
 func newSessionCmd() *cobra.Command {
@@ -323,8 +329,7 @@ func bootstrapSession(
 	// Create memory manager with auto-extract support.
 	// If an extractor_provider or extractor_model is configured in
 	// the memory block, use that instead of the default provider.
-	// Using a smaller/faster model for memory extraction is recommended
-	// to reduce latency and cost.
+	// Falls back to default model if the extractor model fails.
 	var extractorModel model.Model
 	if wukongCfg.Memory.AutoExtract {
 		extractorModel, err = createExtractorModel(
@@ -333,13 +338,20 @@ func bootstrapSession(
 		if err != nil {
 			util.Logger.Warn("auto memory extraction: "+
 				"failed to create extractor model, "+
-				"auto-extract will be disabled. "+
-				"Manual memory tools remain available. "+
-				"Check that default_provider is configured "+
-				"correctly in config.yaml.",
-				"provider", wukongCfg.DefaultProvider,
+				"falling back to default model",
 				"error", err.Error())
-			extractorModel = nil
+			// Fallback to default model for extraction
+			extractorModel, err = factory.CreateDefaultModel()
+			if err != nil {
+				util.Logger.Warn("auto memory extraction: "+
+					"fallback model also failed, "+
+					"auto-extract disabled",
+					"error", err.Error())
+				extractorModel = nil
+			} else {
+				util.Logger.Info("auto memory extraction: "+
+					"using default model as extractor fallback")
+			}
 		}
 	}
 	memoryMgr, err := memory.NewMemoryManager(
@@ -347,6 +359,22 @@ func bootstrapSession(
 	)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create memory: %w", err)
+	}
+
+	// Clean memories older than 30 days on startup.
+	if wukongCfg.Memory.MaxMemories > 0 {
+		cleaned, _ := memoryMgr.CleanMemoriesByAge(
+			context.Background(),
+			tRPCMemory.UserKey{
+				AppName: "wukong-app",
+				UserID:  userID,
+			},
+			30*24*time.Hour,
+		)
+		if cleaned > 0 {
+			util.Logger.Info("memory: startup cleanup",
+				"cleaned", cleaned)
+		}
 	}
 
 	// Create security guard
@@ -386,9 +414,43 @@ func bootstrapSession(
 		}
 	}
 
-	// Create recall store
+	// Create recall store — supports both native SQLite FTS5 and
+	// CortexDB (vector + FTS5 hybrid) backends.
 	var recallStore *recall.Store
-	if wukongCfg.Recall.Enabled {
+	var cortexStore *cortex.CortexStore
+	if wukongCfg.Cortex.Enabled {
+		// CortexDB-backed store with vector semantic search.
+		var embedder *cortex.Embedder
+		if wukongCfg.Cortex.EmbeddingBaseURL != "" &&
+			wukongCfg.Cortex.EmbeddingAPIKey != "" {
+			embedder = cortex.NewEmbedder(&wukongCfg.Cortex)
+			util.Logger.Info("cortex: embedding enabled",
+				"model", wukongCfg.Cortex.EmbeddingModel,
+			)
+		}
+		cortexStore, err = cortex.NewStore(
+			&wukongCfg.Cortex, embedder,
+		)
+		if err != nil {
+			util.Logger.Warn("cortex store init failed, "+
+				"falling back to recall",
+				slog.String("error", err.Error()))
+			cortexStore = nil
+		} else {
+			util.Logger.Info("cortex: store initialized",
+				"db_path", wukongCfg.Cortex.DBPath,
+			)
+			// Create a recall.Store adapter sharing the same DB
+			// so the agent loop can call StoreMessage() as before.
+			recallStore, err = cortexStore.RecallStore()
+			if err != nil {
+				util.Logger.Warn("cortex: recall adapter failed",
+					slog.String("error", err.Error()))
+				recallStore = nil
+			}
+		}
+	} else if wukongCfg.Recall.Enabled {
+		// Native SQLite FTS5 recall store (default).
 		recallStore, err = recall.NewStore(
 			&wukongCfg.Recall, dbPool,
 		)
@@ -399,10 +461,86 @@ func bootstrapSession(
 		}
 	}
 
-	// Create recall manager for tools
+	// Create recall manager for tools.
+	// When cortex is enabled, recall tools use vector-enhanced search.
 	var recallMgr *recall.RecallManager
-	if recallStore != nil {
+	var cortexRecallMgr *cortex.RecallManager
+	if cortexStore != nil && recallStore != nil {
+		// Use CortexDB vector search for recall tools.
+		cortexRecallMgr = cortex.NewRecallManager(cortexStore)
+	} else if recallStore != nil {
 		recallMgr = recall.NewRecallManager(recallStore)
+	}
+
+	// Create MemoryFlow service for conversation transcript,
+	// wake-up context, and fact promotion.
+	var memoryFlowSvc *cortex.MemoryFlowService
+	if wukongCfg.MemoryFlow.Enabled {
+		var planner memoryflow.QueryPlanner
+		var extractor memoryflow.SessionExtractor
+
+		// Use LLM-driven planning/extraction when a model is configured.
+		// Otherwise, deterministic heuristics are used.
+		if wukongCfg.MemoryFlow.PlannerModel != "" {
+			planner = cortex.NewLLMQueryPlanner(
+				factory, wukongCfg.MemoryFlow.PlannerModel,
+			)
+		}
+		if wukongCfg.MemoryFlow.ExtractorModel != "" {
+			extractor = cortex.NewLLMSessionExtractor(
+				factory, wukongCfg.MemoryFlow.ExtractorModel,
+			)
+		}
+
+		mfs, err := cortex.NewMemoryFlow(
+			&wukongCfg.MemoryFlow, planner, extractor)
+		if err != nil {
+			util.Logger.Warn("memoryflow init failed",
+				slog.String("error", err.Error()))
+		} else {
+			memoryFlowSvc = mfs
+			util.Logger.Info("memoryflow: service initialized",
+				"db_path", wukongCfg.MemoryFlow.DBPath,
+			)
+		}
+	}
+
+	// Create GraphFlow service for knowledge graph construction.
+	var kgToolMgr *cortex.KGToolManager
+	if wukongCfg.GraphFlow.Enabled {
+		var jsonGen graphflow.JSONGenerator
+		if wukongCfg.GraphFlow.ExtractorModel != "" {
+			jsonGen = cortex.NewLLMJSONGenerator(
+				factory,
+				wukongCfg.GraphFlow.ExtractorModel,
+			)
+		}
+		gfs, err := cortex.NewGraphFlow(
+			&wukongCfg.GraphFlow, jsonGen)
+		if err != nil {
+			util.Logger.Warn("graphflow init failed",
+				slog.String("error", err.Error()))
+		} else {
+			kgToolMgr = cortex.NewKGToolManager(gfs)
+			util.Logger.Info("graphflow: service initialized",
+				"db_path", wukongCfg.GraphFlow.DBPath,
+			)
+		}
+	}
+
+	// Create ImportFlow service for structured data import.
+	var importToolMgr *cortex.ImportToolManager
+	if wukongCfg.ImportFlow.Enabled {
+		ifs, err := cortex.NewImportFlow(&wukongCfg.ImportFlow)
+		if err != nil {
+			util.Logger.Warn("importflow init failed",
+				slog.String("error", err.Error()))
+		} else {
+			importToolMgr = cortex.NewImportToolManager(ifs)
+			util.Logger.Info("importflow: service initialized",
+				"db_path", wukongCfg.ImportFlow.DBPath,
+			)
+		}
 	}
 
 	// Create Top of Mind manager
@@ -563,8 +701,23 @@ func bootstrapSession(
 	}
 
 	// Add Recall tools
-	if recallMgr != nil {
+	if cortexRecallMgr != nil {
+		functionTools = append(
+			functionTools, cortexRecallMgr.Tools()...)
+	} else if recallMgr != nil {
 		functionTools = append(functionTools, recallMgr.Tools()...)
+	}
+
+	// Add Knowledge Graph tools
+	if kgToolMgr != nil {
+		functionTools = append(
+			functionTools, kgToolMgr.Tools()...)
+	}
+
+	// Add ImportFlow tools
+	if importToolMgr != nil {
+		functionTools = append(
+			functionTools, importToolMgr.Tools()...)
 	}
 
 	// Add Top of Mind tools
@@ -586,6 +739,11 @@ func bootstrapSession(
 	if agentToolSet != nil && len(agentToolSet.Tools(nil)) > 0 {
 		toolSets = append(toolSets, agentToolSet)
 	}
+
+	// CortexDB tools are already registered as functionTools above
+	// (KG query, KG analyze, import DDL/CSV). Do NOT add a duplicate
+	// CortexToolSet — it causes massive tool list duplication that
+	// wastes hundreds of tokens per LLM call.
 
 	// Add Summon delegate tools
 	if len(summonTools) > 0 {
@@ -679,21 +837,22 @@ func bootstrapSession(
 
 	// Create agent loop
 	loop, err := agent.NewCoreLoop(agent.CoreLoopConfig{
-		Config:                wukongCfg,
-		Factory:               factory,
-		SessionService:        sessionSvc,
-		MemoryService:         memoryMgr.Service(),
-		ArtifactService:       artifactSvc,
-		ToolSets:              toolSets,
-		FunctionTools:         functionTools,
-		SecurityGuard:         guard,
-		RecallStore:           recallStore,
-		RevisionModel:         revisionModel,
+		Config:             wukongCfg,
+		Factory:            factory,
+		SessionService:     sessionSvc,
+		MemoryService:      memoryMgr.Service(),
+		ArtifactService:    artifactSvc,
+		ToolSets:           toolSets,
+		FunctionTools:      functionTools,
+		SecurityGuard:      guard,
+		RecallStore:        recallStore,
+		RevisionModel:      revisionModel,
+		MemoryFlowService:  memoryFlowSvc,
 		TopOfMindInstructions: topOfMindInstructions,
-		TelemetryShutdown:     combinedShutdown,
-		MemoryClose:           memoryMgr.Close,
-		EvolutionClose:        evoEngineClose(evoEngine),
-		DBPoolClose:           dbPool.Close,
+		TelemetryShutdown:  combinedShutdown,
+		MemoryClose:        memoryMgr.Close,
+		EvolutionClose:     evoEngineClose(evoEngine),
+		DBPoolClose:        dbPool.Close,
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create agent loop: %w", err)

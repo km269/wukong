@@ -246,8 +246,21 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamEndMsg:
 		m.streaming = false
 		m.streamCancel = nil
-		if msg.Content != "" {
-			m.addMessage("assistant", msg.Content)
+		// Save the response: prefer Content from streamEndMsg,
+		// but fall back to any partially-streamed currentStream
+		// so incremental delta output is never lost.
+		finalContent := msg.Content
+		if finalContent == "" && m.currentStream != "" {
+			finalContent = m.currentStream
+		}
+		if finalContent != "" {
+			m.addMessage("assistant", finalContent)
+		}
+		// Mark all running tool calls as completed.
+		for i := range m.toolCalls {
+			if m.toolCalls[i].Status == "running" {
+				m.toolCalls[i].Status = "done"
+			}
 		}
 		m.currentStream = ""
 		m.setStatus("Ready")

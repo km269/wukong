@@ -72,6 +72,23 @@ func NewStore(
 	return s, nil
 }
 
+// NewStoreWithDB creates a recall store using an already-open *sql.DB
+// connection. Used when the database is shared across subsystems
+// (e.g., CortexDB manages its own connection). Schema is initialized
+// if not already present.
+func NewStoreWithDB(
+	db *sql.DB, maxMessagesPerSession int,
+) (*Store, error) {
+	cfg := &config.RecallConfig{
+		MaxMessagesPerSession: maxMessagesPerSession,
+	}
+	s := &Store{db: db, pool: nil, cfg: cfg}
+	if err := s.initSchema(); err != nil {
+		return nil, fmt.Errorf("init schema: %w", err)
+	}
+	return s, nil
+}
+
 // StoreMessage persists a chat message for future recall.
 // Enforces MaxMessagesPerSession limit by deleting oldest messages
 // when the limit is exceeded.

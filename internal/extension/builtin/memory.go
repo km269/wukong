@@ -8,6 +8,7 @@ package builtin
 
 import (
 	"context"
+	"log"
 
 	"github.com/km269/wukong/internal/config"
 
@@ -44,6 +45,11 @@ func (ts *MemoryToolSet) SetMemoryService(
 ) {
 	memSvc, ok := svc.(memory.Service)
 	if !ok {
+		// Type assertion failed — memory.Service interface might
+		// be wrapped in a way that breaks interface matching.
+		log.Printf("MemoryToolSet.SetMemoryService: type assertion "+
+			"failed, got %T — memory tools will be empty",
+			svc)
 		return
 	}
 	ts.svc = memSvc
@@ -53,6 +59,16 @@ func (ts *MemoryToolSet) SetMemoryService(
 	}
 	// Use the standard tRPC memory tools
 	ts.tools = memSvc.Tools()
+
+	// Diagnostic: log what tools were loaded.
+	var names []string
+	for _, t := range ts.tools {
+		if d := t.Declaration(); d != nil {
+			names = append(names, d.Name)
+		}
+	}
+	log.Printf("MemoryToolSet: injected %d memory tools: %v",
+		len(ts.tools), names)
 }
 
 // Tools returns the memory tools. If the service has been injected,

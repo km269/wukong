@@ -81,6 +81,9 @@ func NewMemoryManager(
 		slog.Bool("extractor_model_ready", extractorModel != nil),
 		slog.Int("max_memories", cfg.MaxMemories))
 
+	// [记忆健康] 启动时报告现有记忆状态。
+	go mm.logMemoryHealth()
+
 	// Wrap extraction jobs to track in-flight count.
 	if cfg.AutoExtract && extractorModel != nil {
 		mm.svc = &trackingMemoryService{
@@ -167,6 +170,87 @@ func (m *MemoryManager) Close() error {
 
 	m.shutdown.Wait()
 	return err
+}
+
+// logMemoryHealth reports the current memory store health in
+// a background goroutine. Reports total count and oldest/newest
+// timestamps to help diagnose stale or missing memories.
+func (m *MemoryManager) logMemoryHealth() {
+	ctx := context.Background()
+	entries, err := m.Service().ReadMemories(
+		ctx,
+		memory.UserKey{AppName: "wukong-app", UserID: "*"},
+		0,
+	)
+	if err != nil {
+		util.Logger.Debug("memory: health check failed",
+			"error", err.Error())
+		return
+	}
+
+	if len(entries) == 0 {
+		util.Logger.Info("memory: store is empty (cold start)")
+		return
+	}
+
+	var oldest, newest time.Time
+	for i, e := range entries {
+		if i == 0 {
+			oldest = e.CreatedAt
+			newest = e.UpdatedAt
+		} else {
+			if e.CreatedAt.Before(oldest) {
+				oldest = e.CreatedAt
+			}
+			if e.UpdatedAt.After(newest) {
+				newest = e.UpdatedAt
+			}
+		}
+	}
+	util.Logger.Info("memory: health report",
+		"total", len(entries),
+		"oldest", oldest.Format(time.RFC3339),
+		"newest", newest.Format(time.RFC3339),
+		"max", m.cfg.MaxMemories,
+	)
+}
+
+// CleanMemoriesByAge removes memories older than the given TTL
+// for the specified user. Returns the number of deleted entries.
+func (m *MemoryManager) CleanMemoriesByAge(
+	ctx context.Context,
+	userKey memory.UserKey,
+	ttl time.Duration,
+) (int, error) {
+	entries, err := m.Service().ReadMemories(ctx, userKey, 0)
+	if err != nil {
+		return 0, fmt.Errorf("read for cleanup: %w", err)
+	}
+
+	cutoff := time.Now().Add(-ttl)
+	var deleted int
+	for _, e := range entries {
+		if e.UpdatedAt.Before(cutoff) {
+			memKey := memory.Key{
+				AppName:  userKey.AppName,
+				UserID:   userKey.UserID,
+				MemoryID: e.ID,
+			}
+			if err := m.Service().DeleteMemory(ctx, memKey); err != nil {
+				util.Logger.Warn("memory: cleanup delete failed",
+					"id", e.ID, "error", err.Error())
+			} else {
+				deleted++
+			}
+		}
+	}
+	if deleted > 0 {
+		util.Logger.Info("memory: cleaned old memories",
+			"deleted", deleted,
+			"cutoff", cutoff.Format(time.RFC3339),
+		)
+	}
+	return deleted, nil
 }
 
 // --- trackingMemoryService wraps a memory.Service to track active jobs ---
@@ -286,7 +370,7 @@ func newSQLiteService(
 
 		timeout := cfg.ExtractTimeout
 		if timeout <= 0 {
-			timeout = 60 * time.Second
+			timeout = 600 * time.Second // 10min for local models
 		}
 		opts = append(opts,
 			memorysqlite.WithMemoryJobTimeout(timeout),
@@ -295,7 +379,9 @@ func newSQLiteService(
 
 		util.Logger.Info("auto memory extraction enabled",
 			slog.String("backend", cfg.Backend),
-			slog.Int("max_memories", cfg.MaxMemories))
+			slog.Int("max_memories", cfg.MaxMemories),
+			slog.String("job_timeout", timeout.String()),
+		)
 	} else if cfg.AutoExtract {
 		util.Logger.Warn("auto memory extraction disabled: "+
 			"no extractor model available. "+

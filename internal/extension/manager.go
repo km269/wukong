@@ -239,6 +239,15 @@ func (m *Manager) SetMemoryService(svc any, appName, userID string) {
 
 	ts, ok := m.toolSets["memory"]
 	if !ok {
+		util.Logger.Warn("SetMemoryService: memory toolset not found " +
+			"in extension manager — memory tools will NOT be available. " +
+			"Ensure 'memory' extension is listed in config.yaml extensions. " +
+			"Available toolset keys: " + fmt.Sprint(m.toolSetKeys()))
+		return
+	}
+	if ts == nil {
+		util.Logger.Warn("SetMemoryService: memory toolset is nil — " +
+			"factory returned nil for 'memory'")
 		return
 	}
 
@@ -250,7 +259,23 @@ func (m *Manager) SetMemoryService(svc any, appName, userID string) {
 	}
 	if setter, ok := ts.(memorySvcSetter); ok {
 		setter.SetMemoryService(svc, appName, userID)
+		util.Logger.Info("SetMemoryService: memory tools injected",
+			"app_name", appName,
+			"user_id", userID,
+		)
+	} else {
+		util.Logger.Warn("SetMemoryService: toolset does not implement " +
+			"memorySvcSetter — type assertion failed")
 	}
+}
+
+// toolSetKeys returns the names of all registered tool sets.
+func (m *Manager) toolSetKeys() []string {
+	keys := make([]string, 0, len(m.toolSets))
+	for k := range m.toolSets {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 // Close shuts down all extensions and releases resources.

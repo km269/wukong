@@ -86,7 +86,7 @@ agent:
   planner: ""
   # reasoning_effort: "medium"  # low / medium / high (仅 builtin planner)
   # Tool Search - 自动工具筛选，减少 token 消耗
-  tool_search_enabled: true #false
+  tool_search_enabled: true
   # tool_search_max_tools: 20
   # 上下文压缩 - 自动截断过长的工具结果，防止上下文溢出
   # 启后执行两遍压缩：
@@ -112,7 +112,7 @@ agent:
   # Todo Enforcer - 确保所有待办任务完成后才给出最终答案
   todo_enforcer_enabled: true
   # Agent Tools - 将子 Agent（code-reviewer, summarizer）包装为可调用工具
-  agent_tools_enabled: true
+  agent_tools_enabled: false    # 禁用子Agent工具以节省token（500+条工具列表）
   # agent_tools_stream: true  # 启用子Agent结果流式输出
   # 系统提示词模板目录 (加载 .md 文件拼接为 system instruction)
   # 空目录或不存在时回退到内置默认提示词
@@ -171,14 +171,9 @@ memory:
   db_path: "wukong.db"
   max_memories: 100
   auto_extract: true
-  extract_timeout: "120s"
-  # 可选的独立记忆提取模型配置。如果不设置，使用默认 provider。
-  # 建议使用更小/更快的模型（如 deepseek-chat）来降低成本和延迟。
-  # extractor_provider: "deepseek"
-  # extractor_model: "deepseek-chat"
-  # 自定义记忆提取 prompt。如果不设置，使用框架默认的长 prompt（280+行）。
-  # 对于本地小模型（如 LMStudio/Ollama），建议启用下面的精简 prompt，
-  # 取消注释即可使用。精简 prompt 强调：原子性、去重、不含主语前缀、具体性。
+  extract_timeout: "600s"
+  extractor_provider: "lmstudio"          # 独立提取模型 provider
+  extractor_model: "gemma-4-e4b-it"       # 用轻量模型做提取（失败时自动回退默认模型）
   extractor_prompt: |
     You are a Memory Manager. Extract concise memories from the conversation.
     Today's date is {current_date}. Resolve ALL relative time references to absolute dates.
@@ -218,8 +213,8 @@ memory:
 todo:
   backend: "sqlite"
   db_path: "wukong.db"
-  # enable_native_todo: true   # 启用 tRPC 原生 todo_write 工具
-  # enable_enforcer: true      # 启用 todoenforcer（必须完成所有todo才给最终答案）
+  enable_native_todo: true   # 启用 tRPC 原生 todo_write 工具
+  enable_enforcer: true      # 启用 todoenforcer（必须完成所有todo才给最终答案）
 
 # ---------------------------------------------------------------------------
 # Recall - 跨会话对话搜索配置
@@ -237,6 +232,66 @@ recall:
   # embedding_model: "text-embedding-3-small"
 
 # ---------------------------------------------------------------------------
+# Cortex - CortexDB 智能回溯与知识存储配置
+# ---------------------------------------------------------------------------
+# 启用后，使用 CortexDB 替代原生 SQLite FTS5 作为回溯存储，
+# 提供向量语义搜索 + 全文搜索 + 知识图谱能力。
+# 与 recall 互斥：启用 cortex 后 recall 后台存储自动切换。
+cortex:
+  enabled: true                            # 启用 CortexDB 智能回溯
+  db_path: "wukong.db"                     # 合并到主DB
+  max_results: 10
+  max_messages_per_session: 200
+
+  # 向量嵌入配置（用于语义搜索）
+  # 需要 OpenAI 兼容的 embedding API
+  embedding_base_url: "http://192.168.50.97:1234"
+  embedding_api_key: "llmstudio"
+  embedding_model: "qwen3-embedding-0.6b-graphql"
+
+# ---------------------------------------------------------------------------
+# MemoryFlow - CortexDB 代理记忆工作流配置
+# ---------------------------------------------------------------------------
+# 启用后，自动记录对话转录、生成唤醒上下文、将重要事实提升到长期记忆。
+# 与现有 memory (tRPC) 系统并行工作，提供更丰富的上下文体验。
+memoryflow:
+  enabled: true                         # 启用 MemoryFlow
+  db_path: "wukong.db"                  # 合并到主DB
+  namespace: "assistant"                # 记忆命名空间
+  embedding_dimensions: 0               # 向量维度 (0=自动检测)
+
+  # 可选：指定用于规划和提取的 LLM 模型
+  # 留空则使用确定性启发式算法
+  # planner_model: "gpt-4o-mini"
+  # extractor_model: "gpt-4o-mini"
+
+# ---------------------------------------------------------------------------
+# GraphFlow - CortexDB 知识图谱构建配置
+# ---------------------------------------------------------------------------
+# 启用后，从对话转录中自动提取实体和关系，构建 RDF 知识图谱，
+# 支持 SPARQL 查询和推理。Agent 可通过工具查询图谱。
+graphflow:
+  enabled: true                          # 启用知识图谱构建
+  db_path: "wukong.db"                   # 合并到主DB
+  max_chars_per_doc: 8000                # 单文档最大提取字符数
+
+  # 自动提取：每轮对话后自动提取实体/关系
+  # 需要 MemoryFlow 同时启用
+  auto_extract: false
+
+  # LLM 提取模型（留空使用启发式提取）
+  extractor_model: "gemma-4-e4b-it"
+
+# ---------------------------------------------------------------------------
+# ImportFlow - CortexDB 结构化数据导入配置
+# ---------------------------------------------------------------------------
+# 启用后，支持将 CREATE TABLE DDL 和 CSV 数据自动导入到知识图谱。
+# Agent 可通过 importflow_ddl_parse / importflow_ddl_plan / importflow_csv 工具使用。
+importflow:
+  enabled: true                          # 启用结构化数据导入
+  db_path: "wukong.db"                   # 合并到主DB
+
+# ---------------------------------------------------------------------------
 # Revision - 上下文窗口管理配置
 # ---------------------------------------------------------------------------
 revision:
@@ -247,12 +302,12 @@ revision:
   # 专门负责对旧对话生成结构化摘要，避免主模型 token 浪费。
   # 留空则使用默认 provider/model。
   revision_provider: "lmstudio"
-  revision_model: "qwen/qwen3.5-9b"
+  revision_model: "gemma-4-e4b-it"
 
   # 启用 LLM 智能摘要（需要 revision_model 配置正确）。
   # 开启后 FilterIrrelevant 将调用辅助模型生成上下文摘要，
   # 而非简单的算法截断。关闭后回退到原始截断策略。
-  enable_llm_summarize: true #false
+  enable_llm_summarize: true
 
   # 摘要冷却期：两次渐进式摘要之间的最小间隔。
   # 避免频繁调用辅助模型造成延迟和费用。
@@ -282,7 +337,7 @@ browser:
   viewport_height: 720                 # 视口高度
   search_backend: "duckduckgo"         # duckduckgo / searxng / tavily
   search_backend_url: "http://43.167.226.121:8080/"             # SearXNG 实例URL
-  # search_api_key: ""                 # Tavily API Key
+  search_api_key: ""                                                           # 空=使用DuckDuckGo
 
 # ---------------------------------------------------------------------------
 # Visualiser - 图表生成配置
@@ -328,7 +383,7 @@ apps:
 # ---------------------------------------------------------------------------
 summon:
   enabled: true
-  skills_dir: ".wukong_skills"
+  skills_dir: ".wukong_skills"             # 统一技能目录（与 skill 共用）
   max_concurrent: 5
   a2a_remotes: []
   # a2a_remotes 示例:
@@ -343,7 +398,7 @@ summon:
 # ---------------------------------------------------------------------------
 skill:
   enabled: true
-  skills_dir: ".wukong_agent_skills"
+  skills_dir: ".wukong_skills"             # 统一技能目录（与 summon 共用）
   auto_load: true
   max_skills: 20
 
@@ -428,7 +483,7 @@ dify:
 # 使用 tRPC-Agent-Go server/a2a，自动处理协议转换和流式支持
 # ---------------------------------------------------------------------------
 a2a_server:
-  enabled: true #false
+  enabled: true
   address: ":9090"
   agent_name: "wukong"
   agent_description: "Wukong AI Agent - A2A service endpoint"
@@ -438,7 +493,7 @@ a2a_server:
 # 支持 CopilotKit / TDesign Chat 等 AG-UI 协议客户端
 # ---------------------------------------------------------------------------
 agui:
-  enabled: true #false
+  enabled: true
   address: ":8080"            # 监听地址
   path: "/agui"               # SSE 端点路径
 
@@ -479,26 +534,9 @@ eval:
   #     threshold: 0.5
 
 # ---------------------------------------------------------------------------
-# Extensions - MCP 扩展配置
+# Extensions - MCP 扩展配置 (内置扩展自动注册，此处仅列出外部扩展)
 # ---------------------------------------------------------------------------
 extensions: []
-# extensions 示例:
-#   - name: "filesystem"
-#     type: "external"
-#     transport: "stdio"
-#     command: "npx"
-#     args: ["-y", "@anthropic/mcp-server-filesystem", "/tmp"]
-#     enabled: true
-#     timeout: "30s"
-#     mcp_broker: false     # 设为 true 则通过 MCP Broker 按需发现工具
-#     mcp_tool_filter: []   # 只包含匹配的工具 (glob 模式)
-#     mcp_tool_exclude: []  # 排除匹配的工具 (glob 模式)
-#     mcp_session_reconnect: false            # SSE/Streamable 自动重连
-#     mcp_session_reconnect_attempts: 3       # 最大重连次数
-#
-#   - name: "developer"
-#     type: "builtin"
-#     enabled: true
 
 # ---------------------------------------------------------------------------
 # Telemetry - 遥测/可观测性配置

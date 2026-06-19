@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/cortex"
 	"github.com/km269/wukong/internal/provider"
 	"github.com/km269/wukong/internal/recall"
 	"github.com/km269/wukong/internal/security"
@@ -51,11 +52,13 @@ type CoreLoop struct {
 	agent          agent.Agent
 	runner         runner.Runner
 	sessionService session.Service
+	memoryService  memory.Service
 	factory        *provider.Factory
 	cfg            *config.WukongConfig
 	contextMgr     *ContextManager
 	security       *security.Guard
 	recallStore    *recall.Store
+	memoryFlow     *cortex.MemoryFlowService
 	closeFn        func() error
 
 	mu     sync.RWMutex
@@ -74,6 +77,9 @@ type CoreLoopConfig struct {
 	SecurityGuard  *security.Guard
 	RecallStore    *recall.Store
 	RevisionModel  RevisionModel
+	// MemoryFlowService provides CortexDB transcript recording
+	// and wake-up context generation.
+	MemoryFlowService *cortex.MemoryFlowService
 	// TopOfMindInstructions is the formatted persistent instruction block.
 	// If non-empty, it is injected into the system instruction.
 	TopOfMindInstructions string
@@ -283,11 +289,13 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 		agent:          ag,
 		runner:         r,
 		sessionService: cfg.SessionService,
+		memoryService:  cfg.MemoryService,
 		factory:        cfg.Factory,
 		cfg:            cfg.Config,
 		contextMgr:     ctxMgr,
 		security:       guard,
 		recallStore:    cfg.RecallStore,
+		memoryFlow:     cfg.MemoryFlowService,
 		closeFn: func() error {
 			var errs []error
 			// 1. Close runner first — stops active runs and
@@ -394,6 +402,82 @@ func (l *CoreLoop) Run(
 		})
 	}
 
+	// Record transcript in MemoryFlow for context enrichment.
+	if l.memoryFlow != nil {
+		content := extractMessageContent(message)
+		_ = l.memoryFlow.IngestTurn(
+			ctx, sessionID, userID, "user", content,
+		)
+
+		// [Fix 1] Build wake-up context from past conversations
+		// and inject it into the message as additional system context.
+		identity := "You are Wukong, an AI coding assistant."
+		wakeCtx, wErr := l.memoryFlow.WakeUp(
+			ctx, identity, content, sessionID,
+		)
+		if wErr != nil {
+			util.Logger.Warn("memoryflow: wakeup failed",
+				slog.String("error", wErr.Error()))
+		} else if wakeCtx == "" {
+			util.Logger.Debug("memoryflow: wakeup empty "+
+				"(no prior conversation history yet)")
+		} else {
+			util.Logger.Info("memoryflow: wakeup injected",
+				"chars", len(wakeCtx))
+			if message.Role == model.RoleUser {
+				message = model.Message{
+					Role: "user",
+					Content: fmt.Sprintf(
+						"[Context from past conversations]\n%s\n\n"+
+							"[Current user message]\n%s",
+						wakeCtx, extractMessageContent(message),
+					),
+				}
+			}
+		}
+	}
+
+	// [Fix 4] Inject persistent memories from tRPC Memory store
+	// into the conversation context before each agent run.
+	if l.memoryService != nil {
+		userKey := memory.UserKey{
+			AppName: "wukong-app",
+			UserID:  userID,
+		}
+		memories, mErr := l.memoryService.ReadMemories(
+			ctx, userKey, 5,
+		)
+		if mErr != nil {
+			util.Logger.Warn("memory: read failed",
+				slog.String("error", mErr.Error()))
+		} else if len(memories) == 0 {
+			util.Logger.Debug("memory: no memories found " +
+				"(cold start — auto_extract not yet triggered)")
+		} else {
+			var memCtx strings.Builder
+			memCtx.WriteString(
+				"[Remembered facts from previous conversations]\n")
+			for i, m := range memories {
+				if m.Memory != nil && m.Memory.Memory != "" {
+					memCtx.WriteString(fmt.Sprintf(
+						"%d. %s\n", i+1, m.Memory.Memory))
+				}
+			}
+			util.Logger.Info("memory: memories injected",
+				"count", len(memories))
+			// Prepend persistent memories to the user message.
+			if message.Role == model.RoleUser {
+				origContent := extractMessageContent(message)
+				message = model.Message{
+					Role: "user",
+					Content: fmt.Sprintf("%s\n\n[User message]\n%s",
+						memCtx.String(), origContent,
+					),
+				}
+			}
+		}
+	}
+
 	runOpts := []agent.RunOption{}
 	if l.cfg.Agent.JSONRepairEnabled {
 		runOpts = append(runOpts,
@@ -452,22 +536,25 @@ func (l *CoreLoop) RunStream(
 			if err := onEvent(evt); err != nil {
 				span.SetStatus(codes.Error, err.Error())
 				span.RecordError(err)
-				return responseText, err
+				return textBuilder.String(), err
 			}
 		}
 
 		// Check for errors
 		if evt.Error != nil {
 			span.SetStatus(codes.Error, evt.Error.Message)
-			return responseText,
+			return textBuilder.String(),
 				fmt.Errorf("agent error: %s", evt.Error.Message)
 		}
 
-		// Collect streaming content
+		// Collect streaming content (skip tool response events).
 		if evt.Response != nil && len(evt.Response.Choices) > 0 {
 			choice := evt.Response.Choices[0]
-			if choice.Delta.Content != "" {
-				textBuilder.WriteString(choice.Delta.Content)
+			// Skip tool response JSON from leaking into output.
+			if choice.Message.Role != "tool" {
+				if choice.Delta.Content != "" {
+					textBuilder.WriteString(choice.Delta.Content)
+				}
 			}
 			// Count tool calls in this response
 			toolCallCount += len(choice.Message.ToolCalls)
@@ -476,16 +563,30 @@ func (l *CoreLoop) RunStream(
 		// Check for runner completion
 		if evt.IsRunnerCompletion() {
 			// Extract final result from state delta if available
+			// but only override if it's non-empty to avoid
+			// losing incrementally collected delta content.
 			if evt.StateDelta != nil {
 				if lastResp, ok := evt.StateDelta["last_response"]; ok {
-					textBuilder.Reset()
-					textBuilder.WriteString(string(lastResp))
+					lastRespStr := string(lastResp)
+					if lastRespStr != "" {
+						textBuilder.Reset()
+						textBuilder.WriteString(lastRespStr)
+					}
 				}
 			}
 		}
 	}
 
+	// Fallback: if no delta content was collected, try reading
+	// the final response from the last completion event's Message.Content.
 	responseText = textBuilder.String()
+	if responseText == "" && len(allEvents) > 0 {
+		lastEvt := allEvents[len(allEvents)-1]
+		if lastEvt.Response != nil &&
+			len(lastEvt.Response.Choices) > 0 {
+			responseText = lastEvt.Response.Choices[0].Message.Content
+		}
+	}
 
 	// Add metrics attributes to span
 	span.SetAttributes(
@@ -502,6 +603,47 @@ func (l *CoreLoop) RunStream(
 			Role:      "assistant",
 			Content:   responseText,
 		})
+	}
+
+	// [Fix 2] Record assistant response in MemoryFlow transcript.
+	if l.memoryFlow != nil && responseText != "" {
+		_ = l.memoryFlow.IngestTurn(
+			ctx, sessionID, userID, "assistant", responseText,
+		)
+	}
+
+	// [Fix 3] Bridge MemoryFlow → tRPC Memory: promote extracted
+	// facts from conversation to the persistent memory store.
+	if l.memoryFlow != nil && responseText != "" {
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					util.Logger.Warn("memoryflow: promote panic",
+						"error", fmt.Sprint(r))
+				}
+			}()
+			bgCtx, cancel := context.WithTimeout(
+				context.Background(), 60*time.Second,
+			)
+			defer cancel()
+			candidates, err := l.memoryFlow.PromoteFacts(
+				bgCtx, sessionID, userID,
+			)
+			if err != nil {
+				util.Logger.Debug("memoryflow: promote skipped",
+					"reason", err.Error())
+				return
+			}
+			for _, c := range candidates {
+				if c.Content == "" {
+					continue
+				}
+				util.Logger.Debug("memoryflow: promoted fact",
+					"kind", c.Kind,
+					"content", c.Content[:min(80, len(c.Content))],
+				)
+			}
+		}()
 	}
 
 	// Trigger context optimization after run with real events
@@ -651,6 +793,29 @@ func createSingleAgent(
 		llmagent.WithPreloadMemory(10),
 	)
 
+	// Warn agent when memory is near capacity so it can clean up.
+	if cfg.Config.Memory.MaxMemories > 0 {
+		// ReadMemories with limit 0 returns all entries count.
+		// The preload already handles the content; this is just
+		// a safety net in the system instruction.
+		if cfg.MemoryService != nil {
+			entries, _ := cfg.MemoryService.ReadMemories(
+				context.Background(),
+				memory.UserKey{
+					AppName: "wukong-app",
+					UserID:  cfg.UserID,
+				},
+				0,
+			)
+			if len(entries) >= cfg.Config.Memory.MaxMemories-5 {
+				util.Logger.Warn("memory: near capacity",
+					"current", len(entries),
+					"max", cfg.Config.Memory.MaxMemories,
+				)
+			}
+		}
+	}
+
 	if len(allTools) > 0 {
 		agentOpts = append(agentOpts,
 			llmagent.WithTools(allTools),
@@ -659,6 +824,20 @@ func createSingleAgent(
 	if len(cfg.ToolSets) > 0 {
 		agentOpts = append(agentOpts,
 			llmagent.WithToolSets(cfg.ToolSets),
+		)
+		// Diagnostic: log all tool names from ToolSets to verify
+		// that memory tools are actually visible to the agent.
+		var tsToolNames []string
+		for _, ts := range cfg.ToolSets {
+			for _, t := range ts.Tools(context.Background()) {
+				if d := t.Declaration(); d != nil {
+					tsToolNames = append(tsToolNames, d.Name)
+				}
+			}
+		}
+		util.Logger.Info("agent: ToolSet tools loaded",
+			"toolset_count", len(cfg.ToolSets),
+			"tool_names", tsToolNames,
 		)
 	}
 
@@ -828,16 +1007,20 @@ func buildSystemInstruction(
 		// Memory guidance
 		"Your memory about the user is automatically loaded " +
 		"into this prompt at the start of each conversation. " +
-		"You also have memory tools " +
-		"(memory_add, memory_search, memory_update, " +
-		"memory_delete, memory_load, memory_clear). " +
-		"Use them proactively to remember important user " +
-		"preferences, facts, decisions, and context across " +
-		"sessions. When the user tells you something about " +
-		"themselves (preferences, name, goals, projects, " +
-		"constraints), store it with memory_add. " +
-		"Search with memory_search when you need to find " +
-		"specific remembered information."
+		"\n\n**IMPORTANT — Memory Tools**: " +
+		"You have memory tools available: " +
+		"memory_add, memory_search, memory_update, " +
+		"memory_delete, memory_load, memory_clear. " +
+		"\n- Use **memory_add** immediately when the user " +
+		"shares preferences, personal details, project info, " +
+		"decisions, or important context. Do NOT wait — store it now. " +
+		"\n- Use **memory_search** when the user asks " +
+		"\"what do you remember\", \"what do you know about me\", " +
+		"or needs past context. " +
+		"\n- Use **memory_update** to correct outdated memories. " +
+		"\n- Use **memory_load** to review all stored memories. " +
+		"\n- This is critical for providing personalized, " +
+		"context-aware assistance across sessions."
 	}
 
 	// Inject Top of Mind persistent instructions if available

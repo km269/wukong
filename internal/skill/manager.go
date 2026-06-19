@@ -67,7 +67,7 @@ func (m *Manager) SkillsDir() string {
 	if m.cfg.SkillsDir != "" {
 		return m.cfg.SkillsDir
 	}
-	return ".wukong_agent_skills"
+	return ".wukong_skills"
 }
 
 // SetEvolutionHook sets the evolution hook for trace capture.
