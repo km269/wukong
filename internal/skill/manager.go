@@ -176,8 +176,8 @@ func (m *Manager) CreateSkillAgent(
 		llmagent.WithAddCurrentTime(true),
 		llmagent.WithGenerationConfig(model.GenerationConfig{
 			Stream:      false,
-			MaxTokens:   intPtr(2048),
-			Temperature: float64Ptr(0.3),
+			MaxTokens:   util.IntPtr(2048),
+			Temperature: util.Float64Ptr(0.3),
 		}),
 		llmagent.WithMaxLLMCalls(10),
 	}
@@ -285,6 +285,3 @@ func (m *Manager) Refresh() error {
 	m.summaries = m.repository.Summaries()
 	return nil
 }
-
-func intPtr(i int) *int          { return &i }
-func float64Ptr(f float64) *float64 { return &f }

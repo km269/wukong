@@ -166,21 +166,21 @@ func runSession(cmd *cobra.Command, args []string) error {
 		sig := <-sigCh
 		fmt.Printf("\nReceived signal %v, shutting down...\n", sig)
 		// Shutdown A2A server if running
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 		if bootstrapState.A2AServer != nil {
-			if err := bootstrapState.A2AServer.Stop(
-				context.Background(),
-			); err != nil {
+			if err := bootstrapState.A2AServer.Stop(shutdownCtx); err != nil {
 				util.Logger.Warn("A2A server stop error",
 					"error", err.Error())
 			}
 		}
 		// Shutdown AG-UI server if running
 		if bootstrapState.AGUIServer != nil {
-			_ = bootstrapState.AGUIServer.Stop(context.Background())
+			_ = bootstrapState.AGUIServer.Stop(shutdownCtx)
 		}
 		// Shutdown ACP server if running
 		if bootstrapState.ACPServer != nil {
-			_ = bootstrapState.ACPServer.Stop(context.Background())
+			_ = bootstrapState.ACPServer.Stop(shutdownCtx)
 		}
 		// Shutdown ACP MCP Bridge if running
 		if bootstrapState.ACPMCPBridge != nil {
@@ -208,19 +208,19 @@ func runSession(cmd *cobra.Command, args []string) error {
 
 	// Ensure cleanup on return
 	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 		if bootstrapState.A2AServer != nil {
-			if err := bootstrapState.A2AServer.Stop(
-				context.Background(),
-			); err != nil {
+			if err := bootstrapState.A2AServer.Stop(shutdownCtx); err != nil {
 				util.Logger.Warn("A2A server stop error",
 					"error", err.Error())
 			}
 		}
 		if bootstrapState.AGUIServer != nil {
-			_ = bootstrapState.AGUIServer.Stop(context.Background())
+			_ = bootstrapState.AGUIServer.Stop(shutdownCtx)
 		}
 		if bootstrapState.ACPServer != nil {
-			_ = bootstrapState.ACPServer.Stop(context.Background())
+			_ = bootstrapState.ACPServer.Stop(shutdownCtx)
 		}
 		if bootstrapState.ACPMCPBridge != nil {
 			if err := bootstrapState.ACPMCPBridge.Stop(); err != nil {
@@ -295,7 +295,9 @@ func bootstrapSession(
 	// This must be done early so all subsequent operations can
 	// be traced. Shutdown is deferred until the agent loop closes.
 	telMgr := telemetry.NewManager(wukongCfg.Telemetry)
-	telShutdown, err := telMgr.Initialize(context.Background())
+	initCtx, initCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer initCancel()
+	telShutdown, err := telMgr.Initialize(initCtx)
 	if err != nil {
 		util.Logger.Warn("telemetry init failed, continuing without tracing",
 			"error", err.Error())
@@ -313,22 +315,20 @@ func bootstrapSession(
 	// Create model factory
 	factory := provider.NewFactory(wukongCfg)
 
-	// Create shared database pool for all SQLite-backed subsystems.
-	// All modules (session, memory, todo, recall) share the same
-	// database connection, avoiding the overhead and lifecycle
-	// complexity of multiple independent connections.
-	// NOTE: The pool path is resolved from session.db_path (default:
-	// "wukong.db"). Individual DBPath settings in memory/todo/recall
-	// config blocks are ignored when the shared pool is used.
-	// To use separate databases, subsystems must be configured with
-	// their own pools (currently not implemented).
-	dbPool := util.NewDatabasePool(
+	// Create multi-pool database manager for all SQLite-backed subsystems.
+	// By default, all modules (session, memory, todo, recall, cortex,
+	// evolution) share a single wukong.db via the "shared" pool.
+	//
+	// Subsystems with their own db_path config override will receive
+	// an independent DatabasePool, enabling data isolation when needed
+	// (e.g., a dedicated memory database for large-scale recall).
+	dbPool := util.NewMultiPool(
 		config.ResolvePath(wukongCfg.Session.DBPath),
 	)
 
 	// Create session service
 	sessionSvc, err := wksession.NewSessionService(
-		&wukongCfg.Session, dbPool,
+		&wukongCfg.Session, dbPool.Shared(),
 	)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create session: %w", err)
@@ -363,7 +363,7 @@ func bootstrapSession(
 		}
 	}
 	memoryMgr, err := memory.NewMemoryManager(
-		&wukongCfg.Memory, extractorModel, dbPool,
+		&wukongCfg.Memory, extractorModel, dbPool.Shared(),
 	)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create memory: %w", err)
@@ -371,8 +371,10 @@ func bootstrapSession(
 
 	// Smart cleanup: evict low-importance memories when near capacity.
 	if wukongCfg.Memory.MaxMemories > 0 {
+		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cleanCancel()
 		cleaned, _ := memoryMgr.SmartCleanup(
-			context.Background(),
+			cleanCtx,
 			tRPCMemory.UserKey{
 				AppName: "wukong-app",
 				UserID:  userID,
@@ -390,7 +392,9 @@ func bootstrapSession(
 
 	// Create extension manager and initialize
 	extMgr := extension.NewManager(wukongCfg)
-	if err := extMgr.Initialize(context.Background()); err != nil {
+	extInitCtx, extInitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer extInitCancel()
+	if err := extMgr.Initialize(extInitCtx); err != nil {
 		return nil, nil, nil, fmt.Errorf("init extensions: %w", err)
 	}
 
@@ -440,7 +444,7 @@ func bootstrapSession(
 		// a separate connection to the same database file.
 		// This prevents "transaction has already been committed"
 		// errors from concurrent session/memory/cortex writes.
-		sharedDB, dbErr := dbPool.GetDB()
+		sharedDB, dbErr := dbPool.Shared().GetDB()
 		if dbErr != nil {
 			util.Logger.Warn("cortex: get shared db failed",
 				slog.String("error", dbErr.Error()))
@@ -469,7 +473,7 @@ func bootstrapSession(
 	} else if wukongCfg.Recall.Enabled {
 		// Native SQLite FTS5 recall store (default).
 		recallStore, err = recall.NewStore(
-			&wukongCfg.Recall, dbPool,
+			&wukongCfg.Recall, dbPool.Shared(),
 		)
 		if err != nil {
 			util.Logger.Warn("recall store init failed",
@@ -624,9 +628,22 @@ func bootstrapSession(
 			util.Logger.Warn("importflow init failed",
 				slog.String("error", err.Error()))
 		} else {
-			importToolMgr = cortex.NewImportToolManager(ifs)
+			// Use lightweight model for LLM-enhanced DDL mapping,
+			// same as GraphFlow extractor model resolution.
+			importModel := wukongCfg.GraphFlow.ExtractorModel
+			if importModel == "" {
+				importModel = wukongCfg.EffectiveLightweightModel()
+			}
+			var jsonGen graphflow.JSONGenerator
+			if importModel != "" {
+				jsonGen = cortex.NewLLMJSONGenerator(
+					factory, importModel,
+				)
+			}
+			importToolMgr = cortex.NewImportToolManager(ifs, jsonGen)
 			util.Logger.Info("importflow: service initialized",
 				"db_path", wukongCfg.ImportFlow.DBPath,
+				"llm_model", importModel,
 			)
 		}
 	}
@@ -690,7 +707,7 @@ func bootstrapSession(
 		evoEngine, err = evolution.NewEngine(evolution.EngineConfig{
 			Config:  wukongCfg,
 			Factory: factory,
-			DBPool:  dbPool,
+			DBPool:  dbPool.Shared(),
 		})
 		if err != nil {
 			util.Logger.Warn("evolution engine init failed",
@@ -745,6 +762,8 @@ func bootstrapSession(
 	// Register A2A remote agents as summon delegates.
 	// Each remote agent is configured with a server URL and auth,
 	// and wrapped as a tool that the main agent can delegate to.
+	// Uses RemoteDelegateTool (agenttool.NewTool) to expose the
+	// A2A agent as a callable function tool with concurrency control.
 	for _, remote := range wukongCfg.Summon.A2ARemotes {
 		a2aAgent := a2aRemoteToConfig(remote)
 		if a2aAgent == nil {
@@ -752,16 +771,23 @@ func bootstrapSession(
 				"agent", remote.Name)
 			continue
 		}
-		// Store the A2A agent for later use as a sub-agent.
-		_ = a2aAgent.Agent()
-		util.Logger.Info("A2A remote agent configured",
+		// Wrap the A2A agent as a tool for the main agent.
+		remoteTool := summon.RemoteDelegateTool(
+			"a2a_"+remote.Name,
+			"Remote A2A agent: "+remote.ServerURL,
+			a2aAgent.Agent(),
+		)
+		summonTools = append(summonTools,
+			summonMgr.WrapTool(remoteTool, remote.Name),
+		)
+		util.Logger.Info("A2A remote agent registered as tool",
 			"agent", remote.Name,
 			"server_url", remote.ServerURL)
 	}
 
 	// Create todo manager
 	todoStore, err := todo.NewStore(
-		wukongCfg.Todo.DBPath, dbPool,
+		wukongCfg.Todo.DBPath, dbPool.Shared(),
 	)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create todo store: %w", err)

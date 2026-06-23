@@ -118,9 +118,14 @@ func (e *Executor) Execute(
 	// goja does not support per-VM memory limits, so we use
 	// Go's soft memory limit. The previous limit is restored
 	// after execution via defer.
-	prevLimit := debug.SetMemoryLimit(
-		int64(e.cfg.MaxMemoryMB) * 1024 * 1024,
-	)
+	//
+	// We use 80% of the configured limit as a conservative
+	// safety margin since SetMemoryLimit is a soft limit -
+	// the runtime will trigger GC more aggressively but cannot
+	// guarantee enforcement under extreme memory pressure.
+	memLimit := int64(e.cfg.MaxMemoryMB) * 1024 * 1024
+	safeLimit := int64(float64(memLimit) * 0.8)
+	prevLimit := debug.SetMemoryLimit(safeLimit)
 	defer debug.SetMemoryLimit(prevLimit)
 
 	// Execute in sandboxed environment
@@ -230,6 +235,8 @@ func (e *Executor) Close() error {
 }
 
 // executeSandboxed runs code in a goja sandboxed JS interpreter.
+// It includes panic recovery to catch runaway JS execution and
+// prevent goroutine leaks that could crash the process.
 func (e *Executor) executeSandboxed(
 	ctx context.Context, code string,
 ) ExecutionResult {
@@ -246,6 +253,16 @@ func (e *Executor) executeSandboxed(
 	done := make(chan evalResult, 1)
 
 	go func() {
+		// Panic recovery: catch any panic from the JS runtime
+		// and convert it to a safe error result.
+		defer func() {
+			if r := recover(); r != nil {
+				done <- evalResult{
+					val: nil,
+					err: fmt.Errorf("JS runtime panic: %v", r),
+				}
+			}
+		}()
 		val, err := vm.RunString(code)
 		done <- evalResult{val: val, err: err}
 	}()
@@ -282,6 +299,7 @@ func (e *Executor) executeSandboxed(
 
 // executeSandboxedWithTools is like executeSandboxed but injects
 // __tools into the JS runtime before executing the code.
+// Includes panic recovery for safety.
 func (e *Executor) executeSandboxedWithTools(
 	ctx context.Context, code string, tools []DiscoveredTool,
 ) ExecutionResult {
@@ -308,6 +326,15 @@ func (e *Executor) executeSandboxedWithTools(
 	done := make(chan evalResult, 1)
 
 	go func() {
+		// Panic recovery: catch any panic from the JS runtime.
+		defer func() {
+			if r := recover(); r != nil {
+				done <- evalResult{
+					val: nil,
+					err: fmt.Errorf("JS runtime panic: %v", r),
+				}
+			}
+		}()
 		val, err := vm.RunString(code)
 		done <- evalResult{val: val, err: err}
 	}()

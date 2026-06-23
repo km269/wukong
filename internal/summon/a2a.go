@@ -22,6 +22,7 @@ import (
 	a2aserver "trpc.group/trpc-go/trpc-agent-go/server/a2a"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
+	agenttool "trpc.group/trpc-go/trpc-agent-go/tool/agent"
 )
 
 // AuthConfig holds authentication configuration for A2A connections.
@@ -275,13 +276,21 @@ func buildAuthHeaders(remote config.A2ARemoteConfig) map[string]string {
 
 // RemoteDelegateTool creates a tool from a remote A2A agent that
 // the main agent can call to delegate tasks.
+//
+// The returned tool uses agenttool.NewTool to wrap the A2A agent,
+// enabling the parent agent to invoke it as a callable sub-agent
+// with final-only response mode (no inner streaming to parent).
 func RemoteDelegateTool(
 	name, description string, a2aAgent agent.Agent,
 ) tool.Tool {
-	_ = name
-	_ = description
-	_ = a2aAgent
-	return nil
+	return agenttool.NewTool(
+		a2aAgent,
+		agenttool.WithSkipSummarization(false),
+		agenttool.WithStreamInner(false),
+		agenttool.WithResponseMode(
+			agenttool.ResponseModeFinalOnly,
+		),
+	)
 }
 
 // ContainsKeyword checks if a string contains a keyword (case-insensitive).

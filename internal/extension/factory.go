@@ -37,6 +37,13 @@ func CreateBuiltinToolSet(
 		// runtime dependencies. The manager will hold a nil
 		// entry; session.go appends the real toolset.
 		return nil, nil
+	case "ard":
+		return builtin.NewARDToolSet(
+			cfg.ARD.RegistryURL,
+			cfg.ARD.CatalogPath,
+		)
+	case "cortex":
+		return builtin.NewCortexToolSet(cfg), nil
 	default:
 		return nil, fmt.Errorf(
 			"unknown builtin extension: %s", name,

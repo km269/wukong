@@ -1,41 +1,44 @@
 # =============================================================================
-# Wukong Configuration
+# Wukong Configuration — 全功能配置模板
 # =============================================================================
+# 版本: v0.9.0 | Go: 1.26 | 配置段: 30+
+#
 # 加载优先级（从高到低）:
-#   1. 环境变量 (WUKONG_ 前缀, 如 WUKONG_DEFAULT_PROVIDER)
-#   2. 命令行参数 (--config)
-#   3. 当前目录 ./config.yaml
-#   4. ~/.config/wukong/config.yaml
-#   5. /etc/wukong/config.yaml
+#   1. 命令行参数 (--provider, --model, --temperature, --max-tokens, --config)
+#   2. 环境变量 (WUKONG_ 前缀, 如 WUKONG_DEFAULT_PROVIDER)
+#   3. --config CLI 指定的文件
+#   4. 当前目录 ./config.yaml
+#   5. ~/.config/wukong/config.yaml
+#   6. /etc/wukong/config.yaml (仅限非 Windows 平台)
+#   7. 内置默认值
 #
 # 环境变量引用语法: ${ENV_VAR} (运行时自动展开)
 # =============================================================================
 
-# 日志级别: debug | info | warn | error (CLI --debug/--quiet 覆盖)
+# 日志级别: debug | info | warn | error
+# CLI --debug 覆盖为 debug, --quiet 覆盖为 error
 log_level: "info"
 
-# ---------------------------------------------------------------------------
-# Global Lightweight Model - 后台任务共享的轻量模型
-# 当各子系统未显式指定模型时，统一使用此配置:
-#   - memory.extractor_model (记忆提取)
-#   - memoryflow.planner_model / extractor_model (检索规划/转录提取)
-#   - graphflow.extractor_model (知识图谱构建)
-#   - revision.revision_model (上下文压缩)
-# ---------------------------------------------------------------------------
+# 默认 AI 提供商名称 (必须与 providers 列表中某个 name 匹配)
+default_provider: "lmstudio"
+
+# =============================================================================
+# 全局轻量模型 — 后台任务共享的廉价/快速模型
+# =============================================================================
+# 当各子系统未显式指定模型时，统一回退到此配置:
+#   memory.extractor_model      → lightweight_model
+#   memoryflow.planner_model    → lightweight_model
+#   memoryflow.extractor_model  → lightweight_model
+#   graphflow.extractor_model   → lightweight_model
+#   revision.revision_model     → lightweight_model
 lightweight_provider: "lmstudio"
 lightweight_model: "gemma-4-e4b-it"
 
-# ---------------------------------------------------------------------------
-# Default Provider - 默认使用的 AI 提供商
-# 必须与下方 providers 列表中某个 name 匹配
-# ---------------------------------------------------------------------------
-default_provider: "lmstudio"
-
-# ---------------------------------------------------------------------------
-# Providers - AI 模型提供商列表
-# 支持类型: openai, anthropic, google, deepseek, ollama, lmstudio, acp
+# =============================================================================
+# 1. Providers — AI 模型提供商
+# =============================================================================
+# 支持类型: openai | anthropic | google | deepseek | ollama | lmstudio | acp
 # api_key 支持 ${ENV_VAR} 语法引用环境变量
-# ---------------------------------------------------------------------------
 providers:
   - name: "openai"
     type: "openai"
@@ -67,80 +70,91 @@ providers:
     base_url: "http://192.168.50.97:1234/v1"
     model: "google/gemma-4-26b-a4b"
 
-  # ACP 代理客户端协议 (Agent Client Protocol)
-  # 将 ACP 兼容的编码代理作为 LLM 提供商
+  # ACP 代理客户端 — 将远程 ACP Agent 作为 LLM 提供商
   - name: "acp-coder"
     type: "acp"
     agent_url: "http://localhost:4000"
     model: "acp-default"
 
-# ---------------------------------------------------------------------------
-# Agent - 核心 Agent 行为配置
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 2. Agent — 核心行为与执行策略
+# =============================================================================
 agent:
+  # --- 执行限制 ---
   max_llm_calls: 50
   max_tool_iterations: 30
+  max_run_duration: "300s"
   parallel_tools: true
   streaming: true
-  max_run_duration: "300s"
+
+  # --- 生成参数 ---
   temperature: 0.7
   max_tokens: 4096
+  # reasoning_effort: "medium"  # low | medium | high (仅 builtin planner)
+
+  # --- 工具重试 (指数退避) ---
   tool_retry_enabled: true
   tool_retry_max_attempts: 3
   tool_retry_initial_wait: "1s"
   tool_retry_backoff_factor: 2.0
   enable_post_tool_prompt: true
-  # Planner - 结构化规划与推理
-  # builtin: 适合支持原生 thinking 的模型 (Claude/Gemini/OpenAI o-series)
-  # react:   适合不支持原生 thinking 的模型 (通过标签引导思考)
-  # 留空:    不启用 planner
+
+  # --- Planner 规划器 ---
+  # builtin: 支持原生 thinking 的模型 (Claude/Gemini/OpenAI o-series)
+  # react:   通过标签引导思考 (适合不支持原生 thinking 的模型)
+  # "":      不启用 planner
   planner: ""
-  # reasoning_effort: "medium"  # low / medium / high (仅 builtin planner)
-  # Tool Search - 自动工具筛选，减少 token 消耗
+
+  # --- Tool Search 工具筛选 ---
   tool_search_enabled: true
-  # tool_search_max_tools: 20
-  # 上下文压缩 - 自动截断过长的工具结果，防止上下文溢出
-  # 启后执行两遍压缩：
-  #   Pass 1: 将旧的超大工具结果替换为占位符 (<阈值结果被替换)
-  #   Pass 2: 对剩余超大结果进行首尾截断
+  # tool_search_max_tools: 20   # 每次最多提供给 LLM 的工具数
+
+  # --- Context Compaction 上下文压缩 (两遍) ---
+  # Pass 1: 将旧的超大工具结果替换为占位符
+  # Pass 2: 对剩余超大结果进行首尾截断
   context_compaction: true
-  # context_compaction_tool_result_max_tokens: 1024  # Pass 1 阈值
-  # context_compaction_oversized_max_tokens: 8192    # Pass 2 阈值 (0=禁用Pass2)
-  # context_compaction_keep_recent: 1                # 保留最近N个请求
-  # context_compaction_force_clean_tools:            # 强制占位符化的工具
+  # context_compaction_tool_result_max_tokens: 1024
+  # context_compaction_oversized_max_tokens: 8192
+  # context_compaction_keep_recent: 1
+  # context_compaction_force_clean_tools:
   #   - "shell"
   #   - "grep"
-  # context_compaction_keep_tools:                   # 始终保留结果的工具
+  # context_compaction_keep_tools:
   #   - "memory_search"
   #   - "session_search"
-  # Session Recall - 跨会话上下文预加载
+
+  # --- Session Recall 跨会话上下文预加载 ---
   session_recall_enabled: false
   # session_recall_limit: 5
-  # JSON Repair - 修复非标准 JSON 工具参数
+
+  # --- JSON Repair — 修复 LLM 输出的非标准 JSON ---
   json_repair_enabled: false
-  # Todo Tool - tRPC 原生 todo_write 工具，任务在 Session 中持久化
+
+  # --- Todo 任务管理 ---
   todo_tool_enabled: true
-  # Todo Enforcer - 确保所有待办任务完成后才给出最终答案
   todo_enforcer_enabled: true
-  # Agent Tools - 将子 Agent（code-reviewer, summarizer）包装为可调用工具
-  agent_tools_enabled: false    # 禁用子Agent工具以节省token（500+条工具列表）
-  # agent_tools_stream: true  # 启用子Agent结果流式输出
-  # 系统提示词模板目录 (加载 .md 文件拼接为 system instruction)
-  # 空目录或不存在时回退到内置默认提示词
+
+  # --- Agent Tools — 子 Agent 包装为可调用工具 ---
+  agent_tools_enabled: false
+  # agent_tools_stream: true
+
+  # --- 提示模板 ---
   system_prompt_dir: "~/.config/wukong/prompts/"
-  # YAML Recipe 子代理定义目录 (结构化子代理配置)
-  # 每个 .yaml 文件定义一个命名子代理（instruction/tools/model）
-  # 默认可通过 system- 前缀工具调用
+
+  # --- Recipe 配方子 Agent ---
   # recipe_dir: ".wukong/recipes/"
   # recipe_enabled: true
 
-# ---------------------------------------------------------------------------
-# Security - 安全策略与工具权限
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 3. Security — 安全策略与权限控制
+# =============================================================================
 security:
+  # 权限模式: auto | smart | manual | chat_only
+  permission_mode: "smart"
+  require_approval: false
+
+  # 安全扫描
   malware_scan_enabled: true
-  default_timeout: "30s"
-  max_timeout: "300s"
   block_dangerous_commands: true
   blocked_commands:
     - "rm -rf /"
@@ -148,253 +162,233 @@ security:
     - "mkfs."
     - "> /dev/sda"
     - "fork bomb"
-  require_approval: false
-  # 权限模式: auto | smart | manual | chat_only
-  permission_mode: "smart"
+
+  # 超时
+  default_timeout: "30s"
+  max_timeout: "300s"
+
+  # 黑白名单 (支持通配符, 如 "file_*")
   allowlist: []
   denylist: []
-  # Guardrail - 提示注入检测 (增加延迟)
+
+  # Guardrail — Prompt 注入检测 (启用增加延迟)
   guardrail_enabled: false
-  # .wukongignore 文件访问黑名单 (gitignore 兼容语法)
-  # 启用后，file_read/write/replace/command_execute 拒绝访问匹配路径
+
+  # .wukongignore — gitignore 兼容的文件访问黑名单
   ignore_file_enabled: true
   ignore_file: ".wukongignore"
 
-# ---------------------------------------------------------------------------
-# Session - 会话存储配置
-# 支持后端: sqlite (默认), memory, redis
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 4. Session — 会话持久化
+# =============================================================================
 session:
-  backend: "sqlite"
+  backend: "sqlite"             # sqlite | memory | redis
   db_path: "wukong.db"
   event_limit: 500
-  ttl: "0h"
+  ttl: "0h"                     # 0 = 永不过期
   enable_summary: true
   summary_trigger: 50
-  # Redis 配置 (仅 backend="redis" 时生效)
-  # redis_url: "redis://localhost:6379/0"
+  # redis_url: "redis://localhost:6379/0"  # 仅 backend="redis" 时
 
-# ---------------------------------------------------------------------------
-# Memory - 长期记忆存储配置
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 5. Memory — 长期记忆 (tRPC Memory)
+# =============================================================================
 memory:
-  backend: "sqlite"
+  backend: "sqlite"             # sqlite | memory
   db_path: "wukong.db"
-  max_memories: 100
+  max_memories: 100             # 0 = 不限制
+
+  # AutoExtract — 每轮对话后异步 LLM 提取事实
   auto_extract: true
   extract_timeout: "600s"
-  extractor_provider: "lmstudio"          # 独立提取模型 provider
-  # extractor_model: ""                   # 未指定 → 使用全局 lightweight_model
+  extractor_provider: "lmstudio"    # 独立提取模型 provider
+  # extractor_model: ""             # 留空 → 使用 lightweight_model
+
+  # SmartCleanup — 容量感知淘汰 (80% 触发 → 60% 目标)
+  # 评分策略: 70% recency + 30% content length
+  enable_smart_cleanup: true
+  cleanup_trigger_threshold: 0.8
+  cleanup_target_threshold: 0.6
+  memory_ttl: "720h"
+
+  # 自定义记忆提取 Prompt
   extractor_prompt: |
     You are a Memory Manager. Extract concise memories from the conversation.
     Today's date is {current_date}. Resolve ALL relative time references to absolute dates.
 
     <rules>
-    1. **Atomicity**: One fact per memory. "User likes coffee and hiking" → two memories.
+    1. **Atomicity**: One fact per memory.
     2. **No subject prefix**: Never start with "User", "The user", etc.
-       Good: "Enjoys hiking on weekends"
-       Good: "Works as a backend engineer at Google"
-       Bad:  "User enjoys hiking on weekends"
-    3. **Deduplication**: Before adding, check existing memories. If already captured
-       (even with different wording), do NOT add again. Use memory_update to correct.
+    3. **Deduplication**: Check existing memories before adding.
     4. **Specificity**: Include names, dates, places, quantities.
-       Good: "Favorite coffee shop is Blue Bottle on Market St."
-       Bad:  "Likes coffee"
-    5. **Episode vs Fact**:
-       - Episode (memory_kind="episode"): Something that HAPPENED with a time.
-         Always set event_time. Use for events, trips, meetings, activities.
-       - Fact (memory_kind="fact"): Stable attribute, preference, relationship.
-         Can also have event_time if time context exists.
-    6. **All speakers**: Extract info about EVERY person in the conversation,
-       not just the primary speaker. Attribute by name.
-    7. **Skip transient**: Do not create memories for "What time is it?" or greetings.
+    5. **Episode vs Fact**: Episode = events with time, Fact = stable attributes.
+    6. **All speakers**: Extract info about EVERY person in the conversation.
+    7. **Skip transient**: Do not create memories for greetings or trivial queries.
     </rules>
 
     Write memory content in the same language as the user's input.
     Call multiple tools in parallel for efficiency.
 
-# ---------------------------------------------------------------------------
-# Todo - 任务跟踪存储配置
-# 支持两种模式（可同时启用）:
-#   1. 自定义 SQLite 工具: todo_create/todo_update/todo_list/todo_complete/
-#      todo_delete（精细管理，backend 配置其存储）
-#   2. tRPC 原生 todo_write + todoenforcer: 基于 Session 持久化，
-#      强制完成校验（推荐，简单易用，在 agent 段配置）
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 6. Todo — 任务追踪
+# =============================================================================
 todo:
   backend: "sqlite"
   db_path: "wukong.db"
-  enable_native_todo: true   # 启用 tRPC 原生 todo_write 工具
-  enable_enforcer: true      # 启用 todoenforcer（必须完成所有todo才给最终答案）
+  enable_native_todo: true
+  enable_enforcer: true
 
-# ---------------------------------------------------------------------------
-# Recall - 跨会话对话搜索配置
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 7. Recall — 跨会话对话搜索 (FTS5 全文)
+# =============================================================================
 recall:
   enabled: true
   backend: "sqlite"
   db_path: "wukong.db"
   max_results: 10
   max_messages_per_session: 200
-  # 搜索模式: "fts5" (默认, 全文搜索), "hybrid" (语义+全文混合)
-  # hybrid 模式需要 embedding_provider 和 embedding_model
-  search_mode: "fts5"
-  # embedding_provider: "openai"    # 用于生成 embedding 的 provider
+  search_mode: "fts5"            # fts5 | hybrid (hybrid 需 Embedding)
+  # embedding_provider: "openai"
   # embedding_model: "text-embedding-3-small"
 
-# ---------------------------------------------------------------------------
-# Cortex - CortexDB 智能回溯与知识存储配置
-# ---------------------------------------------------------------------------
-# 启用后，使用 CortexDB 替代原生 SQLite FTS5 作为回溯存储，
-# 提供向量语义搜索 + 全文搜索 + 知识图谱能力。
-# 与 recall 互斥：启用 cortex 后 recall 后台存储自动切换。
+# =============================================================================
+# 8. Cortex — CortexDB 智能记忆栈
+# =============================================================================
+# HNSW 向量搜索 + FTS5 全文搜索 + 余弦相似度本地排序
+# 启用后，recall 后台存储自动切换为 CortexDB
 cortex:
-  enabled: true                            # 启用 CortexDB 智能回溯
-  db_path: "wukong.db"                     # 合并到主DB
+  enabled: true
+  db_path: "wukong.db"
   max_results: 10
   max_messages_per_session: 200
-
-  # 向量嵌入配置（用于语义搜索）
-  # 需要 OpenAI 兼容的 embedding API
   embedding_base_url: "http://192.168.50.97:1234"
   embedding_api_key: "lmstudio"
   embedding_model: "qwen3-embedding-0.6b-graphql"
 
-# ---------------------------------------------------------------------------
-# MemoryFlow - CortexDB 代理记忆工作流配置
-# ---------------------------------------------------------------------------
-# 启用后，自动记录对话转录、生成唤醒上下文、将重要事实提升到长期记忆。
-# 与现有 memory (tRPC) 系统并行工作，提供更丰富的上下文体验。
+# =============================================================================
+# 9. MemoryFlow — 转录记录与语义唤醒
+# =============================================================================
+# 三层上下文构建: 身份(who_am_i) + 回忆(recall) + 当前会话(current)
+# 事实提升: IngestTurn → WakeUp → PromoteFacts → tRPC Memory
 memoryflow:
-  enabled: true                         # 启用 MemoryFlow
-  db_path: "wukong.db"                  # 合并到主DB
-  namespace: "assistant"                # 记忆命名空间
-  embedding_dimensions: 0               # 向量维度 (0=自动检测)
+  enabled: true
+  db_path: "wukong.db"
+  namespace: "assistant"
+  embedding_dimensions: 0        # 0 = 自动检测
+  # planner_model: ""            # 留空 → lightweight_model
+  # extractor_model: ""          # 留空 → lightweight_model
 
-  # 可选：指定用于规划和提取的 LLM 模型
-  # 留空则使用全局 lightweight_model
-  # planner_model: ""
-  # extractor_model: ""
-
-# ---------------------------------------------------------------------------
-# GraphFlow - CortexDB 知识图谱构建配置
-# ---------------------------------------------------------------------------
-# 启用后，从对话转录中自动提取实体和关系，构建 RDF 知识图谱，
-# 支持 SPARQL 查询和推理。Agent 可通过工具查询图谱。
+# =============================================================================
+# 10. GraphFlow — 知识图谱构建
+# =============================================================================
+# 每轮对话自动提取实体/关系 → RDF 图 → SPARQL 查询
 graphflow:
-  enabled: true                          # 启用知识图谱构建
-  db_path: "wukong.db"                   # 合并到主DB
-  max_chars_per_doc: 8000                # 单文档最大提取字符数
+  enabled: true
+  db_path: "wukong.db"
+  max_chars_per_doc: 8000
+  auto_extract: true              # 每轮对话后自动提取
+  # extractor_model: ""           # 留空 → lightweight_model
 
-  # 自动提取：每轮对话后自动提取实体/关系
-  # 需要 MemoryFlow 同时启用
-  auto_extract: true
-
-  # LLM 提取模型（留空使用全局 lightweight_model）
-  # extractor_model: ""
-
-# ---------------------------------------------------------------------------
-# ImportFlow - CortexDB 结构化数据导入配置
-# ---------------------------------------------------------------------------
-# 启用后，支持将 CREATE TABLE DDL 和 CSV 数据自动导入到知识图谱。
-# Agent 可通过 importflow_ddl_parse / importflow_ddl_plan / importflow_csv 工具使用。
+# =============================================================================
+# 11. ImportFlow — 结构化数据导入
+# =============================================================================
+# DDL → KG 映射, CSV → RAG+KG
 importflow:
-  enabled: true                          # 启用结构化数据导入
-  db_path: "wukong.db"                   # 合并到主DB
+  enabled: true
+  db_path: "wukong.db"
 
-# ---------------------------------------------------------------------------
-# Revision - 上下文窗口管理配置
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 12. Revision — 上下文窗口管理 (3层压缩)
+# =============================================================================
+# Layer 1: ContextCompaction (tRPC 插件)
+# Layer 2: LLM 智能摘要 (辅助模型)
+# Layer 3: 渐进式截断
 revision:
   enabled: true
-
-  # 辅助摘要模型：用于智能上下文压缩。
-  # 指定一个廉价/快速的模型（如 gpt-4o-mini、deepseek-chat），
-  # 专门负责对旧对话生成结构化摘要，避免主模型 token 浪费。
-  # 留空则使用全局 lightweight_model。
-  revision_provider: "lmstudio"
-  # revision_model: ""
-
-  # 启用 LLM 智能摘要（需要 revision_model 配置正确）。
-  # 开启后 FilterIrrelevant 将调用辅助模型生成上下文摘要，
-  # 而非简单的算法截断。关闭后回退到原始截断策略。
+  revision_provider: "lmstudio"       # 辅助摘要模型 provider
+  # revision_model: ""                # 留空 → lightweight_model
   enable_llm_summarize: true
-
-  # 摘要冷却期：两次渐进式摘要之间的最小间隔。
-  # 避免频繁调用辅助模型造成延迟和费用。
   summary_cooldown: 120s
-
-  # 摘要超时：单次摘要调用的最大等待时间。
   summary_timeout: 30s
-
   max_command_output: 8000
   enable_semantic_search: false
   search_strategy: "include_all"
   max_context_tokens: 64000
   trim_ratio: 0.3
 
-# ---------------------------------------------------------------------------
-# Browser - 浏览器自动化配置
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 13. Browser — 浏览器自动化 (Chromedp)
+# =============================================================================
 browser:
   enabled: true
   browser_type: "chromium"
   headless: true
   cache_dir: ".wukong/cache"
-  max_download_size: 104857600
+  max_download_size: 104857600      # 100MB
   timeout: "60s"
-  # browser_path: ""                   # 自定义Chrome路径
-  viewport_width: 1280                 # 视口宽度
-  viewport_height: 720                 # 视口高度
-  search_backend: "duckduckgo"         # duckduckgo / searxng / tavily
-  search_backend_url: "http://43.167.226.121:8080/"             # SearXNG 实例URL
-  search_api_key: ""                                                           # 空=使用DuckDuckGo
+  viewport_width: 1280
+  viewport_height: 720
+  search_backend: "duckduckgo"       # duckduckgo | searxng | tavily
+  # search_backend_url: ""           # SearXNG 实例 URL
+  # search_api_key: ""               # API Key (留空=使用 DuckDuckGo)
 
-# ---------------------------------------------------------------------------
-# Visualiser - 图表生成配置
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 14. Visualiser — 图表生成
+# =============================================================================
 visualiser:
   enabled: true
   output_dir: ".wukong/visuals"
   max_width: 1200
   max_height: 800
 
-# ---------------------------------------------------------------------------
-# Tutorial - 交互式教程配置
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 15. Tutorial — 交互式教程
+# =============================================================================
 tutorial:
   enabled: true
   language: "zh"
 
-# ---------------------------------------------------------------------------
-# Top of Mind - 持久化指令注入配置
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 16. Top of Mind — 持久化指令注入
+# =============================================================================
+# 指令文件内容注入每次对话的系统提示中
 top_of_mind:
   enabled: true
   instruction_file: ".wukong/instructions.md"
   max_length: 2000
 
-# ---------------------------------------------------------------------------
-# Code Mode - JavaScript 沙箱执行配置
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 17. Code Mode — goja JavaScript 沙箱
+# =============================================================================
+# 5 层安全: API白名单 + 128MB限制 + 5并发 + ReDoS防护 + Panic恢复
 code_mode:
   enabled: true
   timeout: "10s"
   max_memory_mb: 128
 
-# ---------------------------------------------------------------------------
-# Apps - 自定义 HTML 应用配置
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 18. Apps — HTML 应用管理
+# =============================================================================
 apps:
   enabled: true
   app_dir: ".wukong/apps"
 
-# ---------------------------------------------------------------------------
-# Summon - 子代理调度配置
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 19. ARD — Agentic Resource Discovery
+# =============================================================================
+# AI Agent / MCP Server 资源发现、注册和目录管理
+# 支持本地目录 + 远程注册表联邦搜索
+ard:
+  enabled: false                    # 默认关闭，按需启用
+  registry_url: ""                  # 远程 ARD 注册表 URL
+  catalog_path: ".wukong/ard/catalog.json"  # 本地目录文件路径
+
+# =============================================================================
+# 20. Summon — 子代理委派 + A2A 远程代理
+# =============================================================================
 summon:
   enabled: true
-  skills_dir: ".wukong/skills"             # 统一技能目录（与 skill 共用）
+  skills_dir: ".wukong/skills"      # 统一技能目录 (与 skill 共用)
   max_concurrent: 5
   a2a_remotes: []
   # a2a_remotes 示例:
@@ -404,83 +398,73 @@ summon:
   #     auth_type: "api_key"
   #     api_key: "${A2A_API_KEY}"
 
-# ---------------------------------------------------------------------------
-# Skill - Agent Skill 仓库配置
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 21. Skill — Agent Skill 仓库
+# =============================================================================
 skill:
   enabled: true
-  skills_dir: ".wukong/skills"             # 统一技能目录（与 summon 共用）
+  skills_dir: ".wukong/skills"      # 统一技能目录 (与 summon 共用)
   auto_load: true
   max_skills: 20
 
-# ---------------------------------------------------------------------------
-# Evolution - 技能自进化配置
-# 启用后，技能执行轨迹会被 LLM 分析，发现问题后自动修补 SKILL.md
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 22. Evolution — 技能自进化
+# =============================================================================
+# 闭环: Agent执行 → ExecutionTrace → LLM分析 → 补丁建议 → 版本管理 → 热重载
 evolution:
-  enabled: false                     # 启用技能进化系统
-  auto_patch: false                  # 自动应用补丁（false=仅记录建议）
-  analysis_provider: ""              # 分析模型 provider（空=使用默认 provider）
-  analysis_model: ""                 # 分析模型名（空=使用 provider 默认模型）
-  min_confidence: 0.7                # 接受补丁的最低置信度 (0.0-1.0)
-  cooldown_period: "30m"             # 同技能两次修补的最短间隔
-  max_patches_per_day: 10            # 每技能每日最大修补次数
-  max_versions_kept: 10              # 保留的历史版本数上限
-  max_patch_size: 8192               # 补丁最大大小（字节）
-  analysis_timeout: "60s"            # 分析超时时间
+  enabled: false                    # 实验性功能
+  auto_patch: false                 # false=仅记录建议, true=自动应用
+  analysis_provider: ""             # 空=使用 default_provider
+  analysis_model: ""                # 空=使用 provider 默认模型
+  min_confidence: 0.7               # 接受补丁的最低置信度 (0.0-1.0)
+  cooldown_period: "30m"            # 同技能两次修补的最短间隔
+  max_patches_per_day: 10           # 全局每日最大补丁数
+  max_versions_kept: 10             # 保留的历史版本数
+  max_patch_size: 8192              # 单个补丁最大字节数 (8KB)
+  analysis_timeout: "60s"           # 分析超时
 
-# ---------------------------------------------------------------------------
-# Knowledge - RAG 知识库检索配置
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 23. Knowledge — RAG 知识库
+# =============================================================================
 knowledge:
   enabled: false
-  # Embedding 模型配置 (用于文本向量化)
-  embedder_provider: "lmstudio"             # Embedding provider 名称
-  embedder_model: "qwen3-embedding-4b"   # 1536 维向量
-  # 文档源 (支持 txt, md, pdf, csv, json, docx)
-  # sources:
+  embedder_provider: "lmstudio"
+  embedder_model: "qwen3-embedding-4b"
+  # sources:                        # 本地文档源 (支持 txt, md, pdf, csv, json, docx)
   #   - "./docs"
   #   - "./README.md"
-  # source_urls: []                         # URL 远程文档
-  vector_store: "inmemory"                  # 向量存储: inmemory
-  max_results: 5                            # 每次查询返回结果数
-  enable_source_sync: false                 # 源文件变更自动重新索引
-  reranker_enabled: false                   # 结果重排序
-  search_tool_name: "knowledge_search"      # Agent 工具名
+  # source_urls: []                 # URL 远程文档
+  vector_store: "inmemory"          # inmemory
+  max_results: 5
+  enable_source_sync: false
+  reranker_enabled: false
+  search_tool_name: "knowledge_search"
 
-# ---------------------------------------------------------------------------
-# Workflow - 多模式 Agent 编排配置
-# 支持模式: single, chain, parallel, cycle, graph,
-#           team_coordinator, team_swarm, claude_code, codex, dify
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 24. Workflow — 多模式 Agent 编排
+# =============================================================================
+# 10 种模式: single | chain | parallel | cycle | graph |
+#            team_coordinator | team_swarm | claude_code | codex | dify
 workflow:
   mode: "single"
   max_iterations: 10
-  # cycle_mode 仅在 mode="cycle" 时生效:
-  #   "default"      - planner → executor 循环
-  #   "code_review"  - 代码生成 → 审查 → 修改循环 (适合自主编码)
-  cycle_mode: "default"
+  cycle_mode: "default"            # default | code_review
   # Graph 高级特性
-  stream_mode: "none"            # none / hub (节点间流式通信)
-  cache_enabled: false           # 节点缓存 (纯函数节点重复计算)
-  engine: "bsp"                  # bsp / dag (执行引擎)
+  stream_mode: "none"              # none | hub
+  cache_enabled: false
+  engine: "bsp"                    # bsp | dag
   sub_agents: []
-  # Team 模式成员 (mode="team_coordinator"/"team_swarm" 时生效):
-  # team_members:
+  # team_members:                  # team_coordinator/team_swarm 模式
   #   - name: "researcher"
   #     instruction: "You are a research specialist..."
   #   - name: "coder"
   #     instruction: "You are a coding specialist..."
   #   - name: "reviewer"
   #     instruction: "You are a quality reviewer..."
-  # Claude Code 模式 (mode="claude_code" 时生效):
-  # claude_code_bin: "claude"
-  # Codex 模式 (mode="codex" 时生效):
-  # codex_bin: "codex"
 
-# ---------------------------------------------------------------------------
-# Dify - Dify AI 平台集成（可视化工作流 + RAG + 多LLM）
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 25. Dify — Dify AI 平台集成
+# =============================================================================
 dify:
   enabled: false
   # base_url: "https://api.dify.ai/v1"
@@ -489,99 +473,97 @@ dify:
   enable_streaming: false
   timeout: "120s"
 
-# ---------------------------------------------------------------------------
-# A2A Server - 本地 A2A 协议服务配置
-# 使用 tRPC-Agent-Go server/a2a，自动处理协议转换和流式支持
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 26. 服务端点 — 协议与端口
+# =============================================================================
+
+# A2A Server — Agent-to-Agent 标准通信 (tRPC-A2A-Go)
 a2a_server:
   enabled: true
   address: ":9090"
   agent_name: "wukong"
   agent_description: "Wukong AI Agent - A2A service endpoint"
 
-# ---------------------------------------------------------------------------
-# AG-UI Server - Web UI SSE 实时对话服务
-# 支持 CopilotKit / TDesign Chat 等 AG-UI 协议客户端
-# ---------------------------------------------------------------------------
+# AG-UI Server — Web UI SSE 实时对话
 agui:
   enabled: true
-  address: ":8080"            # 监听地址
-  path: "/agui"               # SSE 端点路径
+  address: ":8080"
+  path: "/agui"
 
-# ---------------------------------------------------------------------------
-# ACP Server - Agent Client Protocol 服务端点
-# 支持 ACP 兼容的客户端应用原生连接到 Wukong
-# ---------------------------------------------------------------------------
+# ACP Server — Agent Client Protocol
 acp_server:
-  enabled: true                # 启用 ACP Server
-  address: ":9091"             # 监听地址
-  path: "/acp"                 # ACP 端点路径
-  enable_streaming: true       # SSE 流式响应
-  # auth_type: ""              # 认证方式: api_key / jwt / "" (无)
-  # api_key: "${ACP_API_KEY}"  # API Key (auth_type=api_key 时)
+  enabled: true
+  address: ":9091"
+  path: "/acp"
+  enable_streaming: true
+  # auth_type: ""                  # api_key | jwt | ""
+  # api_key: "${ACP_API_KEY}"
 
-# ---------------------------------------------------------------------------
-# ACP MCP Bridge - 将 Wukong 扩展作为 MCP Server 暴露给 ACP 代理
-# ACP 代理提供商通过此端点调用系统扩展工具
-# ---------------------------------------------------------------------------
+# ACP MCP Bridge — 跨协议工具桥接 (JSON-RPC 2.0 over HTTP)
 acp_mcp:
-  enabled: true                # 启用 MCP Bridge (ACP 代理调用扩展所需)
-  address: ":3400"             # MCP Server 监听地址
-  path: "/mcp"                 # MCP 端点路径
+  enabled: true
+  address: ":3400"
+  path: "/mcp"
 
-# ---------------------------------------------------------------------------
-# Eval - 代理评估与回归测试
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 27. Eval — 代理评估与回归测试
+# =============================================================================
 eval:
   enabled: false
-  evalset_path: ".wukong/evals/default.evalset.json"     # 测试用例文件
-  results_path: ".wukong/evals/results.json"              # 结果输出
+  evalset_path: ".wukong/evals/default.evalset.json"
+  results_path: ".wukong/evals/results.json"
   # metrics:
   #   - name: "tool_trajectory_match"
   #     threshold: 0.8
   #   - name: "response_not_empty"
   #     threshold: 1.0
-  #   - name: "response_min_length"
-  #     threshold: 0.5
 
-# ---------------------------------------------------------------------------
-# Extensions - MCP 扩展配置 (内置扩展自动注册，此处仅列出外部扩展)
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 28. Extensions — 外部 MCP 扩展配置
+# =============================================================================
+# 内置扩展自动注册，此处仅配置外部 MCP 扩展
 extensions: []
+  # - name: "external-mcp"
+  #   type: "external"
+  #   transport: "stdio"
+  #   command: "node"
+  #   args: ["server.js"]
+  #   env:
+  #     MY_VAR: "value"
+  #   tool_include: ["tool_*"]
+  #   tool_exclude: ["dangerous_*"]
 
-# ---------------------------------------------------------------------------
-# Telemetry - 遥测/可观测性配置
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 29. Telemetry — OpenTelemetry 分布式追踪
+# =============================================================================
 telemetry:
   enabled: false
-  exporter_type: "console"
+  exporter_type: "console"          # console | grpc | http
   endpoint: "localhost:4317"
   service_name: "wukong"
   service_version: "1.0.0"
   environment: "development"
   sample_rate: 1.0
 
-# ---------------------------------------------------------------------------
-# Observability - 增强可观测性（Langfuse LLM 追踪）
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 30. Observability — Langfuse LLM 追踪
+# =============================================================================
 observability:
   langfuse_enabled: false
-  # langfuse_host: ""              # Langfuse host (不含 http://)
-  # langfuse_public_key: ""         # Langfuse 公钥
-  # langfuse_secret_key: ""         # Langfuse 密钥
+  # langfuse_host: ""
+  # langfuse_public_key: ""
+  # langfuse_secret_key: ""
 
-# ---------------------------------------------------------------------------
-# Artifact - 制品存储配置
-# 支持后端: inmemory (默认), cos (腾讯云COS)
-# ---------------------------------------------------------------------------
+# =============================================================================
+# 31. Artifact — 制品存储
+# =============================================================================
 artifact:
-  backend: "inmemory"                # inmemory 或 cos
+  backend: "inmemory"               # inmemory | cos
   # cos_bucket_url: "https://bucket.cos.region.myqcloud.com"
-  # cos_secret_id: "${COS_SECRETID}"    # 或通过 COS_SECRETID 环境变量
-  # cos_secret_key: "${COS_SECRETKEY}"  # 或通过 COS_SECRETKEY 环境变量
+  # cos_secret_id: "${COS_SECRETID}"
+  # cos_secret_key: "${COS_SECRETKEY}"
 
-# ---------------------------------------------------------------------------
-# Project - 项目追踪
-# 自动记录工作目录与最后会话，支持 quick-recovery
-# ---------------------------------------------------------------------------
-project_dir: "~/.config/wukong/"  # 项目数据存储目录
+# =============================================================================
+# 32. Project — 项目工作目录追踪
+# =============================================================================
+project_dir: "~/.config/wukong/"

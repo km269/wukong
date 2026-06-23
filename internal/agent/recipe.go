@@ -758,8 +758,8 @@ func createRecipeAgent(
 		llmagent.WithDescription(recipe.Description),
 		llmagent.WithInstruction(recipe.Instruction),
 		llmagent.WithGenerationConfig(model.GenerationConfig{
-			MaxTokens:   intPtr(maxTok),
-			Temperature: float64Ptr(temp),
+			MaxTokens:   util.IntPtr(maxTok),
+			Temperature: util.Float64Ptr(temp),
 			Stream:      false,
 		}),
 		llmagent.WithMaxLLMCalls(maxIter),

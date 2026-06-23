@@ -6,10 +6,12 @@ require (
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/chromedp/cdproto v0.0.0-20260321001828-e3e3800016bc
 	github.com/chromedp/chromedp v0.15.1
 	github.com/dop251/goja v0.0.0-20260607120635-348e6bea910d
 	github.com/fsnotify/fsnotify v1.8.0
 	github.com/google/uuid v1.6.0
+	github.com/klauspost/compress v1.18.6
 	github.com/liliang-cn/cortexdb/v2 v2.25.0
 	github.com/redis/go-redis/v9 v9.12.1
 	github.com/spf13/cobra v1.9.1
@@ -19,6 +21,7 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.29.0
 	go.opentelemetry.io/otel/sdk v1.43.0
 	go.opentelemetry.io/otel/trace v1.43.0
+	golang.org/x/net v0.51.0
 	golang.org/x/sys v0.46.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.38.2
@@ -42,7 +45,6 @@ require (
 	github.com/charmbracelet/x/ansi v0.10.1 // indirect
 	github.com/charmbracelet/x/cellbuf v0.0.13-0.20250311204145-2c3ea96c31dd // indirect
 	github.com/charmbracelet/x/term v0.2.1 // indirect
-	github.com/chromedp/cdproto v0.0.0-20260321001828-e3e3800016bc // indirect
 	github.com/chromedp/sysutil v1.1.0 // indirect
 	github.com/clbanning/mxj v1.8.4 // indirect
 	github.com/creack/pty v1.1.24 // indirect
@@ -122,7 +124,6 @@ require (
 	go.uber.org/zap v1.28.0 // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
-	golang.org/x/net v0.51.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/text v0.36.0 // indirect

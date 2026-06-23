@@ -130,6 +130,10 @@ type WukongConfig struct {
 	// Apps configures custom HTML standalone applications.
 	Apps AppsConfig `mapstructure:"apps"`
 
+	// ARD configures Agentic Resource Discovery for finding and
+	// registering AI Agent / MCP Server resources across registries.
+	ARD ARDConfig `mapstructure:"ard"`
+
 	// Summon configures sub-agent delegation and A2A remotes.
 	Summon SummonConfig `mapstructure:"summon"`
 
@@ -760,6 +764,18 @@ type AppsConfig struct {
 	Enabled bool `mapstructure:"enabled"`
 	// AppDir is the storage directory for app HTML files.
 	AppDir string `mapstructure:"app_dir"`
+}
+
+// ARDConfig defines Agentic Resource Discovery settings for finding
+// and registering AI Agent / MCP Server resources across local
+// catalogs and remote registries.
+type ARDConfig struct {
+	// Enabled enables the ARD feature. Default: false.
+	Enabled bool `mapstructure:"enabled"`
+	// RegistryURL is the remote ARD registry URL for federation search.
+	RegistryURL string `mapstructure:"registry_url"`
+	// CatalogPath is the local ARD catalog file path.
+	CatalogPath string `mapstructure:"catalog_path"`
 }
 
 // ============================================================================
@@ -1443,6 +1459,11 @@ func (l *Loader) setDefaults() {
 	// --- Apps defaults ---
 	l.v.SetDefault("apps.enabled", true)
 	l.v.SetDefault("apps.app_dir", ".wukong_apps")
+
+	// --- ARD defaults ---
+	l.v.SetDefault("ard.enabled", false)
+	l.v.SetDefault("ard.registry_url", "")
+	l.v.SetDefault("ard.catalog_path", ".wukong/ard/catalog.json")
 
 	// --- Summon defaults ---
 	l.v.SetDefault("summon.enabled", true)

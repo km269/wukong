@@ -69,8 +69,8 @@ func NewAgentToolSet(
 				"Provide actionable suggestions in a clear, concise format.",
 		),
 		llmagent.WithGenerationConfig(model.GenerationConfig{
-			MaxTokens:   intPtr(2048),
-			Temperature: float64Ptr(0.3),
+			MaxTokens:   util.IntPtr(2048),
+			Temperature: util.Float64Ptr(0.3),
 			Stream:      false,
 		}),
 		llmagent.WithMaxLLMCalls(3),
@@ -88,8 +88,8 @@ func NewAgentToolSet(
 				"Keep the summary focused and concise.",
 		),
 		llmagent.WithGenerationConfig(model.GenerationConfig{
-			MaxTokens:   intPtr(1024),
-			Temperature: float64Ptr(0.3),
+			MaxTokens:   util.IntPtr(1024),
+			Temperature: util.Float64Ptr(0.3),
 			Stream:      false,
 		}),
 		llmagent.WithMaxLLMCalls(2),
@@ -107,8 +107,8 @@ func NewAgentToolSet(
 				"Return only the code with minimal explanation.",
 		),
 		llmagent.WithGenerationConfig(model.GenerationConfig{
-			MaxTokens:   intPtr(4096),
-			Temperature: float64Ptr(0.2),
+			MaxTokens:   util.IntPtr(4096),
+			Temperature: util.Float64Ptr(0.2),
 			Stream:      false,
 		}),
 		llmagent.WithMaxLLMCalls(3),
@@ -160,6 +160,3 @@ func (ts *AgentToolSet) Close() error {
 	ts.closed = true
 	return nil
 }
-
-func intPtr(i int) *int         { return &i }
-func float64Ptr(f float64) *float64 { return &f }

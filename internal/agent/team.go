@@ -207,8 +207,8 @@ func (b *TeamBuilder) createConfigMembers(
 			llmagent.WithGenerationConfig(
 				model.GenerationConfig{
 					Stream:      false,
-					MaxTokens:   intPtr(2048),
-					Temperature: float64Ptr(0.3),
+					MaxTokens:   util.IntPtr(2048),
+					Temperature: util.Float64Ptr(0.3),
 				}),
 			llmagent.WithMaxLLMCalls(5),
 		}
@@ -241,8 +241,8 @@ func (b *TeamBuilder) defaultTeamMembers() []agent.Agent {
 			llmagent.WithGenerationConfig(
 				model.GenerationConfig{
 					Stream:      false,
-					MaxTokens:   intPtr(2048),
-					Temperature: float64Ptr(0.3),
+					MaxTokens:   util.IntPtr(2048),
+					Temperature: util.Float64Ptr(0.3),
 				}),
 			llmagent.WithMaxLLMCalls(5),
 			llmagent.WithTools(b.tools),
@@ -257,8 +257,8 @@ func (b *TeamBuilder) defaultTeamMembers() []agent.Agent {
 			llmagent.WithGenerationConfig(
 				model.GenerationConfig{
 					Stream:      false,
-					MaxTokens:   intPtr(2048),
-					Temperature: float64Ptr(0.2),
+					MaxTokens:   util.IntPtr(2048),
+					Temperature: util.Float64Ptr(0.2),
 				}),
 			llmagent.WithMaxLLMCalls(5),
 			llmagent.WithTools(b.tools),
@@ -273,8 +273,8 @@ func (b *TeamBuilder) defaultTeamMembers() []agent.Agent {
 			llmagent.WithGenerationConfig(
 				model.GenerationConfig{
 					Stream:      false,
-					MaxTokens:   intPtr(2048),
-					Temperature: float64Ptr(0.3),
+					MaxTokens:   util.IntPtr(2048),
+					Temperature: util.Float64Ptr(0.3),
 				}),
 			llmagent.WithMaxLLMCalls(5),
 			llmagent.WithTools(b.tools),

@@ -9,6 +9,7 @@ import (
 
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/provider"
+	"github.com/km269/wukong/internal/util"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/chainagent"
@@ -197,8 +198,8 @@ func (b *WorkflowBuilder) createSubAgentFromConfig(
 		llmagent.WithAddCurrentTime(true),
 		llmagent.WithGenerationConfig(model.GenerationConfig{
 			Stream:      false,
-			MaxTokens:   intPtr(2048),
-			Temperature: float64Ptr(0.3),
+			MaxTokens:   util.IntPtr(2048),
+			Temperature: util.Float64Ptr(0.3),
 		}),
 		llmagent.WithMaxLLMCalls(5),
 	}
@@ -522,8 +523,8 @@ func (b *WorkflowBuilder) createSpecializedAgent(
 		llmagent.WithAddCurrentTime(true),
 		llmagent.WithGenerationConfig(model.GenerationConfig{
 			Stream:      false,
-			MaxTokens:   intPtr(2048),
-			Temperature: float64Ptr(0.3),
+			MaxTokens:   util.IntPtr(2048),
+			Temperature: util.Float64Ptr(0.3),
 		}),
 		llmagent.WithMaxLLMCalls(5),
 	}
@@ -589,8 +590,7 @@ func containsKeyword(s, keyword string) bool {
 	return false
 }
 
-func intPtr(i int) *int       { return &i }
-func float64Ptr(f float64) *float64 { return &f }
+
 
 // buildTeamAgent creates a Team-based agent (coordinator, swarm, or
 // Claude Code mode). Uses the TeamBuilder for construction.

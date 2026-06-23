@@ -9,6 +9,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 
@@ -16,6 +17,8 @@ import (
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/graph"
+	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/runner"
 )
 
 // HITLConfig configures human-in-the-loop interrupt settings for
@@ -108,41 +111,68 @@ func InterruptNode() {
 // ResumeConfig holds the parameters for resuming an interrupted
 // graph execution.
 type ResumeConfig struct {
-	// Agent is the graph agent to resume.
-	Agent agent.Agent
+	// Runner is the tRPC Runner used to resume graph execution
+	// from the last checkpoint. Required.
+	Runner runner.Runner
 	// RunOptions are additional options for the resume run.
 	RunOptions []agent.RunOption
-	// ResumeValue is the external input to pass to the interrupted node.
-	ResumeValue any
+	// ResumeValue is the external input to pass to the interrupted
+	// node as graph state on re-entry.
+	ResumeValue map[string]any
 }
 
-// ResumeInterrupted attempts to resume an interrupted graph agent
-// with the given input value.
+// ResumeInterrupted resumes an interrupted graph agent from its
+// last checkpoint with the given input value.
 //
-// The resume uses the same Runner.Run() flow but with
-// agent.WithResume(true) to indicate continuation from a checkpoint.
+// The function calls runner.Run() with agent.WithResume(true) to
+// trigger checkpoint-based continuation. The resume value is
+// serialized to JSON and passed as a user message that the graph
+// runtime interprets as external input for the interrupted node.
+//
+// Events are drained to allow the resume run to complete. Callers
+// that need to observe events should use ResumeConfig directly
+// and call runner.Run() themselves.
 func ResumeInterrupted(
 	ctx context.Context,
+	r runner.Runner,
 	userID, sessionID string,
-	ag agent.Agent,
 	resumeValue map[string]any,
 ) error {
-	if ag == nil {
-		return fmt.Errorf("agent is required for resume")
+	if r == nil {
+		return fmt.Errorf("runner is required for resume")
+	}
+
+	// Serialize the resume value as JSON for the graph runtime.
+	resumeJSON, err := json.Marshal(resumeValue)
+	if err != nil {
+		return fmt.Errorf("marshal resume value: %w", err)
+	}
+
+	message := model.Message{
+		Role:    model.RoleUser,
+		Content: string(resumeJSON),
 	}
 
 	runOpts := []agent.RunOption{
 		agent.WithResume(true),
 	}
 
-	// The resume value is injected as graph state on re-entry.
-	// In a full implementation, the graph's checkpoint system
-	// handles state persistence and restoration.
-	_ = resumeValue
-	_ = runOpts
+	events, err := r.Run(
+		ctx, userID, sessionID, message, runOpts...)
+	if err != nil {
+		return fmt.Errorf("resume interrupted graph: %w", err)
+	}
 
-	util.Logger.Info("HITL: resume not yet wired to runner — " +
-		"checkpoint-based resume requires Runner integration")
+	// Drain all events to allow the resume execution to complete.
+	// The graph runtime processes the events internally, including
+	// re-entering from the checkpoint with the provided input.
+	for evt := range events {
+		if evt.Error != nil {
+			util.Logger.Warn("HITL: resume event error",
+				slog.String("error", evt.Error.Message))
+		}
+	}
 
+	util.Logger.Info("HITL: interrupted graph resumed successfully")
 	return nil
 }

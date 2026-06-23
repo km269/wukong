@@ -6,7 +6,6 @@ package builtin
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/km269/wukong/internal/config"
 
@@ -108,12 +107,9 @@ func kgQueryStub(
 	ctx context.Context, req kgQueryReq,
 ) (kgQueryRsp, error) {
 	return kgQueryRsp{
-		Success: true,
-		Result: fmt.Sprintf(
-			"CortexDB knowledge graph is active. "+
-				"Use knowledge_graph_query tool to "+
-				"execute SPARQL: %s", req.Query,
-		),
+		Success: false,
+		Error: "Knowledge graph service not initialized. " +
+			"Ensure CortexDB and GraphFlow are enabled in configuration.",
 	}, nil
 }
 
@@ -131,8 +127,9 @@ func kgAnalyzeStub(
 	ctx context.Context, req kgAnalyzeReq,
 ) (kgAnalyzeRsp, error) {
 	return kgAnalyzeRsp{
-		Success: true,
-		Summary: "CortexDB knowledge graph is active.",
+		Success: false,
+		Error: "Knowledge graph service not initialized. " +
+			"Ensure CortexDB and GraphFlow are enabled in configuration.",
 	}, nil
 }
 
@@ -150,8 +147,9 @@ func ddlParseStub(
 	ctx context.Context, req ddlParseReq,
 ) (ddlParseRsp, error) {
 	return ddlParseRsp{
-		Success: true,
-		Count:   0,
+		Success: false,
+		Error: "ImportFlow service not initialized. " +
+			"Ensure ImportFlow is enabled in configuration.",
 	}, nil
 }
 
@@ -169,7 +167,8 @@ func ddlPlanStub(
 	ctx context.Context, req ddlPlanReq,
 ) (ddlPlanRsp, error) {
 	return ddlPlanRsp{
-		Success:    true,
-		TableCount: 0,
+		Success:    false,
+		Error: "ImportFlow service not initialized. " +
+			"Ensure ImportFlow is enabled in configuration.",
 	}, nil
 }

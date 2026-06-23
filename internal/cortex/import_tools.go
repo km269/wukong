@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/liliang-cn/cortexdb/v2/pkg/graphflow"
 	"github.com/liliang-cn/cortexdb/v2/pkg/importflow"
 
 	"trpc.group/trpc-go/trpc-agent-go/tool"
@@ -20,13 +21,20 @@ import (
 // tools for the agent.
 type ImportToolManager struct {
 	importFlow *ImportFlowService
+	jsonGen   graphflow.JSONGenerator
 }
 
 // NewImportToolManager creates an import tool manager.
+// The jsonGen parameter enables LLM-driven DDL-to-entity mapping.
+// Pass nil to use deterministic mapping only.
 func NewImportToolManager(
 	importFlow *ImportFlowService,
+	jsonGen graphflow.JSONGenerator,
 ) *ImportToolManager {
-	return &ImportToolManager{importFlow: importFlow}
+	return &ImportToolManager{
+		importFlow: importFlow,
+		jsonGen:   jsonGen,
+	}
 }
 
 // Tools returns data import function tools.
@@ -162,14 +170,11 @@ func (m *ImportToolManager) planFromDDLAI(
 	opts := importflow.DDLMappingOptions{
 		RelationStyle: req.RelationStyle,
 	}
-	// TODO: Pass jsonGen (graphflow.JSONGenerator) here to enable
-	// LLM-driven DDL-to-entity mapping. Currently nil means the
-	// AI-enhanced path always falls back to deterministic mapping.
-	// Wire in the LLM generator from the global lightweight_model
-	// configuration when GraphFlow is enabled.
+	// Use LLM-driven DDL-to-entity mapping when jsonGen is available.
+	// Falls back to deterministic mapping when jsonGen is nil.
 	plan, tables, llmUsed, err :=
 		m.importFlow.MappingFromDDLWithLLM(
-			ctx, req.DDL, nil, opts)
+			ctx, req.DDL, m.jsonGen, opts)
 	if err != nil {
 		return DDLPlanAIRsp{
 			Success: false,

@@ -58,6 +58,16 @@ func RegisterBuiltins(cfg *config.WukongConfig) {
 			Type:    "builtin",
 			Enabled: true,
 		},
+		{
+			Name:    "ard",
+			Type:    "builtin",
+			Enabled: cfg.ARD.Enabled,
+		},
+		{
+			Name:    "cortex",
+			Type:    "builtin",
+			Enabled: cfg.Cortex.Enabled,
+		},
 	}
 
 	existing := make(map[string]bool)

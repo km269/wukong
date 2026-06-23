@@ -1512,8 +1512,8 @@ func createGuardrailRunner(
 	reviewAgent := llmagent.New("guardrail-reviewer",
 		llmagent.WithModel(mdl),
 		llmagent.WithGenerationConfig(model.GenerationConfig{
-			MaxTokens:   intPtr(256),
-			Temperature: float64Ptr(0.0),
+			MaxTokens:   util.IntPtr(256),
+			Temperature: util.Float64Ptr(0.0),
 			Stream:      false,
 		}),
 		llmagent.WithMaxLLMCalls(1),
