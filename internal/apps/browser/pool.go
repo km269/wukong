@@ -300,6 +300,12 @@ func (p *Pool) Render(ctx context.Context, rawURL string) (*RenderResult, error)
 	}, nil
 }
 
+// SetSettle temporarily changes the settle duration for subsequent renders.
+// Used by SPA salvage to extend wait time when a page has async-loaded content.
+func (p *Pool) SetSettle(d time.Duration) {
+	p.opts.Settle = d
+}
+
 // StealthEnabled reports whether anti-detection scripts are currently active.
 func (p *Pool) StealthEnabled() bool {
 	return p.stealthEnabled

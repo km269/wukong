@@ -1,24 +1,41 @@
 # Wukong 配置参考
 
-> **配置文件**: `config.yaml` | **加载器**: Viper + Cobra | **结构体**: 43 · ~310 字段
+> **配置文件**: `config.yaml` | **加载器**: Viper + Cobra
+> **结构体**: 45 · ~350 字段 | **配置代码**: 4 文件 (config.go + types.go + defaults.go + validate.go)
 >
-> Go: 1.26 | 文件: 221 `.go` (51 `_test.go`) | CLI: 28 顶层 + 55+ 子命令 | 定义: `internal/config/config.go`
+> Go: 1.26 | 文件: 233 `.go` (52 `_test.go`) | CLI: 28 顶层 + 55+ 子命令
 
 ---
 
-## 加载优先级 (7 级)
+## 加载优先级 (4 级)
 
 ```
 1. CLI 参数 (--provider, --model, --temperature, --max-tokens, --config)
-2. 环境变量 (WUKONG_ 前缀)
-3. --config CLI 指定文件
-4. ./config.yaml (当前目录)
-5. ~/.config/wukong/config.yaml
-6. /etc/wukong/config.yaml (非 Windows)
-7. 内置默认值
+2. 环境变量 (WUKONG_ 前缀，如 WUKONG_DEFAULT_PROVIDER)
+3. YAML 配置文件 (--config 指定或默认搜索路径)
+4. 内置默认值 (internal/config/defaults.go)
 ```
 
-环境变量: `${ENV_VAR}` 运行时自动展开。
+**配置文件搜索路径**: `./config.yaml` → `~/.config/wukong/config.yaml` → `/etc/wukong/config.yaml`(非Windows)
+
+**环境变量展开**: `${ENV_VAR}` 语法，运行时自动展开。
+
+---
+
+## 配置验证
+
+加载后可通过 `Validate()` 方法检查致命错误：
+
+| 检查项 | 类型 |
+|--------|------|
+| `default_provider` 在 providers 列表中存在 | 致命 |
+| `agent.temperature` 在 [0.0, 2.0] 范围内 | 致命 |
+| `security.permission_mode` 为有效值 | 致命 |
+| `memory.cleanup_target_threshold` < `cleanup_trigger_threshold` | 致命 |
+| `okf.injector_enabled` 但 `memoryflow.enabled` 为 false | 警告 |
+| `okf.enrichment_enabled` 但无 `default_provider` | 警告 |
+
+**CLI**: `wukong config validate`
 
 ---
 
@@ -29,6 +46,7 @@ log_level: "info"
 default_provider: "lmstudio"
 lightweight_provider: "lmstudio"
 lightweight_model: "gemma-4-e4b-it"
+project_dir: "~/.config/wukong/"
 ```
 
 ---
@@ -37,21 +55,13 @@ lightweight_model: "gemma-4-e4b-it"
 
 ```yaml
 providers:
-  - name: "openai"; type: "openai"; api_key: "${OPENAI_API_KEY}"
-    base_url: "https://api.openai.com/v1"; model: "gpt-4o"
-  - name: "deepseek"; type: "deepseek"; api_key: "${DEEPSEEK_API_KEY}"
-    base_url: "https://api.deepseek.com"; model: "deepseek-chat"
-  - name: "anthropic"; type: "anthropic"; api_key: "${ANTHROPIC_API_KEY}"
-    base_url: "https://api.anthropic.com"; model: "claude-sonnet-4-20250514"
-  - name: "ollama"; type: "ollama"; api_key: "ollama"
-    base_url: "http://localhost:11434/v1"; model: "llama3"
-  - name: "lmstudio"; type: "lmstudio"; api_key: "lmstudio"
-    base_url: "http://localhost:1234/v1"; model: "google/gemma-4-26b-a4b"
-  - name: "acp-coder"; type: "acp"
-    agent_url: "http://localhost:4000"; model: "acp-default"
+  - name: "openai"
+    type: "openai"
+    api_key: "${OPENAI_API_KEY}"
+    base_url: "https://api.openai.com/v1"
+    model: "gpt-4o"
+  # ... deepseek, anthropic, ollama, lmstudio, acp
 ```
-
-**CLI**: `wukong provider list | test`
 
 ---
 
@@ -59,12 +69,16 @@ providers:
 
 ```yaml
 agent:
-  max_llm_calls: 50; max_tool_iterations: 30; max_run_duration: "300s"
-  parallel_tools: true; streaming: true
-  temperature: 0.7; max_tokens: 4096
-  tool_retry_enabled: true; tool_retry_max_attempts: 3
-  planner: ""; tool_search_enabled: true; context_compaction: true
-  todo_tool_enabled: true; todo_enforcer_enabled: true
+  max_llm_calls: 50
+  max_tool_iterations: 30
+  temperature: 0.7
+  max_tokens: 4096
+  parallel_tools: true
+  streaming: true
+  tool_search_enabled: true
+  context_compaction: true
+  todo_tool_enabled: true
+  todo_enforcer_enabled: true
 ```
 
 ---
@@ -74,269 +88,340 @@ agent:
 ```yaml
 security:
   permission_mode: "smart"
-  blocked_commands: ["rm -rf /", "dd", "mkfs.", "> /dev/sda"]
-  guardrail_enabled: false
+  block_dangerous_commands: true
+  blocked_commands: ["rm -rf /", "dd if=/dev/zero", "mkfs."]
   ignore_file_enabled: true
-  default_timeout: "30s"; max_timeout: "300s"
+  ignore_file: ".wukongignore"
 ```
 
 ---
 
-## 5. Apps — HTML 应用 + 网站克隆 + ZIM 打包
+## 5. Session
+
+```yaml
+session:
+  backend: "sqlite"
+  db_path: "wukong.db"
+  event_limit: 500
+  enable_summary: true
+```
+
+---
+
+## 6. Memory
+
+```yaml
+memory:
+  backend: "sqlite"
+  db_path: "wukong.db"
+  max_memories: 100
+  auto_extract: true
+  enable_smart_cleanup: true
+  cleanup_trigger_threshold: 0.8
+  cleanup_target_threshold: 0.6
+  memory_ttl: "720h"
+```
+
+---
+
+## 7. Todo
+
+```yaml
+todo:
+  backend: "sqlite"
+  enable_native_todo: true
+  enable_enforcer: true
+```
+
+---
+
+## 8. Recall
+
+```yaml
+recall:
+  enabled: true
+  search_mode: "fts5"
+  max_results: 10
+```
+
+---
+
+## 9. CortexDB 记忆栈
+
+```yaml
+cortex:
+  enabled: true
+  embedding_model: "qwen3-embedding-0.6b"
+
+memoryflow:
+  enabled: true
+  namespace: "assistant"
+
+graphflow:
+  enabled: true
+  auto_extract: true
+
+importflow:
+  enabled: true
+```
+
+---
+
+## 10. Revision
+
+```yaml
+revision:
+  enabled: true
+  enable_llm_summarize: true
+  max_context_tokens: 64000
+```
+
+---
+
+## 11. Browser
+
+```yaml
+browser:
+  enabled: true
+  stealth: true
+  cache_dir: ".wukong/cache"
+```
+
+---
+
+## 12. 功能工具
+
+```yaml
+visualiser: { enabled: true, output_dir: ".wukong/visuals" }
+tutorial: { enabled: true, language: "zh" }
+top_of_mind: { enabled: true, instruction_file: ".wukong/instructions.md" }
+code_mode: { enabled: true, timeout: "10s", max_memory_mb: 128 }
+```
+
+---
+
+## 13. Apps — 网站克隆 + ZIM 打包
 
 ```yaml
 apps:
   enabled: true
   app_dir: ".wukong/apps"
-
-  # 网站克隆 — 增强引擎 (EnhancedCloner)
   clone:
-    max_pages: 0                    # 最大页面数 (0=无限制)
-    max_depth: 0                    # 最大链接深度 (0=无限制)
-    traversal: "bfs"               # bfs | dfs
     workers: 4
-    asset_workers: 4
-    timeout: 60                    # 秒
-    settle: 1500                   # 网络空闲等待 (毫秒)
-    respect_robots: true
-    crawl_delay: 0                 # 毫秒 (0=使用robots.txt)
-    no_sitemap: false
+    asset_workers: 8
+    stealth: true
+    antibot_enabled: true
     dedup_content: true
-    mobile_readable: true
     enable_resume: true
-    incremental: false
-    cache_max_age: 86400           # 秒
-    asset_same_domain: true        # 仅下载同注册域资产
-    max_asset_bytes: 52428800     # 50MB 上限
-    stealth: false                 # 反反爬模式
-    chrome_path: ""
-
-  # ZIM 打包
   pack:
     compress: true
-    incremental: false
-    language: "eng"
-    creator: "Wukong"
     format: "html"
 ```
 
-### apps clone CLI
-
-```bash
-wukong apps clone <url> [flags]
-  -p, --max-pages     int    最大页面数 (0=无限制)
-  -d, --max-depth     int    最大链接深度 (0=无限制)
-      --traversal      string 遍历策略: bfs (默认) | dfs
-  -w, --workers       int    并发数 (默认4)
-      --asset-workers  int    资产并发数
-      --timeout        int    渲染超时 (秒, 默认60)
-      --settle         int    网络空闲等待 (毫秒, 默认1500)
-      --subdomains           包含子域名
-      --scroll               自动滚动懒加载
-      --stealth              反反爬模式
-      --asset-same-domain    仅下载同域资产
-      --no-sitemap           禁用 Sitemap 发现
-      --force                强制删除已有克隆
-      --refresh              刷新所有页面
-      --incremental          ETag/Last-Modified 增量更新
-      --chrome-path   string Chrome 可执行文件路径
-```
-
-### apps pack CLI
-
-```bash
-wukong apps pack <app-name> [flags]
-  -f, --format       string  输出格式: html|zim|binary|app (默认zim)
-  -o, --output       string  输出路径
-       --compress            启用 zstd 压缩
-       --incremental         增量构建(复用集群)
-       --language     string  ZIM 语言代码 (默认eng)
-       --title        string  ZIM 标题
-       --description  string  ZIM 描述
-       --date         string  日期 YYYY-MM-DD
-       --creator      string  创建者 (默认Wukong)
-       --base-binary  string  基础可执行文件(binary/app格式)
-       --icon         string  图标路径(app格式)
-```
-
-### chrome-path 说明
-
-如果 Chrome 不在系统 PATH 中，使用此参数:
-
-```bash
-wukong apps clone example.com --chrome-path "C:\Program Files\Google\Chrome\Application\chrome.exe"
-```
-
-启动时日志会显示检测到的 Chrome 路径。
-
 ---
 
-## 6. 记忆栈 (Session / Memory / Todo / Recall / Cortex)
-
-| 段 | 关键字段 | CLI |
-|----|----------|-----|
-| session | backend, db_path, event_limit:500 | session list/delete/info |
-| memory | auto_extract:true, max_memories:100 | memory list/search/delete/clear |
-| todo | enable_native_todo:true | todo status |
-| recall | search_mode:"fts5" | cortex status |
-| cortex | HNSW+FTS5; embedding_model | cortex status |
-| memoryflow | 转录+唤醒; namespace | cortex status |
-| graphflow | RDF; auto_extract:true | cortex status |
-| importflow | DDL→KG | cortex status |
-
----
-
-## 7. 功能工具
-
-| 段 | 配置 | CLI |
-|----|------|-----|
-| browser | Chromedp; search_backend | — |
-| visualiser | output_dir | — |
-| tutorial | language | — |
-| top_of_mind | instruction_file | init |
-| code_mode | goja; timeout:"10s" | — |
-| revision | 3层压缩; max_context_tokens | — |
-| knowledge | RAG; embedder_model | knowledge status |
-
----
-
-## 8. 编排与委派
-
-| 段 | 配置 | CLI |
-|----|------|-----|
-| workflow | 10种模式; mode:"single" | — |
-| summon | A2A委派; max_concurrent:5 | — |
-| skill | skills_dir; max_skills:20 | skill list/show |
-| evolution | 实验性; cooldown:"30m" | evolution status |
-| dify | enabled:false | — |
-| recipe | recipe_dir | recipe list/show/validate |
-
----
-
-## 9. 服务端点
+## 14. ARD
 
 ```yaml
-a2a_server: { enabled:true, address:":9090" }
-agui:       { enabled:true, address:":8080", path:"/agui" }
-acp_server: { enabled:true, address:":9091", path:"/acp" }
-acp_mcp:    { enabled:true, address:":3400", path:"/mcp" }
+ard:
+  enabled: false
+  catalog_path: ".wukong/ard/catalog.json"
 ```
 
 ---
 
-## 10. 观测与扩展
+## 15. Summon
 
 ```yaml
-ard: { enabled:false, publish_enabled:false }
-eval: { enabled:false }
+summon:
+  enabled: true
+  skills_dir: ".wukong/skills"
+  max_concurrent: 5
+```
+
+---
+
+## 16. Skill
+
+```yaml
+skill:
+  enabled: true
+  skills_dir: ".wukong/skills"
+  auto_load: true
+```
+
+---
+
+## 17. Evolution
+
+```yaml
+evolution:
+  enabled: false
+  min_confidence: 0.7
+  cooldown_period: "30m"
+```
+
+---
+
+## 18. Knowledge (RAG)
+
+```yaml
+knowledge:
+  enabled: false
+  embedder_model: "text-embedding-3-small"
+  vector_store: "inmemory"
+  max_results: 5
+```
+
+---
+
+## 19. OKF — Open Knowledge Format
+
+```yaml
+okf:
+  enabled: false
+  bundle_dir: ".wukong/okf"
+  injector_enabled: false
+  enrichment_enabled: false
+  # enrichment_output_dir: ""     # empty = use bundle_dir
+  auto_export: false
+  register_in_ard: false
+```
+
+| 字段 | 说明 |
+|------|------|
+| `enabled` | 全局开关 OKF 子系统 |
+| `bundle_dir` | OKF Bundle 默认存储/读取路径 |
+| `injector_enabled` | 将 OKF index.md 注入 MemoryFlow 唤醒上下文 |
+| `enrichment_enabled` | 启用 EnrichmentAgent 自动生成概念 |
+| `auto_export` | 会话结束时自动导出知识包 |
+| `register_in_ard` | 将 OKF Bundle 注册到 ARD 目录供联邦发现 |
+
+---
+
+## 20. Workflow
+
+```yaml
+workflow:
+  mode: "single"
+  max_iterations: 10
+```
+
+---
+
+## 21. Dify
+
+```yaml
+dify:
+  enabled: false
+  timeout: "120s"
+```
+
+---
+
+## 22. 服务端点
+
+```yaml
+a2a_server: { enabled: true, address: ":9090" }
+agui: { enabled: true, address: ":8080", path: "/agui" }
+acp_server: { enabled: true, address: ":9091", path: "/acp" }
+acp_mcp: { enabled: true, address: ":3400", path: "/mcp" }
+```
+
+---
+
+## 23. 观测与扩展
+
+```yaml
+eval: { enabled: false }
 extensions: []
-telemetry: { enabled:false, exporter_type:"console" }
-observability: { langfuse_enabled:false }
-artifact: { backend:"inmemory" }
-project_dir: "~/.config/wukong/"
+telemetry: { enabled: false, exporter_type: "console" }
+observability: { langfuse_enabled: false }
+artifact: { backend: "inmemory" }
 ```
 
 ---
 
-## 11. 推荐配置
+## 24. 推荐配置
 
 ### 最小配置
 
 ```yaml
 default_provider: "lmstudio"
 providers:
-  - name: "lmstudio"; type: "lmstudio"; api_key: "lmstudio"
-    base_url: "http://localhost:1234/v1"; model: "google/gemma-4-26b-a4b"
+  - name: "lmstudio"
+    type: "lmstudio"
+    api_key: "lmstudio"
+    base_url: "http://localhost:1234/v1"
+    model: "google/gemma-4-26b-a4b"
 ```
 
-### 云端模型
+### OKF 知识管理
 
 ```yaml
-default_provider: "deepseek"
-providers:
-  - name: "deepseek"; type: "deepseek"; api_key: "${DEEPSEEK_API_KEY}"
-    base_url: "https://api.deepseek.com"; model: "deepseek-chat"
-memory: { auto_extract: true }
-agent: { todo_enforcer_enabled: true, context_compaction: true }
-```
-
-### 网站克隆
-
-在以上基础上:
-
-```yaml
-apps:
+okf:
   enabled: true
-  clone:
-    workers: 4
-    respect_robots: true
-    dedup_content: true
-    mobile_readable: true
-    enable_resume: true
+  bundle_dir: ".wukong/okf"
+  injector_enabled: true
+  enrichment_enabled: true
+  auto_export: true
+  register_in_ard: true
 ```
 
-### 完整记忆
+### 完整记忆 + OKF
 
 ```yaml
-cortex: { enabled: true, embedding_model: "qwen3-embedding-0.6b" }
+cortex: { enabled: true }
 memoryflow: { enabled: true }
 graphflow: { enabled: true, auto_extract: true }
 importflow: { enabled: true }
 recall: { enabled: true }
-revision: { enabled: true, enable_llm_summarize: true }
-```
-
-### 快速诊断
-
-```bash
-wukong config validate    # 配置校验
-wukong system-check       # 系统就绪诊断
-wukong health             # 运行健康检查
-wukong stats              # 统计面板
-wukong bench              # 模型性能基准
+revision: { enabled: true }
+okf: { enabled: true, injector_enabled: true }
 ```
 
 ---
 
 ## 配置项完整索引
 
-| 配置段 | 结构体 | 字段数 | CLI 入口 |
-|--------|--------|--------|----------|
-| `log_level` | — | 1 | — |
-| `default_provider` | — | 1 | provider list |
-| `lightweight_*` | — | 2 | config show |
-| `providers` | `ProviderConfig[]` | 多 | provider list/test |
-| `agent` | `AgentConfig` | 35+ | config show |
-| `security` | `SecurityConfig` | 12 | system-check |
-| `session` | `SessionConfig` | 6 | session list/delete/info |
-| `memory` | `MemoryConfig` | 10 | memory list/search/delete/clear |
-| `todo` | `TodoConfig` | 4 | todo status |
-| `recall` | `RecallConfig` | 5 | cortex status |
-| `cortex` | `CortexConfig` | 6 | cortex status |
-| `memoryflow` | `MemoryFlowConfig` | 4 | cortex status |
-| `graphflow` | `GraphFlowConfig` | 3 | cortex status |
-| `importflow` | `ImportFlowConfig` | 2 | cortex status |
-| `revision` | `RevisionConfig` | 11 | config show |
-| `browser` | `BrowserConfig` (含 Stealth) | 15 | — |
-| `visualiser` | `VisualiserConfig` | 4 | — |
-| `tutorial` | `TutorialConfig` | 2 | — |
-| `top_of_mind` | `TopOfMindConfig` | 3 | init |
-| `code_mode` | `CodeModeConfig` | 3 | — |
-| `apps` | `AppsConfig` + `CloneDefaults` | 17 | apps clone/pack/list/view |
-| `ard` | `ARDConfig` | 5 | ard status/catalog |
-| `summon` | `SummonConfig` | 4 | — |
-| `skill` | `SkillConfig` | 4 | skill list/show |
-| `evolution` | `EvolutionConfig` | 9 | evolution status |
-| `knowledge` | `KnowledgeConfig` | 8 | knowledge status |
-| `workflow` | `WorkflowConfig` | 7 | — |
-| `dify` | `DifyConfig` | 4 | — |
-| `a2a_server` | `A2AServerConfig` | 4 | server |
-| `agui` | `AGUIConfig` | 3 | server |
-| `acp_server` | `ACPServerConfig` | 4 | server |
-| `acp_mcp` | `ACPMCPConfig` | 3 | server |
-| `eval` | `EvalConfig` | 3 | eval |
-| `extensions` | `ExtensionConfig[]` | 多 | extension list/install |
-| `telemetry` | `TelemetryConfig` | 多 | health |
-| `observability` | `ObservabilityConfig` | 多 | health |
-| `artifact` | `ArtifactConfig` | 多 | config show |
-| `project_dir` | — | 1 | project list |
+| 配置段 | 结构体 | CLI 入口 |
+|--------|--------|----------|
+| `log_level` | — | — |
+| `default_provider` | — | provider list |
+| `lightweight_*` | — | config show |
+| `project_dir` | — | project list |
+| `providers` | `ProviderConfig` | provider list/test |
+| `extensions` | `ExtensionConfig` | extension list/install |
+| `agent` | `AgentConfig` | config show |
+| `security` | `SecurityConfig` | system-check |
+| `session` | `SessionConfig` | session list |
+| `memory` | `MemoryConfig` | memory list |
+| `todo` | `TodoConfig` | todo status |
+| `recall` | `RecallConfig` | cortex status |
+| `cortex` | `CortexConfig` | cortex status |
+| `memoryflow` | `MemoryFlowConfig` | cortex status |
+| `graphflow` | `GraphFlowConfig` | cortex status |
+| `importflow` | `ImportFlowConfig` | cortex status |
+| `revision` | `RevisionConfig` | config show |
+| `browser` | `BrowserConfig` | — |
+| `visualiser` | `VisualiserConfig` | — |
+| `tutorial` | `TutorialConfig` | — |
+| `top_of_mind` | `TopOfMindConfig` | init |
+| `code_mode` | `CodeModeConfig` | — |
+| `apps` | `AppsConfig` + `CloneDefaults` + `PackDefaults` | apps clone/pack |
+| `ard` | `ARDConfig` | ard status |
+| `summon` | `SummonConfig` | — |
+| `skill` | `SkillConfig` | skill list |
+| `evolution` | `EvolutionConfig` | evolution status |
+| `knowledge` | `KnowledgeConfig` | knowledge status |
+| `okf` | `OKFConfig` | config show |
+| `workflow` | `WorkflowConfig` | — |
+| `dify` | `DifyConfig` | — |
+| `a2a_server` | `A2AServerConfig` | server |
+| `agui` | `AGUIConfig` | server |
+| `acp_server` | `ACPServerConfig` | server |
+| `acp_mcp` | `ACPMCPConfig` | server |
+| `eval` | `EvalConfig` | eval |
+| `artifact` | `ArtifactConfig` | config show |
+| `observability` | `ObservabilityConfig` | health |
+| `telemetry` | `TelemetryConfig` | health |

@@ -41,14 +41,108 @@ func RewriteHTML(root *html.Node, base *url.URL, sink RewriteSink) {
 }
 
 // walkAndRewrite recursively traverses the DOM and rewrites each element.
+// Honeypot elements (hidden links/forms designed to trap crawlers) are
+// skipped — their URLs are left as-is to avoid triggering anti-bot systems.
 func walkAndRewrite(n *html.Node, base *url.URL, sink RewriteSink) {
 	if n.Type == html.ElementNode {
-		rewriteElement(n, base, sink)
+		if !isHoneypotNode(n) {
+			rewriteElement(n, base, sink)
+		}
+		// Note: children of honeypot elements are still traversed —
+		// only the honeypot element itself (and its links) are skipped.
 	}
 
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		walkAndRewrite(c, base, sink)
 	}
+}
+
+// isHoneypotNode detects invisible elements that are likely anti-bot traps.
+// Checks the element itself AND its ancestor chain against known honeypot
+// patterns: display:none, visibility:hidden, opacity:0, HTML5 hidden attr,
+// aria-hidden="true", and common hidden class names.
+func isHoneypotNode(n *html.Node) bool {
+	// Walk up the ancestor chain — any hidden ancestor taints the child.
+	for cur := n; cur != nil; cur = cur.Parent {
+		if isHoneypotElement(cur) {
+			return true
+		}
+	}
+	return false
+}
+
+// isHoneypotElement checks a single element for honeypot indicators.
+func isHoneypotElement(n *html.Node) bool {
+	if n.Type != html.ElementNode {
+		return false
+	}
+
+	// HTML5 hidden attribute.
+	if hasAttr(n, "hidden") {
+		return true
+	}
+
+	// aria-hidden="true"
+	if getAttrLower(n, "aria-hidden") == "true" {
+		return true
+	}
+
+	// Check inline style for display:none/visibility:hidden/opacity:0.
+	styleVal := getAttrLower(n, "style")
+	if styleVal != "" {
+		if strings.Contains(styleVal, "display:none") ||
+			strings.Contains(styleVal, "display: none") ||
+			strings.Contains(styleVal, "visibility:hidden") ||
+			strings.Contains(styleVal, "visibility: hidden") ||
+			strings.Contains(styleVal, "opacity:0") ||
+			strings.Contains(styleVal, "opacity: 0") {
+			return true
+		}
+	}
+
+	// Check class attribute for common hidden class names.
+	classVal := getAttrLower(n, "class")
+	if classVal != "" {
+		for _, c := range honeypotClasses {
+			if strings.Contains(classVal, c) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// honeypotClasses lists CSS class names commonly used to hide elements.
+var honeypotClasses = []string{
+	"hidden", "hide", "invisible",
+	"d-none", "d_none",
+	"visually-hidden", "visuallyhidden",
+	"sr-only", "sr_only",
+	"screen-reader-only",
+	"display-none",
+	"opacity-0",
+	"zero-height",
+}
+
+// getAttrLower returns the lowercased value of a named attribute, or "".
+func getAttrLower(n *html.Node, key string) string {
+	for _, a := range n.Attr {
+		if strings.EqualFold(a.Key, key) {
+			return strings.ToLower(a.Val)
+		}
+	}
+	return ""
+}
+
+// hasAttr returns true if the element has the named attribute (any value).
+func hasAttr(n *html.Node, key string) bool {
+	for _, a := range n.Attr {
+		if strings.EqualFold(a.Key, key) {
+			return true
+		}
+	}
+	return false
 }
 
 // rewriteElement dispatches to the appropriate rewriter based on element tag.

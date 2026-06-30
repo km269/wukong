@@ -1,14 +1,14 @@
 # Wukong — 架构哲学与核心特性
 
-> **Go**: 1.26 | **文件**: 233 `.go` (52 `_test.go`) | **包**: 29 内部 + 2 公共 | **许可证**: GNU AGPL-3.0
+> **Go**: 1.26 | **文件**: 224 `.go` (51 `_test.go`) | **包**: 28 内部 + 2 公共 | **许可证**: GNU AGPL-3.0
 >
-> 基于 [tRPC-Agent-Go v1.10.0](https://github.com/trpc-group/trpc-agent-go) · [tRPC-MCP-Go v0.0.16](https://github.com/trpc-group/trpc-mcp-go) · [tRPC-A2A-Go v0.2.5](https://github.com/trpc-group/trpc-a2a-go) · [CortexDB v2.25.0](https://github.com/liliang-cn/cortexdb) · [OKF v0.1](https://github.com/GoogleCloudPlatform/okf)
+> 基于 [tRPC-Agent-Go v1.10.0](https://github.com/trpc-group/trpc-agent-go) · [tRPC-MCP-Go v0.0.16](https://github.com/trpc-group/trpc-mcp-go) · [tRPC-A2A-Go v0.2.5](https://github.com/trpc-group/trpc-a2a-go) · [CortexDB v2.25.0](https://github.com/liliang-cn/cortexdb)
 
 ---
 
-## 1. 六大架构哲学
+## 1. 五大架构哲学
 
-Wukong 遵循六大核心哲学，决定所有工程决策：
+Wukong 遵循五大核心哲学，决定所有工程决策：
 
 ### 1.1 记忆优先（Memory-First）
 
@@ -55,19 +55,9 @@ Wukong 遵循六大核心哲学，决定所有工程决策：
 **核心信念**: 发现别人，也被人发现。
 
 **实现方案**: ARD (Agentic Resource Discovery)
-- Outbound: 联邦搜索远程 Registry（Agent/MCP/OKF Bundle）
+- Outbound: 联邦搜索远程 Registry
 - Inbound: RegistryServer 发布自身
 - Auto: MCP 连接和 A2A Remote 自动注册
-
-### 1.6 知识标准化（Knowledge Standardization）
-
-**核心信念**: 知识应有标准形状，而非散落于各系统的专有格式。
-
-**实现方案**: OKF (Open Knowledge Format) v0.1
-- Markdown + YAML frontmatter 表示概念
-- 文件路径即概念身份，Markdown 链接形成知识图谱
-- index.md 渐进式探索，log.md 变更追踪
-- 消费者容错：跳过不合规文件、容忍未知类型、保留自定义字段
 
 ---
 
@@ -104,59 +94,66 @@ Wukong 遵循六大核心哲学，决定所有工程决策：
 | `codex` | Codex CLI 进程 | 本地 Codex | 外部 CLI |
 | `dify` | Dify 平台 API | 低代码平台 | HTTP Client |
 
-### 2.3 OKF 知识格式系统
-
-Wukong 实现了 OKF v0.1 规范，将知识表示为标准化的 Markdown 文件包：
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                   OKF Knowledge Layer                    │
-├─────────────────────────────────────────────────────────┤
-│  发现层: ARD 联邦搜索 OKF Bundle (application/okf-bundle)│
-├─────────────────────────────────────────────────────────┤
-│  标准层: internal/okf/                                   │
-│    Bundle (目录) → Concept (.md) → Frontmatter (YAML)    │
-│    index.md (渐进探索) | log.md (变更追踪)                │
-│    文件路径 = 概念ID | Markdown 链接 = 知识图谱           │
-├─────────────────────────────────────────────────────────┤
-│  引擎层: 6 个集成点                                      │
-│    skill: SKILL.md → type:skill 合规                    │
-│    knowledge: RAG ↔ OKF Bundle 导入/导出                 │
-│    cortex: index.md → WakeUp 注入 | DDL → 概念生成       │
-│    evolution: log.md 变更追踪                            │
-│    ard: OKF Bundle → CatalogEntry 联邦发现               │
-├─────────────────────────────────────────────────────────┤
-│  生产层: EnrichmentAgent                                 │
-│    DDL → 表结构概念 | 目录 → 文档概念 | 自动 index/log    │
-└─────────────────────────────────────────────────────────┘
-```
-
-**OKF 消费者容错设计**：
-- 跳过不合规文件而非整体失败
-- 容忍未知 `type` 值（默认为 `"concept"`）
-- 容忍缺失可选字段
-- 保留自定义字段（`Frontmatter.Extra`）
-
-### 2.4 Recipe 子 Agent 系统
+### 2.3 Recipe 子 Agent 系统
 
 Recipe 是一个轻量级的子 Agent 定义系统，提供 14 项功能：
+
+| 功能 | 说明 |
+|------|------|
+| 参数化 | 支持 `${param}` 模板变量 |
+| 结构化输出 | JSON Schema 定义输出格式 |
+| 子配方 | 配方间组合与嵌套 |
+| 重试 | 指数退避自动重试 |
+| 继承 | 父配方属性继承 |
+| 内联 | 配方内容嵌入 |
+| 模型覆盖 | 指定特定 LLM 模型 |
+| 超时控制 | 执行时间限制 |
+| 热重载 | `fsnotify` 文件变更自动加载 |
+| 指标 | 执行统计与监控 |
+| 工具包装 | 包装为 Agent Tool |
+| 原始工具 | 直接使用 FunctionTool |
+| 重试工具 | 带重试策略的 Tool 包装 |
+| 超时工具 | 带超时的 Tool 包装 |
 
 工具包装器链：
 ```
 agenttool.NewTool → recipeTool(参数+模板) → retryTool(指数退避) → timeoutTool
 ```
 
-### 2.5 五层安全纵深防御
+### 2.4 五层安全纵深防御
 
 ```
-Layer 5: Guard — auto/smart/manual/chat_only + blocked_commands + Prompt注入
-Layer 4: goja  — API白名单 + 128MB + 5并发 + ReDoS + 1MB限制
-Layer 3: OS沙箱 — Landlock(Linux) / Seatbelt(macOS) / LowIL(Windows)
-Layer 2: .wukongignore — gitignore兼容文件黑名单
-Layer 1: OS权限 — 非root + ulimit
+┌──────────────────────────────────────────────────────┐
+│  Layer 5: Guard 执行防护                              │
+│  • auto/smart/manual/chat_only 四种权限模式             │
+│  • 危险命令拦截（rm -rf /, dd, mkfs）                   │
+│  • Prompt 注入检测（tRPC guardrail 插件）               │
+│  • 细粒度工具 allowlist/denylist                      │
+├──────────────────────────────────────────────────────┤
+│  Layer 4: goja JS 沙箱                                │
+│  • API 白名单（仅允许安全函数）                          │
+│  • 128MB 内存限制                                     │
+│  • 5 并发 goroutine 限制                              │
+│  • ReDoS 正则防护                                     │
+│  • 1MB 源代码限制                                     │
+├──────────────────────────────────────────────────────┤
+│  Layer 3: OS 级文件沙箱                                │
+│  • Linux: Landlock（内核 5.13+）                       │
+│  • macOS: sandbox-exec(1)                            │
+│  • Windows: Low Integrity Level                       │
+│  • 仅允许写入指定目录                                   │
+├──────────────────────────────────────────────────────┤
+│  Layer 2: .wukongignore 文件黑名单                     │
+│  • gitignore 兼容语法                                 │
+│  • 阻止 Agent 访问敏感文件                              │
+├──────────────────────────────────────────────────────┤
+│  Layer 1: OS 级别权限                                  │
+│  • 非 root 用户运行                                    │
+│  • ulimit 资源限制                                    │
+└──────────────────────────────────────────────────────┘
 ```
 
-### 2.6 扩展体系
+### 2.5 扩展体系
 
 #### 12 内置扩展
 
@@ -175,16 +172,30 @@ Layer 1: OS权限 — 非root + ulimit
 | `ard` | ARD 资源发现（7 工具） | 7 | `ard.enabled` |
 | `cortex` | CortexDB 知识图谱操作 | 多 | `cortex.enabled` |
 
-### 2.7 多协议支持
+#### MCP Broker
+
+外部 MCP Server 可通过 MCP Broker 集成，提供 4 个工具：
+- `mcp_list_servers` — 列出已连接的 MCP Server
+- `mcp_list_tools` — 列出指定 Server 的工具
+- `mcp_inspect_tools` — 检查工具参数
+- `mcp_call` — 调用指定工具
+
+#### ACP MCP Bridge
+
+通过 ACP MCP Bridge（:3400），ACP 客户端可调用 MCP 工具。
+
+### 2.6 多协议支持
+
+Wukong 同时支持 4 种通信协议：
 
 | 协议 | 端口 | 路径 | 用途 |
 |------|------|------|------|
-| A2A | 9090 | - | Agent-to-Agent 标准通信 |
+| A2A | 9090 | - | Agent-to-Agent 标准通信（tRPC-A2A-Go） |
 | ACP | 9091 | `/acp` | Agent Client Protocol |
 | AG-UI SSE | 8080 | `/agui` | Web UI 实时对话流 |
 | ACP MCP | 3400 | `/mcp` | 跨协议工具桥接 |
 
-### 2.8 LLM Provider 体系
+### 2.7 LLM Provider 体系
 
 | Provider | 配置类型 | SDK | 特点 |
 |----------|----------|-----|------|
@@ -195,6 +206,48 @@ Layer 1: OS权限 — 非root + ulimit
 | Ollama | `ollama` | openai-go (兼容) | 本地部署 |
 | LMStudio | `lmstudio` | openai-go (兼容) | 本地部署 |
 | ACP | `acp` | HTTP Client | 远程 ACP Agent |
+
+**模型分工策略**:
+- **主对话模型**: `default_provider` + `default_model`
+- **后台任务模型**: `lightweight_provider` + `lightweight_model`（用于记忆提取、上下文压缩、KG 提取、检索规划）
+
+### 2.8 CortexDB 记忆栈
+
+CortexDB 提供完整的智能记忆栈（12 源文件）：
+
+| 组件 | 文件 | 功能 |
+|------|------|------|
+| `CortexStore` | `store.go` | HNSW 向量 + FTS5 全文 + 余弦相似度 |
+| `LexicalStore` | `lexical.go` | FTS5 语义词搜索 |
+| `MemoryFlowService` | `memoryflow.go` | 转录记录 + WakeUp 唤醒 |
+| `GraphFlowService` | `graphflow.go` | RDF 知识图谱构建 |
+| `Embedder` | `embedder.go` | 文本嵌入向量生成 |
+| `Extractor` | `extractor.go` | LLM 实体/关系提取 |
+| `Planner` | `planner.go` | 检索计划生成 |
+| `RecallManager` | `recall_manager.go` | 统一召回管理 |
+| `ImportFlow` | `import_flow.go` | DDL → KG 结构化导入 |
+| `ImportTools` | `import_tools.go` | 导入工具集 |
+| `KGTools` | `kg_tools.go` | 知识图谱操作工具 |
+| `JSONGenerator` | `json_generator.go` | JSON 格式输出 |
+
+### 2.9 CLI 命令体系
+
+| 命令 | 文件 | 功能 |
+|------|------|------|
+| `wukong session` | `session.go` (43.7 KB) | 交互式会话，28 步引导启动 |
+| `wukong configure` | `configure.go` | 交互式配置向导 |
+| `wukong run` | `run.go` | 单次执行/对话模式 |
+| `wukong extension` | `extension.go` | MCP 扩展安装/列表/启用/禁用 |
+| `wukong eval` | `eval.go` | Agent 评估测试 |
+| `wukong project` | `project.go` | 项目追踪与会话恢复 |
+| `wukong config` | `config.go` | 配置验证与展示 |
+| `wukong version` | `version.go` | 版本信息 |
+| `wukong apps` | `apps_mgmt.go` | HTML 应用 + 网站克隆 |
+
+**TUI 界面**: Bubbletea + LipGloss，三区布局：
+- 对话区：Agent 响应流式显示
+- 工具状态区：工具调用实时状态
+- 输入区：用户消息输入
 
 ---
 
@@ -211,7 +264,6 @@ User Input
 │   ContextManager.Prepare()  ← 历史压缩            │
 │   Recall/Cortex Store       ← 相关记忆检索         │
 │   MemoryFlow.WakeUp()       ← 3层上下文唤醒        │
-│   OKF.Injector              ← 知识索引注入(新增)    │
 │   tRPC Memory.ReadMemories()← 长期记忆去重         │
 │   GraphFlow                 ← 知识图谱增强         │
 │                                                  │
@@ -219,6 +271,7 @@ User Input
 │   runner.Run()              ← LLM 推理            │
 │   Tool Calls                ← 工具调用             │
 │   Guard.Check()             ← 安全检查             │
+│   [HITL pause]              ← 人机协同             │
 │                                                  │
 │ Phase 3: Finalize                                │
 │   StoreMessage()            ← 保存消息             │
@@ -229,6 +282,9 @@ User Input
 │ Phase 4: Return                                  │
 │   ContextManager.AfterRun()  ← Token统计           │
 └──────────────────────────────────────────────────┘
+    │
+    ▼
+Agent Response
 ```
 
 ---
@@ -239,23 +295,23 @@ User Input
 
 ```
 wukong.db
-├── sessions              # 会话记录
-├── memories              # 长期记忆
+├── sessions              # 会话记录（tRPC Session SQLite）
+├── memories              # 长期记忆（tRPC Memory SQLite）
 ├── recall_fts            # FTS5 全文搜索索引
 ├── recall_messages       # 召回消息存储
 ├── todos                 # 任务管理
 ├── projects              # 项目追踪
 ├── cortex_*              # CortexDB HNSW 向量 + FTS5 + RDF
 ├── app_versions          # HTML 应用版本历史
-└── evolution_*           # 技能进化记录
-
-.wukong/okf/              # OKF Bundle 存储 (新增)
-├── index.md              # 知识包索引
-├── log.md                # 变更历史
-├── tables/               # 表结构概念
-├── skills/               # 技能概念
-└── api/                  # API 概念
+├── evolution_*           # 技能进化记录
+└── FTS5 + HNSW + vectors  # 内建索引
 ```
+
+**MultiPool 数据库池配置**:
+- WAL 模式写入
+- MaxOpenConns = 4
+- synchronous = NORMAL
+- busy_timeout = 5000ms
 
 ---
 
@@ -264,20 +320,22 @@ wukong.db
 ### 加载优先级（4级）
 
 ```
-1. CLI 参数
-2. 环境变量（WUKONG_ 前缀）
-3. YAML 配置文件
-4. 内置默认值
+1. CLI 参数（--provider, --model, --temperature, --max-tokens, --config）
+2. 环境变量（WUKONG_ 前缀，如 WUKONG_DEFAULT_PROVIDER）
+3. YAML 配置文件（--config 指定或默认搜索路径）
+4. 内置默认值（internal/config/defaults.go）
 ```
+
+环境变量支持 `${ENV_VAR}` 语法，运行时自动展开。
 
 ### 配置代码组织
 
-| 文件 | 职责 |
-|------|------|
-| `config.go` | 根结构体 + Loader + 查询方法 |
-| `types.go` | 44 个子配置结构体 + OKFConfig |
-| `defaults.go` | 内置默认值（按子系统分组，含 OKF） |
-| `validate.go` | 配置验证 + 非致命警告（含 OKF 检查） |
+| 文件 | 职责 | 行数 |
+|------|------|------|
+| `config.go` | 根结构体 + Loader + 查询方法 | ~280 |
+| `types.go` | 43 个子配置结构体定义 | ~1060 |
+| `defaults.go` | 内置默认值（按子系统分组） | ~270 |
+| `validate.go` | 配置验证 + 非致命警告 | ~130 |
 
 ### 模型回退链
 
@@ -291,9 +349,10 @@ wukong.db
 
 | 类别 | 数量 |
 |------|------|
-| `_test.go` 文件 | 52 |
-| 有测试的包 | 22/29 |
-| 测试较完善的包 | agent, ard, config, okf, security, extension, evolution |
+| `_test.go` 文件 | 51 |
+| 有测试的包 | 21/28 |
+| 测试较完善的包 | agent, ard, config, security, extension, apps |
+| 测试欠缺的包 | cli, cortex, knowledge, eval |
 
 ---
 
@@ -301,5 +360,5 @@ wukong.db
 
 | 文档 | 说明 |
 |------|------|
-| [系统架构](ARCHITECTURE.md) | 17 章架构、18 ADR、模块依赖、数据流 |
-| [配置手册](CONFIG.md) | 45 结构体、全字段、推荐方案 |
+| [系统架构](ARCHITECTURE.md) | 16 章架构、16 ADR、模块依赖、数据流 |
+| [配置手册](CONFIG.md) | 44 结构体、全字段、推荐方案 |

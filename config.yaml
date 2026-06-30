@@ -1,34 +1,43 @@
 # =============================================================================
 # Wukong Configuration — Full Template
 # =============================================================================
-# Go: 1.26 | .go: 221 (51 _test.go) | Packages: 28 | Structs: 43 | Fields: ~310
-# CLI: 28 top-level + 55+ sub | Dependencies: 29 direct + 105 indirect
-# Clone: 32 EnhancedClonerOptions fields | 18 files | 2.7k+ lines
-# Antibot: 161 UA pool | 5 escalation levels | 26 tests
 #
 # Loading priority (high to low):
 #   1. CLI flags (--provider, --model, --temperature, --max-tokens, --config)
-#   2. Env vars (WUKONG_ prefix)
+#   2. Env vars (WUKONG_ prefix, e.g. WUKONG_DEFAULT_PROVIDER)
 #   3. --config CLI-specified file
 #   4. ./config.yaml (current directory)
 #   5. ~/.config/wukong/config.yaml
 #   6. /etc/wukong/config.yaml (non-Windows)
-#   7. Built-in defaults
+#   7. Built-in defaults (see internal/config/defaults.go)
 #
-# Env var expansion: ${ENV_VAR}
+# Env var expansion: ${ENV_VAR} (for api_key, jwt_secret fields)
+#
+# Config file path conventions:
+#   - .wukong/      — Wukong runtime data (apps, cache, skills, etc.)
+#   - ~/.config/    — User-level config (prompts, project data)
+#   - wukong.db     — Single SQLite WAL file (shared by all subsystems)
 # =============================================================================
 
-log_level: "info"
+# ---------------------------------------------------------------------------
+# Global Settings
+# ---------------------------------------------------------------------------
+
+log_level: "info"                    # debug | info | warn | error
+
+# Default LLM provider (must match a name in providers[] below).
 default_provider: "lmstudio"
 
-# Background tasks (memory extraction, summarisation, KG).
+# Background task model (memory extraction, summarisation, KG).
+# Falls back to default_provider when empty.
 lightweight_provider: "lmstudio"
 lightweight_model: "gemma-4-e4b-it"
 
-# =============================================================================
+# ---------------------------------------------------------------------------
 # 1. Providers — LLM backends (7 types)
-# =============================================================================
+# ---------------------------------------------------------------------------
 # Types: openai | anthropic | google | deepseek | ollama | lmstudio | acp
+# api_key supports ${ENV_VAR} expansion for secrets management.
 providers:
   - name: "openai"
     type: "openai"
@@ -57,46 +66,84 @@ providers:
   - name: "lmstudio"
     type: "lmstudio"
     api_key: "lmstudio"
-    base_url: "http://192.168.50.97:1234/v1"
+    base_url: "http://localhost:1234/v1"
     model: "google/gemma-4-26b-a4b"
 
+  # ACP provider: connects to a remote ACP agent via MCP bridge.
   - name: "acp-coder"
     type: "acp"
     agent_url: "http://localhost:4000"
     model: "acp-default"
 
-# =============================================================================
-# 2. Agent — Core behaviour (32 fields)
-# =============================================================================
+# ---------------------------------------------------------------------------
+# 2. Agent — Core behaviour & LLM parameters
+# ---------------------------------------------------------------------------
 agent:
-  max_llm_calls: 50
+  # LLM call limits
+  max_llm_calls: 50                  # 0 = unlimited
   max_tool_iterations: 30
-  max_run_duration: "600s"
-  parallel_tools: true
-  streaming: true
-  temperature: 0.7
+  max_run_duration: "300s"           # wall-clock time limit
+
+  # Generation parameters
+  parallel_tools: true               # concurrent independent tool calls
+  streaming: true                    # real-time token streaming in TUI
+  temperature: 0.7                   # 0.0-2.0
   max_tokens: 4096
+
+  # Tool retry (exponential backoff)
   tool_retry_enabled: true
   tool_retry_max_attempts: 3
   tool_retry_initial_wait: "1s"
   tool_retry_backoff_factor: 2.0
-  enable_post_tool_prompt: true
-  planner: ""
-  tool_search_enabled: true
-  context_compaction: true
-  session_recall_enabled: false
-  json_repair_enabled: false
-  todo_tool_enabled: true
-  todo_enforcer_enabled: true
-  agent_tools_enabled: false
-  system_prompt_dir: "~/.config/wukong/prompts/"
 
-# =============================================================================
-# 3. Security (13 fields)
-# =============================================================================
+  # Post-tool prompt injection
+  enable_post_tool_prompt: true
+
+  # Planner: "" | "builtin" | "react"
+  planner: ""
+  # reasoning_effort: "medium"       # low | medium | high (builtin planner)
+  # thinking_enabled: true            # explicit thinking toggle (builtin)
+  # thinking_tokens: 4096             # thinking budget (Claude/Gemini)
+
+  # Tool search (TopK filtering before each model call)
+  tool_search_enabled: true
+  tool_search_max_tools: 20
+
+  # Context compaction (prevents context window overflow)
+  context_compaction: true
+  context_compaction_tool_result_max_tokens: 1024
+  context_compaction_oversized_max_tokens: 8192
+  context_compaction_keep_recent: 1
+  # context_compaction_force_clean_tools: ["shell", "grep"]
+  # context_compaction_keep_tools: ["memory_search", "session_recall"]
+
+  # Session recall (cross-session context preloading)
+  session_recall_enabled: false
+  session_recall_limit: 5
+
+  # JSON repair (for models that produce malformed JSON)
+  json_repair_enabled: false
+
+  # Todo system
+  todo_tool_enabled: true            # tRPC-native todo_write tool
+  todo_enforcer_enabled: true        # enforce completion before final answer
+
+  # Agent tools (sub-agent wrappers)
+  agent_tools_enabled: false
+  agent_tools_stream: false
+
+  # System prompt & recipe
+  system_prompt_dir: "~/.config/wukong/prompts/"
+  recipe_dir: ".wukong/recipes/"
+  recipe_enabled: true
+  # inline_recipes: []               # define recipes inline in YAML
+
+# ---------------------------------------------------------------------------
+# 3. Security — Tool execution safety & access control
+# ---------------------------------------------------------------------------
 security:
-  permission_mode: "smart"
-  require_approval: false
+  permission_mode: "smart"           # auto | smart | manual | chat_only
+  require_approval: false            # legacy; prefer permission_mode
   malware_scan_enabled: true
   block_dangerous_commands: true
   blocked_commands:
@@ -105,324 +152,428 @@ security:
     - "mkfs."
     - "> /dev/sda"
     - "fork bomb"
-  default_timeout: "60s"
+  default_timeout: "30s"
   max_timeout: "300s"
-  allowlist: []
-  denylist: []
-  guardrail_enabled: false
+  allowlist: []                      # empty = all tools allowed
+  denylist: []                       # always blocked
+  guardrail_enabled: false           # prompt injection detection
   ignore_file_enabled: true
   ignore_file: ".wukongignore"
 
-# =============================================================================
-# 4. Session (6 fields)
-# =============================================================================
+# ---------------------------------------------------------------------------
+# 4. Session — Conversation history storage
+# ---------------------------------------------------------------------------
+# Backend: sqlite (default) | memory | redis
 session:
   backend: "sqlite"
   db_path: "wukong.db"
   event_limit: 500
-  ttl: "0h"
+  ttl: "0h"                          # 0 = no expiration
   enable_summary: true
   summary_trigger: 50
+  # redis_url: "redis://localhost:6379/0"  # for backend=redis
 
-# =============================================================================
-# 5. Memory (9 fields)
-# =============================================================================
+# ---------------------------------------------------------------------------
+# 5. Memory — Long-term knowledge persistence
+# ---------------------------------------------------------------------------
 memory:
   backend: "sqlite"
   db_path: "wukong.db"
   max_memories: 100
   auto_extract: true
-  extract_timeout: "1200s"
-  extractor_provider: "lmstudio"
-  enable_smart_cleanup: true
-  cleanup_trigger_threshold: 0.8
-  cleanup_target_threshold: 0.6
-  memory_ttl: "720h"
-  extractor_prompt: |
-    You are a Memory Manager. Extract concise memories from the conversation.
-    Today's date is {current_date}.
-    <rules>
-    1. Atomicity: One fact per memory.
-    2. No subject prefix: Never start with "User", "The user", etc.
-    3. Deduplication: Check existing memories before adding.
-    4. Specificity: Include names, dates, places, quantities.
-    5. Episode vs Fact: Episode = events with time, Fact = stable attributes.
-    6. All speakers: Extract info about EVERY person.
-    7. Skip transient greetings or trivial queries.
-    </rules>
+  extract_timeout: "60s"
+  # extractor_provider: "lmstudio"   # dedicated provider for extraction
+  # extractor_model: "gemma-4-e4b-it" # dedicated model for extraction
+  # extractor_prompt: |              # custom extraction prompt
+  #   You are a Memory Manager. Extract concise memories.
 
-# =============================================================================
-# 6. Todo (5 fields)
-# =============================================================================
+  # Smart cleanup (capacity-aware eviction)
+  enable_smart_cleanup: true
+  cleanup_trigger_threshold: 0.8     # evict at 80% capacity
+  cleanup_target_threshold: 0.6      # evict down to 60% capacity
+  memory_ttl: "720h"                 # 30 days
+
+# ---------------------------------------------------------------------------
+# 6. Todo — Task tracking
+# ---------------------------------------------------------------------------
 todo:
   backend: "sqlite"
   db_path: "wukong.db"
   enable_native_todo: true
   enable_enforcer: true
 
-# =============================================================================
-# 7–11. CortexDB Memory Stack
-# =============================================================================
-recall:                                          # FTS5
+# ---------------------------------------------------------------------------
+# 7. Recall — Cross-session chat history search (FTS5)
+# ---------------------------------------------------------------------------
+recall:
   enabled: true
   backend: "sqlite"
   db_path: "wukong.db"
   max_results: 10
   max_messages_per_session: 200
-  search_mode: "fts5"
+  search_mode: "fts5"                # fts5 | hybrid
+  # embedding_provider: "openai"     # for hybrid mode
+  # embedding_model: "text-embedding-3-small"
 
-cortex:                                          # HNSW vector
+# ---------------------------------------------------------------------------
+# 8. Cortex — HNSW vector + FTS5 intelligent recall
+# ---------------------------------------------------------------------------
+# When enabled, replaces the raw SQLite FTS5 recall with CortexDB's
+# unified vector + full-text + knowledge graph capabilities.
+cortex:
   enabled: true
   db_path: "wukong.db"
   max_results: 10
   max_messages_per_session: 200
-  embedding_base_url: "http://192.168.50.97:1234"
+  embedding_base_url: "http://localhost:1234"
   embedding_api_key: "lmstudio"
-  embedding_model: "qwen3-embedding-0.6b-graphql"
+  embedding_model: "qwen3-embedding-0.6b"
 
-memoryflow:                                      # Transcription + semantic wake
+# ---------------------------------------------------------------------------
+# 9. MemoryFlow — Conversation transcript + semantic wake-up
+# ---------------------------------------------------------------------------
+memoryflow:
   enabled: true
   db_path: "wukong.db"
   namespace: "assistant"
-  embedding_dimensions: 0
+  embedding_dimensions: 0            # 0 = auto-detect
+  # planner_model: ""                # retrieval strategy planner
+  # extractor_model: ""              # transcript fact extraction
 
-graphflow:                                       # Knowledge graph (RDF+SPARQL)
+# ---------------------------------------------------------------------------
+# 10. GraphFlow — Knowledge graph (RDF + SPARQL)
+# ---------------------------------------------------------------------------
+graphflow:
   enabled: true
   db_path: "wukong.db"
   max_chars_per_doc: 8000
   auto_extract: true
+  # extractor_model: ""              # LLM-driven entity extraction
 
-importflow:                                      # Structured data import
+# ---------------------------------------------------------------------------
+# 11. ImportFlow — Structured data import (DDL -> KG, CSV -> RAG+KG)
+# ---------------------------------------------------------------------------
+importflow:
   enabled: true
   db_path: "wukong.db"
 
-# =============================================================================
-# 12. Revision (10 fields)
-# =============================================================================
+# ---------------------------------------------------------------------------
+# 12. Revision — Context window management & token optimization
+# ---------------------------------------------------------------------------
 revision:
   enabled: true
-  revision_provider: "lmstudio"
+  # revision_provider: "lmstudio"   # dedicated provider for summaries
+  # revision_model: ""               # dedicated model for summaries
   enable_llm_summarize: true
-  summary_cooldown: 120s
-  summary_timeout: 30s
+  summary_cooldown: "120s"
+  summary_timeout: "30s"
   max_command_output: 8000
   enable_semantic_search: false
-  search_strategy: "include_all"
+  search_strategy: "include_all"     # include_all | semantic
   max_context_tokens: 64000
   trim_ratio: 0.3
 
-# =============================================================================
-# 13. Browser (15 fields)
-# =============================================================================
+# ---------------------------------------------------------------------------
+# 13. Browser — Web automation & file caching
+# ---------------------------------------------------------------------------
 browser:
   enabled: true
   browser_type: "chromium"
-  headless: true                            # --no-headless for visible window
-  browser_path: ""
-  stealth: true                             # 13 JS + 11 Chrome flags (default on)
+  headless: true                     # --no-headless for visible window
+  browser_path: ""                   # empty = auto-detect
+  stealth: true                      # anti-detection scripts + Chrome flags
   cache_dir: ".wukong/cache"
-  max_download_size: 104857600
+  max_download_size: 104857600       # 100 MB
   timeout: "60s"
   viewport_width: 1280
   viewport_height: 720
-  search_backend: "duckduckgo"
+  search_backend: "duckduckgo"       # duckduckgo | searxng | tavily
+  # search_backend_url: ""           # for SearXNG
+  # search_api_key: ""               # for Tavily
 
-# =============================================================================
-# 14–17. Visualiser | Tutorial | TopOfMind | CodeMode
-# =============================================================================
+# ---------------------------------------------------------------------------
+# 14. Visualiser — Chart & diagram generation
+# ---------------------------------------------------------------------------
 visualiser:
   enabled: true
   output_dir: ".wukong/visuals"
   max_width: 1200
   max_height: 800
 
+# ---------------------------------------------------------------------------
+# 15. Tutorial — Interactive tutorial system
+# ---------------------------------------------------------------------------
 tutorial:
   enabled: true
-  language: "zh"
+  language: "zh"                     # zh | en
 
+# ---------------------------------------------------------------------------
+# 16. TopOfMind — Persistent instruction injection
+# ---------------------------------------------------------------------------
 top_of_mind:
   enabled: true
   instruction_file: ".wukong/instructions.md"
   max_length: 2000
 
+# ---------------------------------------------------------------------------
+# 17. CodeMode — JavaScript sandbox execution (goja)
+# ---------------------------------------------------------------------------
 code_mode:
   enabled: true
   timeout: "10s"
   max_memory_mb: 128
 
-# =============================================================================
-# 18. Apps — Website cloning + ZIM packaging (32 EnhancedClonerOptions fields)
-# =============================================================================
+# ---------------------------------------------------------------------------
+# 18. Apps — HTML apps + Website cloning + ZIM packaging
+# ---------------------------------------------------------------------------
 apps:
   enabled: true
   app_dir: ".wukong/apps"
 
+  # Website cloning — EnhancedCloner defaults
   clone:
     # Crawl scope
-    max_pages: 0                            # 0 = unlimited
-    max_depth: 0
-    traversal: "bfs"                        # bfs | dfs
+    max_pages: 0                     # 0 = unlimited
+    max_depth: 0                     # 0 = unlimited
+    traversal: "bfs"                 # bfs | dfs
     subdomains: false
-    scope_prefix: ""
+    scope_prefix: ""                 # restrict to URL paths starting with this
 
-    # Rendering (defaults from DefaultEnhancedOptions)
-    workers: 4                              # Page render goroutines
-    asset_workers: 8                        # Asset download concurrency (IO-bound)
-    browser_pages: 4                        # Chrome tab pool (0 = use workers)
-    timeout: 60                             # HTTP request timeout (s)
-    render_timeout: 30                      # Page render hard timeout (s)
-    settle: 1500                            # Network-idle settle (ms)
-    scroll: false
-    user_agent: ""                          # Empty = Chrome/124 macOS
+    # Rendering
+    workers: 4                       # page render goroutines
+    asset_workers: 8                 # asset download concurrency (IO-bound)
+    browser_pages: 4                 # Chrome tab pool (0 = use workers)
+    timeout: 60                      # HTTP request timeout (seconds)
+    render_timeout: 30               # page render hard timeout (seconds)
+    settle: 1500                     # network-idle settle (milliseconds)
+    scroll: false                    # auto-scroll for lazy loading
+    user_agent: ""                   # empty = Chrome/124 macOS
 
     # Asset policy
-    asset_same_domain: true                 # Skip 3rd-party CDN assets
-    max_asset_bytes: 52428800               # 50 MB per-asset cap
-    # skip_asset_exts: 42 extensions (video/audio/document/archive/installer)
+    asset_same_domain: true          # skip 3rd-party CDN assets
+    max_asset_bytes: 52428800        # 50 MB per-asset cap
 
     # Compliance
-    respect_robots: true                    # temoto/robotstxt library
-    crawl_delay: 0                          # ms (0 = use robots.txt)
+    respect_robots: true             # robots.txt via temoto/robotstxt
+    crawl_delay: 0                   # milliseconds (0 = use robots.txt)
     no_sitemap: false
 
     # Optimizations (all on by default)
-    dedup_content: true                     # SHA-256 + hard links
-    mobile_readable: true
-    enable_resume: true                     # Frontier state checkpoint
-    persist: true                           # Save state.json
-    incremental: false                      # ETag/Last-Modified cache
-    cache_max_age: 86400                    # seconds
+    dedup_content: true              # SHA-256 + hard links
+    mobile_readable: true            # inject responsive CSS
+    enable_resume: true              # frontier state checkpoint
+    persist: true                    # save state.json
+    incremental: false               # ETag/Last-Modified cache
+    cache_max_age: 86400             # seconds
 
     # Anti-detection (all on by default)
-    headless: true                          # --no-headless for visible window
-    stealth: true                           # 13 JS + 11 Chrome flags
-    chrome_profile: ".wukong/chrome/profile"  # Persistent browser session
-    chrome_path: ""                         # Empty = multi-platform auto-detect
-    antibot_enabled: true                   # Auto-detect + escalate
-    antibot_auto_escalate: true             # 5-level None→Flags→Stealth→Aggressive→Backoff
+    headless: true
+    stealth: true                    # 13 JS + 11 Chrome flags
+    chrome_profile: ".wukong/chrome/profile"
+    chrome_path: ""                  # empty = multi-platform auto-detect
+    antibot_enabled: true            # auto-detect + escalate
+    antibot_auto_escalate: true      # 5-level: None -> Flags -> Stealth -> Aggressive -> Backoff
 
     # Session
-    cookie_file: ""                         # Netscape-format cookie file
+    cookie_file: ""                  # Netscape-format cookie file
 
+  # App packaging defaults
   pack:
-    compress: true                          # zstd codec 5 (ZIM v6)
-    incremental: false
-    language: "eng"
+    compress: true                   # zstd codec 5 (ZIM v6)
+    incremental: false               # reuse unchanged clusters from cache
+    language: "eng"                  # ISO 639-3 code
     creator: "Wukong"
-    format: "html"                          # html | zim | binary | app
+    format: "html"                   # html | zim | binary | app
 
-# =============================================================================
+# ---------------------------------------------------------------------------
 # 19. ARD — Agentic Resource Discovery
-# =============================================================================
+# ---------------------------------------------------------------------------
 ard:
   enabled: false
-  registry_url: ""
+  registry_url: ""                   # remote registry for federation search
   catalog_path: ".wukong/ard/catalog.json"
-  publish_enabled: false
+  publish_enabled: false             # expose self as discoverable registry
+  publish_port: 0                    # 0 = disabled
 
-# =============================================================================
-# 20. Summon — Sub-agent delegation
-# =============================================================================
+# ---------------------------------------------------------------------------
+# 20. Summon — Sub-agent delegation & A2A remotes
+# ---------------------------------------------------------------------------
 summon:
   enabled: true
   skills_dir: ".wukong/skills"
   max_concurrent: 5
-  a2a_remotes: []
+  a2a_remotes: []                    # list of A2ARemoteConfig
 
-# =============================================================================
-# 21–25. Skill | Evolution | Knowledge | Workflow | Dify
-# =============================================================================
+# ---------------------------------------------------------------------------
+# 21. Skill — tRPC Agent Skill repository
+# ---------------------------------------------------------------------------
 skill:
   enabled: true
-  skills_dir: ".wukong/skills"
+  skills_dir: ".wukong/skills"       # shared with summon.skills_dir
   auto_load: true
   max_skills: 20
 
+# ---------------------------------------------------------------------------
+# 22. Evolution — Skill self-evolution system
+# ---------------------------------------------------------------------------
 evolution:
   enabled: false
-  auto_patch: false
-  analysis_provider: ""
-  analysis_model: ""
+  auto_patch: false                  # false = log suggestions only
+  analysis_provider: ""              # empty = default provider
+  analysis_model: ""                 # empty = provider default
   min_confidence: 0.7
   cooldown_period: "30m"
   max_patches_per_day: 10
   max_versions_kept: 10
-  max_patch_size: 8192
+  max_patch_size: 8192               # 8 KB
   analysis_timeout: "60s"
 
+# ---------------------------------------------------------------------------
+# 23. Knowledge — RAG knowledge base
+# ---------------------------------------------------------------------------
 knowledge:
   enabled: false
-  embedder_provider: "lmstudio"
-  embedder_model: "qwen3-embedding-4b"
+  embedder_provider: "lmstudio"      # empty = default provider
+  embedder_model: "text-embedding-3-small"
+  # sources: ["./docs", "./markdown"]  # local document directories
+  # source_urls: ["https://example.com/doc"]  # remote document URLs
   vector_store: "inmemory"
   max_results: 5
-  enable_source_sync: false
+  enable_source_sync: false          # auto re-index on file change
   reranker_enabled: false
   search_tool_name: "knowledge_search"
 
+# ---------------------------------------------------------------------------
+# 24. OKF — Open Knowledge Format (v0.1) interoperability
+# ---------------------------------------------------------------------------
+# OKF is a vendor-neutral standard for representing knowledge as
+# Markdown files with YAML frontmatter. When enabled, Wukong can
+# import/export knowledge bundles, inject knowledge index into
+# agent context, and auto-generate concepts from data sources.
+okf:
+  enabled: false
+  bundle_dir: ".wukong/okf"             # default OKF Bundle directory
+  injector_enabled: false               # inject OKF index into MemoryFlow wake-up
+  enrichment_enabled: false             # auto-generate concepts from DDL/directories
+  # enrichment_output_dir: ""           # empty = use bundle_dir
+  auto_export: false                    # export knowledge base as OKF on session end
+  register_in_ard: false                # register OKF bundles in ARD catalog
+
+# ---------------------------------------------------------------------------
+# 25. Workflow — Multi-mode agent orchestration
+# ---------------------------------------------------------------------------
+# Modes: single | chain | parallel | cycle | graph |
+#        team_coordinator | team_swarm | claude_code | codex | dify
 workflow:
   mode: "single"
-  max_iterations: 10
-  cycle_mode: "default"
-  stream_mode: "none"
-  cache_enabled: false
-  engine: "bsp"
-  sub_agents: []
+  max_iterations: 10                 # for cycle/graph modes
+  cycle_mode: "default"              # default | code_review
+  stream_mode: "none"                # none | hub
+  cache_enabled: false               # node caching for graph workflows
+  engine: "bsp"                      # bsp | dag
+  sub_agents: []                     # custom sub-agent configs
+  # team_members: []                 # for team_coordinator/team_swarm
+  # claude_code_bin: "claude"        # for claude_code mode
+  # codex_bin: "codex"               # for codex mode
 
+# ---------------------------------------------------------------------------
+# 26. Dify — Dify AI platform integration
+# ---------------------------------------------------------------------------
 dify:
   enabled: false
+  # base_url: "https://api.dify.ai/v1"
+  # api_secret: "${DIFY_API_SECRET}"
   agent_name: "dify"
   enable_streaming: false
   timeout: "120s"
 
-# =============================================================================
-# 26. Service Endpoints — 4 protocols
-# =============================================================================
-a2a_server:                                  # A2A :9090
+# ---------------------------------------------------------------------------
+# 27. Service Endpoints — 4 protocols
+# ---------------------------------------------------------------------------
+# A2A server: Agent-to-Agent protocol
+a2a_server:
   enabled: true
   address: ":9090"
   agent_name: "wukong"
   agent_description: "Wukong AI Agent — A2A endpoint"
 
-agui:                                        # AG-UI SSE :8080
+# AG-UI SSE: Web-based chat UI streaming
+agui:
   enabled: true
   address: ":8080"
   path: "/agui"
 
-acp_server:                                  # ACP :9091
+# ACP server: Agent Client Protocol
+acp_server:
   enabled: true
   address: ":9091"
   path: "/acp"
   enable_streaming: true
+  auth_type: ""                      # "" | api_key | jwt
+  # api_key: "${ACP_API_KEY}"
 
-acp_mcp:                                     # ACP MCP Bridge :3400
+# ACP MCP Bridge: exposes extensions as MCP Server
+acp_mcp:
   enabled: true
   address: ":3400"
   path: "/mcp"
 
-# =============================================================================
-# 27–28. Eval | Extensions | Telemetry | Observability | Project
-# =============================================================================
+# ---------------------------------------------------------------------------
+# 28. Evaluation — Agent regression testing
+# ---------------------------------------------------------------------------
 eval:
   enabled: false
   evalset_path: ".wukong/evals/default.evalset.json"
   results_path: ".wukong/evals/results.json"
+  # metrics:
+  #   - name: "tool_trajectory_match"
+  #     threshold: 0.8
 
+# ---------------------------------------------------------------------------
+# 29. Extensions — MCP external servers
+# ---------------------------------------------------------------------------
 extensions: []
+# Example external MCP extension:
+#   - name: "filesystem"
+#     type: "external"
+#     transport: "stdio"
+#     command: "npx"
+#     args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+#     enabled: true
+#     timeout: "30s"
+#     mcp_broker: false               # true = on-demand discovery via broker
 
+# ---------------------------------------------------------------------------
+# 30. Telemetry — OpenTelemetry distributed tracing
+# ---------------------------------------------------------------------------
 telemetry:
   enabled: false
-  exporter_type: "console"
+  exporter_type: "console"           # console | grpc | http
   endpoint: "localhost:4317"
   service_name: "wukong"
   service_version: "1.0.0"
-  environment: "development"
-  sample_rate: 1.0
+  environment: "development"         # development | staging | production
+  sample_rate: 1.0                   # 0.0-1.0
 
+# ---------------------------------------------------------------------------
+# 31. Observability — Langfuse LLM tracing
+# ---------------------------------------------------------------------------
 observability:
   langfuse_enabled: false
+  # langfuse_host: "cloud.langfuse.com"
+  # langfuse_public_key: "${LANGFUSE_PUBLIC_KEY}"
+  # langfuse_secret_key: "${LANGFUSE_SECRET_KEY}"
 
+# ---------------------------------------------------------------------------
+# 31. Artifact — Named, versioned binary storage
+# ---------------------------------------------------------------------------
 artifact:
-  backend: "inmemory"
+  backend: "inmemory"                # inmemory | cos
+  # cos_bucket_url: "https://bucket.cos.region.myqcloud.com"
+  # cos_secret_id: "${COS_SECRETID}"
+  # cos_secret_key: "${COS_SECRETKEY}"
 
+# ---------------------------------------------------------------------------
+# 33. Project — Project tracking data directory
+# ---------------------------------------------------------------------------
 project_dir: "~/.config/wukong/"

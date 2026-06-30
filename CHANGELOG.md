@@ -4,84 +4,85 @@ All changes after v0.1.14 baseline.
 
 ---
 
-## [Unreleased] — 2026-06-27
+## [Unreleased] — 2026-06-30
 
-### Clone Engine — Chrome 渲染快照（对标优化）
+### OKF Integration — Open Knowledge Format v0.1
 
-- **Settle 网络空闲等待**: 替代 Sleep(2s), 监听 4 CDP 网络事件
-- **autoScroll 动态高度**: 每步重算 scrollHeight, 懒加载图片不再遗漏
-- **ErrNotHTML 路由**: 非 HTML 资源 (PDF/图片) → AssetDownloader 自动下载
-- **AssetWorkers 4→8**: IO 密集型下载并发翻倍
-- **RenderTimeout 独立**: 30s 渲染硬超时, 与 HTTP Timeout 60s 分离
-- **BFS/DFS 遍历**: traversalDispatcher + LIFO stack
-- **external robots.txt**: temoto/robotstxt v1.1.2
+- **新增 `internal/okf/` 包** (3 文件): OKF v0.1 核心实现
+  - `bundle.go` — Bundle 加载、Concept 解析、Frontmatter 处理、Markdown 链接提取
+  - `writer.go` — Bundle 写入、概念格式化、index.md/log.md 自动生成
+  - `bundle_test.go` — 7 个单元测试
+- **ARD OKF 联邦发现** (`internal/ard/okf.go`): OKF Bundle 注册为 CatalogEntry
+  - 新增 MediaType: `application/okf-bundle+json`
+  - URN 格式: `urn:air:wukong.ai:knowledge:<bundle-name>`
+- **Cortex OKF EnrichmentAgent** (`internal/cortex/okf_enrichment.go`): 从 DDL/目录自动生成 OKF 概念文档
+- **Cortex OKF KnowledgeIndexInjector** (`internal/cortex/okf_injector.go`): OKF 知识索引注入 MemoryFlow 唤醒上下文
+- **Evolution OKF 变更追踪** (`internal/evolution/okf.go`): 通过 log.md 追踪知识文件变更
+- **Knowledge OKF 导入/导出** (`internal/knowledge/okf.go`): RAG 知识库与 OKF Bundle 互操作
+- **Skill OKF 兼容层** (`internal/skill/okf.go`): SKILL.md 文件 OKF 合规 (`type: skill`)
 
-### Clone Engine — JS/追踪全清除（安全性）
+### Configuration System — OKF Config
 
-- **sanitize.CleanHTMLWithOptions**: Script / Noscript / MetaRefresh / DeadLink / 条件注释 全移除
-- **unsafe elements 移除**: Iframe, Embed, Object, Applet, Base — 确保零网络请求
-- **on* handlers 剥离**: 所有事件处理属性 (onclick, onload 等)
-- **javascript: URL 中性化**: href→"#", src/action 等直接删除属性
-- **charset 保证**: 自动注入 <meta charset="utf-8">
+- **新增 `OKFConfig` 结构体** (`internal/config/types.go`): 7 个字段 (enabled/bundle_dir/injector_enabled/enrichment_enabled/enrichment_output_dir/auto_export/register_in_ard)
+- **新增 `setOKFDefaults()`** (`internal/config/defaults.go`): OKF 默认值注册
+- **新增 OKF 校验** (`internal/config/validate.go`): 3 条 OKF 相关警告检查
+- **新增 `okf:` 配置段** (`config.yaml`): 第 24 节，含详细注释
+- **配置结构体总数**: 44 → 45
 
-### Clone Engine — 资源本地化 + 链接重写
+### Documentation Refactor
 
-- **单次 DOM sink 回调**: rewriteAndDiscover() 合并重写+发现+入队
-- **CSS 全量重写**: url() 三种引号 + @import 两种引号
-- **资产过滤**: 42 种扩展名跳过 + AssetSameDomain + 50MB 上限
-- **SHA-256 内容去重**: 硬链接复用, 零磁盘冗余
-- **断点续抓**: frontier state.json 原子写入
-- **apps view 命令**: HTTP 服务 + 自动打开浏览器预览
+- **README.md**: 统计更新 (233 .go / 52 _test.go / 29 包 / 45 结构体)，新增 OKF 章节，新增"知识标准化"哲学
+- **docs/README.md**: 统计更新，新增 OKF 特性章节 (2.3)，数据流图新增 OKF 注入步骤，新增第六大哲学
+- **docs/ARCHITECTURE.md**: 统计更新，系统全景图新增 OKF 知识层，目录结构新增 `internal/okf/`，新增第 6 章 OKF 知识格式系统，新增 ADR #18
+- **docs/CONFIG.md**: 统计更新，新增第 19 节 OKF 配置，配置索引新增 OKFConfig，新增 OKF 推荐配置
+- **CHANGELOG.md**: 记录 OKF 融合和配置系统更新
+
+### Statistics Update
+
+| 指标 | 之前 | 现在 |
+|------|------|------|
+| `.go` 文件 | 224 | 233 (+9 OKF 文件) |
+| `_test.go` 文件 | 51 | 52 (+1 OKF 测试) |
+| 内部包 | 28 | 29 (+1 `internal/okf/`) |
+| 配置结构体 | 44 | 45 (+1 OKFConfig) |
+| ADR 数 | 17 | 18 (+1 OKF 决策) |
+| 架构哲学 | 5 | 6 (+1 知识标准化) |
+
+---
+
+## [Previous] — 2026-06-30 (Config Refactor)
+
+### Configuration System Refactor
+
+- **config.go 拆分**: 1613 行单文件拆分为 4 个按职责分离的文件
+  - `config.go` — 包文档、`WukongConfig` 根结构体、`Loader`、查询方法
+  - `types.go` — 43 个子配置结构体定义
+  - `defaults.go` — `setDefaults` 按子系统拆分为 11 个方法
+  - `validate.go` — `Validate()` 致命错误检查 + `Warnings()` 非致命警告
+- **新增 MemoryConfig 字段**: `enable_smart_cleanup`、`cleanup_trigger_threshold`、`cleanup_target_threshold`、`memory_ttl`
+- **新增 CloneDefaults 字段**: `scope_prefix`
+- **新增 PackDefaults 结构体**: `apps.pack` 配置段
+- **新增配置验证**: `Validate()` + `LoadAndValidate()`
+- **config.yaml 重构**: 统一路径约定、替换硬编码 IP、补齐缺失字段
+
+---
+
+## [Previous] — 2026-06-27
+
+### Clone Engine — Chrome 渲染快照
+
+- Settle 网络空闲等待、autoScroll 动态高度、ErrNotHTML 路由
+- BFS/DFS 遍历、external robots.txt、AssetWorkers 4→8
 
 ### 反反爬体系 — 5 层深度防御
 
-| 层 | 技术 | 默认 |
-|----|------|------|
-| 1 | Stealth (13 JS + 11 Chrome flags) | ✅ on |
-| 2 | Preflight CF 检测 (HEAD → cf-* headers) | ✅ on |
-| 3 | 5 级自动升级 (None→Flags→Stealth→Aggressive→Backoff) | ✅ on |
-| 4 | cf_clearance 提取+复用 (Chrome cookie → HTTP) | ✅ auto |
-| 5 | 161 UA 轮换池 (8 浏览器 × 5 平台) | ✅ L3+ |
-| + | sec-ch-ua / Referer / Accept-Language header 伪装 | ✅ auto |
-
-### Cookie/Session/Profile
-
-- **Cookie 持久化**: Netscape 格式, --cookies <file>
-- **Chrome Profile**: ./wukong_chrome_profile (默认), 复用 cookies/storage
-- **cf_clearance**: Chrome 提取 → 注入 preflight + asset downloader
+- Stealth + Preflight CF 检测 + 5 级自动升级 + cf_clearance + 161 UA 池
 
 ### ZIM 修复
 
-- **集群缓存 key 匹配**: 统一为未压缩 hash, 修复增量构建永久 Miss
-
-### 安全修复
-
-- **路径遍历**: server.go hasPrefix → strings.HasPrefix + filepath.Clean
-- **unsafe elements**: enhanced.go 补齐 Iframe/Embed/Object/Applet/Base 移除
-
-### Bug 修复
-
-- **DFS dispatcher goroutine 泄漏**: dispatcherStop channel
-- **Stealth flags 格式**: chromedp.Flag("--key=val", true) → chromedp.Flag("key", "val")
-- **Int63n(0) panic**: Cooldown=0 安全保护
-- **autoScroll height freeze**: 每步动态重算 scrollHeight
+- 集群缓存 key 匹配修复
 
 ### CI/CD
 
-- .goreleaser.yaml: 6 平台 + Homebrew + Scoop + Docker multi-arch
-- .github/workflows/ci.yml: Lint + Test(race) + Cross-build
-- .github/workflows/release.yml: Tag → GPG + Cosign + Docker push
-- Dockerfile: Alpine + Chromium 多阶段构建
-
-### 测试
-
-- 51 _test.go: clone 6 + antibot 18 + stealth 3 + session 3 + 其他 21
-- 26 antibot tests (HTTP 7 + DOM 11 + Turnstile 4 + Headers 2 + Markers 2)
-
-### 文档
-
-- config.yaml: 完全重写, 43 结构体, 精确对齐代码默认值
-- README.md: 221 .go, 反爬默认开启表, 技术选型
-- docs/ARCHITECTURE.md: 更新文件/结构体统计
-- docs/CONFIG.md: 更新字段/结构体统计
-- CHANGELOG.md (本文件)
+- GoReleaser 6 平台 + Homebrew + Scoop + Docker multi-arch
+- GitHub Actions: Lint + Test(race) + Cross-build

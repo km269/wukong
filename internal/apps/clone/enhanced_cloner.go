@@ -768,19 +768,41 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 	if abReason != antibot.ReasonNone {
 		fmt.Fprintf(os.Stderr, "[wukong/antibot] %s at %s\n", abDesc, pageURL)
 
-		// Cloudflare Turnstile: headless Chrome cannot solve
-		// interactive JS challenges. Skip the retry loop.
+		// Cloudflare Turnstile: in non-headless + stealth mode,
+		// Chrome can auto-solve simple Turnstile challenges
+		// (checkbox "Verify you are human"). Re-render with
+		// extended settle to give the challenge time to complete.
+		// (Scrapling's solve_cloudflare=True approach.)
 		if abReason == antibot.ReasonCloudflare {
-			ec.opts.AntibotAutoEscalate = false
-			msg := "Cloudflare Turnstile blocked — headless " +
-				"Chrome cannot pass interactive JS challenges."
-			if ec.cfClearance == "" {
-				msg += " Run: wukong apps clone URL " +
-					"--no-headless --chrome-profile ./cf_data " +
-					"(manually solve once, then re-clone with " +
-					"--chrome-profile ./cf_data to reuse session)"
+			if !ec.opts.Headless && ec.opts.Stealth {
+				fmt.Fprintf(os.Stderr,
+					"[wukong/antibot] Turnstile detected — "+
+						"attempting auto-solve (non-headless+"+
+						"stealth, extended settle)...\n")
+				ec.browserPool.SetSettle(10 * time.Second)
+				rr2, rErr := ec.browserPool.Render(ctx, pageURL)
+				ec.browserPool.SetSettle(ec.opts.Settle)
+				if rErr == nil {
+					ab2, _ := ec.antibot.CheckResponse(
+						200, nil, rr2.HTML)
+					if ab2 == antibot.ReasonNone {
+						// Challenge passed — use re-rendered page.
+						fmt.Fprintf(os.Stderr,
+							"[wukong/antibot] Turnstile solved! "+
+								"continuing with real page.\n")
+						renderResult = rr2
+						goto processContent
+					}
+				}
+				fmt.Fprintf(os.Stderr,
+					"[wukong/antibot] Turnstile auto-solve failed. "+
+						"Try manually in visible Chrome.\n")
 			}
-			result.Error = msg
+			ec.opts.AntibotAutoEscalate = false
+			result.Error = "Cloudflare Turnstile blocked — " +
+				"headless Chrome cannot pass interactive JS " +
+				"challenges. Run: --no-headless " +
+				"--chrome-profile ./cf_data"
 			return result
 		}
 
@@ -803,6 +825,9 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 		return result
 	}
 
+	// Process page content after optional Turnstile auto-solve.
+processContent:
+
 	// Clean HTML with enhanced sanitization.
 	cleanOpts := sanitize.CleanOptions{
 		KeepNoscript:    false,
@@ -812,6 +837,32 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 			pageURL, time.Now().Format(time.RFC3339)),
 	}
 	cleanHTML, _ := sanitize.CleanHTMLWithOptions(renderResult.HTML, cleanOpts)
+
+	// SPA salvage: if the rendered DOM is nearly empty AND the above
+	// antibot check found no blocking, the site is likely a SPA that
+	// needs more settle time for async-loaded content.
+	if len(cleanHTML) < 300 && abReason == antibot.ReasonNone {
+		fmt.Fprintf(os.Stderr,
+			"[wukong/sanitize] %s: %d bytes — SPA? "+
+				"re-rendering with extended settle (5s)...\n",
+			pageURL, len(cleanHTML))
+
+		// Temporarily increase settle and re-render.
+		ec.browserPool.SetSettle(5 * time.Second)
+		renderResult2, rErr := ec.browserPool.Render(ctx, pageURL)
+		ec.browserPool.SetSettle(ec.opts.Settle) // Restore original.
+		if rErr == nil {
+			cleanHTML2, _ := sanitize.CleanHTMLWithOptions(
+				renderResult2.HTML, cleanOpts)
+			if len(cleanHTML2) > len(cleanHTML) {
+				fmt.Fprintf(os.Stderr,
+					"[wukong/sanitize] SPA re-render: %d → %d bytes\n",
+					len(cleanHTML), len(cleanHTML2))
+				cleanHTML = cleanHTML2
+				renderResult = renderResult2
+			}
+		}
+	}
 
 	// Determine local file path using deterministic mapping.
 	localRelPath := PageKey(ec.host, pageURL)
