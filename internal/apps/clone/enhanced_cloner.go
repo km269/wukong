@@ -206,7 +206,7 @@ func DefaultEnhancedOptions() EnhancedClonerOptions {
 		AssetWorkers:    8,
 		BrowserPages:    4,
 		Timeout:         60 * time.Second,
-		RenderTimeout:   30 * time.Second,
+		RenderTimeout:   60 * time.Second,
 		Settle:          1500 * time.Millisecond,
 		Traversal:       TraversalBFS,
 		RespectRobots:   true,
@@ -493,6 +493,10 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	abCfg := antibot.Config{
 		Enabled:      ec.opts.AntibotEnabled,
 		AutoEscalate: ec.opts.AntibotAutoEscalate,
+		InitialLevel: antibot.LevelNone,
+		MaxLevel:     antibot.LevelAggressive,
+		MaxRetries:   3,
+		Cooldown:     30 * time.Second,
 	}
 	if ec.opts.Stealth {
 		// If stealth is already enabled, start from LevelStealth

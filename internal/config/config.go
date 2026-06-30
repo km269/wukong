@@ -775,15 +775,36 @@ type AppsConfig struct {
 
 // CloneDefaults holds default values for website cloning operations.
 type CloneDefaults struct {
-	Workers        int  `mapstructure:"workers"`
-	AssetWorkers   int  `mapstructure:"asset_workers"`
-	Timeout        int  `mapstructure:"timeout"`
-	RespectRobots  bool `mapstructure:"respect_robots"`
-	DedupContent   bool `mapstructure:"dedup_content"`
-	MobileReadable bool `mapstructure:"mobile_readable"`
-	EnableResume   bool `mapstructure:"enable_resume"`
-	Incremental    bool `mapstructure:"incremental"`
-	CacheMaxAge    int  `mapstructure:"cache_max_age"`
+	MaxPages          int    `mapstructure:"max_pages"`
+	MaxDepth          int    `mapstructure:"max_depth"`
+	Traversal         string `mapstructure:"traversal"`
+	Subdomains        bool   `mapstructure:"subdomains"`
+	Workers           int    `mapstructure:"workers"`
+	AssetWorkers      int    `mapstructure:"asset_workers"`
+	BrowserPages      int    `mapstructure:"browser_pages"`
+	Timeout           int    `mapstructure:"timeout"`
+	RenderTimeout     int    `mapstructure:"render_timeout"`
+	Settle            int    `mapstructure:"settle"`
+	Scroll            bool   `mapstructure:"scroll"`
+	RespectRobots     bool   `mapstructure:"respect_robots"`
+	CrawlDelay        int    `mapstructure:"crawl_delay"`
+	NoSitemap         bool   `mapstructure:"no_sitemap"`
+	DedupContent      bool   `mapstructure:"dedup_content"`
+	MobileReadable    bool   `mapstructure:"mobile_readable"`
+	EnableResume      bool   `mapstructure:"enable_resume"`
+	Persist           bool   `mapstructure:"persist"`
+	Incremental       bool   `mapstructure:"incremental"`
+	CacheMaxAge       int    `mapstructure:"cache_max_age"`
+	Headless          bool   `mapstructure:"headless"`
+	Stealth           bool   `mapstructure:"stealth"`
+	ChromeProfile     string `mapstructure:"chrome_profile"`
+	ChromePath        string `mapstructure:"chrome_path"`
+	AntibotEnabled    bool   `mapstructure:"antibot_enabled"`
+	AntibotAutoEscalate bool `mapstructure:"antibot_auto_escalate"`
+	AssetSameDomain   bool   `mapstructure:"asset_same_domain"`
+	MaxAssetBytes     int64  `mapstructure:"max_asset_bytes"`
+	CookieFile        string `mapstructure:"cookie_file"`
+	UserAgent         string `mapstructure:"user_agent"`
 }
 
 // ARDConfig defines Agentic Resource Discovery settings for finding

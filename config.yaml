@@ -296,7 +296,7 @@ apps:
     # Anti-detection (all on by default)
     headless: true                          # --no-headless for visible window
     stealth: true                           # 13 JS + 11 Chrome flags
-    chrome_profile: "./wukong_chrome_profile"  # Persistent browser session
+    chrome_profile: ".wukong/chrome/profile"  # Persistent browser session
     chrome_path: ""                         # Empty = multi-platform auto-detect
     antibot_enabled: true                   # Auto-detect + escalate
     antibot_auto_escalate: true             # 5-level None→Flags→Stealth→Aggressive→Backoff

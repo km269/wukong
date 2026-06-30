@@ -180,9 +180,43 @@ func (m *Manager) CreateAppFromImport(
 // frontier-based resume, robots.txt compliance, sitemap discovery,
 // content deduplication, CSS rewriting, and mobile-friendly output.
 func (m *Manager) CloneApp(ctx context.Context, seedURL string, opts CloneOptions) (AppInfo, *CloneResult, error) {
-	// 构建增强克隆器选项
+	// Start from config file defaults, then override with CLI options.
 	eco := clone.DefaultEnhancedOptions()
+	dc := m.cfg.Clone
 
+	// ── Config file defaults (CloneDefaults → EnhancedClonerOptions) ──
+	if dc.MaxPages > 0 { eco.MaxPages = dc.MaxPages }
+	if dc.MaxDepth > 0 { eco.MaxDepth = dc.MaxDepth }
+	if dc.Traversal != "" { eco.Traversal = clone.TraversalMode(dc.Traversal) }
+	if dc.Subdomains { eco.Subdomains = true }
+	if dc.Scroll { eco.Scroll = true }
+	if dc.Workers > 0 { eco.Workers = dc.Workers }
+	if dc.AssetWorkers > 0 { eco.AssetWorkers = dc.AssetWorkers }
+	if dc.BrowserPages > 0 { eco.BrowserPages = dc.BrowserPages }
+	if dc.Timeout > 0 { eco.Timeout = time.Duration(dc.Timeout) * time.Second }
+	if dc.RenderTimeout > 0 { eco.RenderTimeout = time.Duration(dc.RenderTimeout) * time.Second }
+	if dc.Settle > 0 { eco.Settle = time.Duration(dc.Settle) * time.Millisecond }
+	if dc.RespectRobots { eco.RespectRobots = dc.RespectRobots }
+	if dc.CrawlDelay > 0 { eco.CrawlDelay = time.Duration(dc.CrawlDelay) * time.Millisecond }
+	if dc.NoSitemap { eco.NoSitemap = true }
+	if dc.DedupContent { eco.DedupContent = dc.DedupContent }
+	if dc.MobileReadable { eco.MobileReadable = dc.MobileReadable }
+	if dc.EnableResume { eco.EnableResume = dc.EnableResume }
+	if dc.Persist { eco.Persist = dc.Persist }
+	if dc.Incremental { eco.Incremental = dc.Incremental }
+	if dc.CacheMaxAge > 0 { eco.CacheMaxAge = time.Duration(dc.CacheMaxAge) * time.Second }
+	if dc.Headless { eco.Headless = dc.Headless }
+	if dc.Stealth { eco.Stealth = dc.Stealth }
+	if dc.ChromeProfile != "" { eco.ChromeProfile = dc.ChromeProfile }
+	if dc.ChromePath != "" { eco.ChromePath = dc.ChromePath }
+	if dc.AntibotEnabled { eco.AntibotEnabled = dc.AntibotEnabled }
+	if dc.AntibotAutoEscalate { eco.AntibotAutoEscalate = dc.AntibotAutoEscalate }
+	if dc.AssetSameDomain { eco.AssetSameDomain = dc.AssetSameDomain }
+	if dc.MaxAssetBytes > 0 { eco.MaxAssetBytes = dc.MaxAssetBytes }
+	if dc.CookieFile != "" { eco.CookieFile = dc.CookieFile }
+	if dc.UserAgent != "" { eco.UserAgent = dc.UserAgent }
+
+	// ── CLI overrides (CloneOptions → EnhancedClonerOptions) ──
 	if opts.MaxPages > 0 {
 		eco.MaxPages = opts.MaxPages
 	}

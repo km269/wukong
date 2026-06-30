@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -149,10 +150,14 @@ func (p *Pool) initBrowser() {
 		// Combined with non-headless mode, this allows Cloudflare
 		// Turnstile to be solved once manually and reused.
 		if p.opts.ProfileDir != "" {
+			absProfile, err := filepath.Abs(p.opts.ProfileDir)
+			if err != nil {
+				absProfile = p.opts.ProfileDir
+			}
 			allocOpts = append(allocOpts,
-				chromedp.UserDataDir(p.opts.ProfileDir))
+				chromedp.UserDataDir(absProfile))
 			fmt.Fprintf(os.Stderr,
-				"[wukong/browser] Chrome profile: %s\n", p.opts.ProfileDir)
+				"[wukong/browser] Chrome profile: %s\n", absProfile)
 		}
 
 		// Non-headless indicator.
