@@ -488,7 +488,7 @@ gateway:
     stream_card_enabled: true
     stream_card_update_interval: "500ms"
     max_message_length: 4096
-    enable_file_receive: false
+    enable_file_receive: true
 
   # --- WeCom / 企业微信 ---
   wecom:
