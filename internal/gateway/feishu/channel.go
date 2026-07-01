@@ -2,8 +2,15 @@
 // for the Wukong gateway. It handles:
 //   - URL challenge verification
 //   - HMAC-SHA256 request signature verification
-//   - Event callback parsing (text messages, etc.)
-//   - Message reply via passive response or streaming card
+//   - AES-256-CBC event body decryption
+//   - Event callback parsing (text, image, file messages)
+//   - Incremental streaming card replies via tenant_access_token
+//   - Proactive API reply via response_url (when available)
+//
+// The channel supports a "long connection" streaming mode where the
+// agent's response is incrementally displayed via Feishu message cards
+// that are periodically patched with new content as the LLM generates
+// tokens.
 package feishu
 
 import (
@@ -19,7 +26,6 @@ import (
 	"github.com/km269/wukong/internal/gateway"
 	"github.com/km269/wukong/internal/util"
 	"trpc.group/trpc-go/trpc-agent-go/event"
-	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 const (
@@ -31,8 +37,14 @@ const (
 )
 
 // FeishuChannel implements gateway.Channel for the Feishu/Lark
-// platform. It handles event subscription callbacks and URL
-// verification.
+// platform. It handles event subscription callbacks, URL verification,
+// and message processing with support for streaming card replies.
+//
+// Architecture:
+//   - crypto: Request signature verification and AES decryption
+//   - sender: Message reply with streaming card and API support via
+//     the official Lark OpenAPI SDK (larksuite/oapi-sdk-go/v3).
+//     The SDK handles tenant_access_token management automatically.
 type FeishuChannel struct {
 	cfg    *config.FeishuChannelConfig
 	loop   *agent.CoreLoop
@@ -98,10 +110,9 @@ func (fc *FeishuChannel) VerifyRequest(
 // ParseMessage converts a Feishu event callback JSON body into a
 // unified GatewayMessage.
 //
-// Supported message types:
-//   - text: Plain text messages (im.message.receive_v1)
-//   - Image and file messages are returned with ContentType set
-//     but Content is a placeholder description.
+// Supported event types:
+//   - im.message.receive_v1: text, image, file, audio, media messages
+//   - Other event types are returned as nil (ignored silently)
 func (fc *FeishuChannel) ParseMessage(
 	body []byte,
 ) (*gateway.GatewayMessage, error) {
@@ -120,6 +131,7 @@ func (fc *FeishuChannel) ParseMessage(
 }
 
 // parseEventCallback handles im.message.receive_v1 events.
+// Supports text, image, file, audio, and media message types.
 func (fc *FeishuChannel) parseEventCallback(
 	event *FeishuEvent,
 ) *gateway.GatewayMessage {
@@ -144,11 +156,37 @@ func (fc *FeishuChannel) parseEventCallback(
 	}
 	msg.ConversationID = ev.ChatID
 
-	// Extract text content.
+	// Feishu provides a response_url for certain interaction types
+	// (card actions, etc.). For standard im.message.receive_v1,
+	// response_url is not available; we use tenant_access_token
+	// for proactive replies instead.
+	if event.ResponseURL != "" {
+		msg.ResponseURL = event.ResponseURL
+	}
+
+	// Extract content based on message type.
 	switch ev.MsgType {
 	case "text":
 		content := extractTextContent(ev.Content)
 		msg.Content = strings.TrimSpace(content)
+
+	case "image":
+		msg.Content = fmt.Sprintf(
+			"[图片: %s]", ev.MessageID)
+
+	case "file":
+		if fc.cfg.EnableFileReceive {
+			msg.Content = fmt.Sprintf(
+				"[文件: %s]", ev.MessageID)
+		} else {
+			msg.Content = "[文件消息暂不支持]"
+		}
+
+	case "audio":
+		msg.Content = "[语音消息]"
+
+	case "media":
+		msg.Content = "[富媒体消息]"
 
 	default:
 		msg.Content = fmt.Sprintf(
@@ -182,9 +220,16 @@ func (fc *FeishuChannel) BuildSessionID(
 
 // SendReply processes agent events and sends the response back to
 // Feishu. It supports two modes:
-//   - Streaming card: When stream_card_enabled is true, creates a
-//     streaming card that updates incrementally.
-//   - Passive reply: Direct JSON response (fast but no streaming).
+//
+// Streaming card (StreamCardEnabled=true):
+//   Creates a message card via Feishu API, then periodically patches
+//   it with accumulated content as the LLM generates tokens. This
+//   provides a "long connection" streaming experience.
+//
+// Text reply (StreamCardEnabled=false):
+//   Collects all streaming content from the agent and sends a single
+//   text message via the Feishu Send Message API using
+//   tenant_access_token.
 func (fc *FeishuChannel) SendReply(
 	ctx context.Context,
 	msg *gateway.GatewayMessage,
@@ -194,12 +239,13 @@ func (fc *FeishuChannel) SendReply(
 		return fc.sender.SendStreamCard(ctx, msg, events)
 	}
 
-	// Fallback: collect all content and send as a single reply.
+	// Non-streaming mode: collect all content, send as single reply.
 	var builder strings.Builder
 	for evt := range events {
 		if evt.Error != nil {
-			return fmt.Errorf(
-				"feishu: agent error: %s", evt.Error.Message)
+			util.Logger.Warn("feishu: agent event error",
+				slog.String("error", evt.Error.Message))
+			continue
 		}
 		if evt.Response != nil &&
 			len(evt.Response.Choices) > 0 {
@@ -283,6 +329,3 @@ func (fc *FeishuChannel) handleURLVerification(
 
 // Ensure Channel interface compliance.
 var _ gateway.Channel = (*FeishuChannel)(nil)
-
-// Compile-time check for valid import.
-var _ = model.NewUserMessage("")

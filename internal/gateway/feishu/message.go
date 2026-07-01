@@ -19,6 +19,11 @@ type FeishuEvent struct {
 	// Challenge is only present in URL verification requests.
 	Challenge string `json:"challenge,omitempty"`
 	Token     string `json:"token,omitempty"`
+	// ResponseURL is provided by Feishu for certain event types
+	// (e.g., card action callbacks). When available, it allows
+	// sending a reply without a tenant_access_token.
+	// Not present in standard im.message.receive_v1 events.
+	ResponseURL string `json:"response_url,omitempty"`
 }
 
 // EventHeader contains event metadata.
@@ -124,6 +129,8 @@ func mustMarshal(v any) json.RawMessage {
 
 // truncateText truncates text to the specified max length, appending
 // "..." if truncated.
+//
+// Used by external code that relies on this utility.
 func truncateText(text string, maxLen int) string {
 	runes := []rune(text)
 	if len(runes) <= maxLen {

@@ -599,10 +599,16 @@ func (c *Cloner) handleNetworkResponse(ctx context.Context, ev network.EventResp
 }
 
 // fetchResourceBody fetches the body of a network resource.
+//
+// Deprecated: This legacy Cloner does not implement resource body
+// fetching. The Network.getResponseBody API requires additional
+// CDP permissions not available in this legacy codepath. Use
+// EnhancedCloner instead, which handles resource downloads via the
+// built-in download queue.
 func (c *Cloner) fetchResourceBody(ctx context.Context, requestID string) ([]byte, error) {
-	// 使用 Network.getResponseBody API
-	// 注意：这需要相应的权限
-	return nil, nil // 简化实现
+	return nil, fmt.Errorf(
+		"clone: fetchResourceBody not implemented in legacy " +
+			"Cloner; use EnhancedCloner instead")
 }
 
 // shouldDownloadResource determines if a resource should be downloaded.

@@ -12,6 +12,7 @@ require (
 	github.com/fsnotify/fsnotify v1.8.0
 	github.com/google/uuid v1.6.0
 	github.com/klauspost/compress v1.18.6
+	github.com/larksuite/oapi-sdk-go/v3 v3.9.7
 	github.com/liliang-cn/cortexdb/v2 v2.25.0
 	github.com/redis/go-redis/v9 v9.12.1
 	github.com/spf13/cobra v1.9.1

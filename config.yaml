@@ -68,7 +68,7 @@ providers:
   - name: "lmstudio"
     type: "lmstudio"
     api_key: "lmstudio"
-    base_url: "http://192.168.50.97:1234/v1"
+    base_url: "http://localhost:1234/v1"
     model: "google/gemma-4-26b-a4b"
 
   # ACP provider: connects to a remote ACP agent via MCP bridge.
@@ -247,7 +247,7 @@ cortex:
   db_path: "wukong.db"
   max_results: 10
   max_messages_per_session: 200
-  embedding_base_url: "http://192.168.50.97:1234"
+  embedding_base_url: "http://localhost:1234"
   embedding_api_key: "lmstudio"
   embedding_model: "qwen3-embedding-0.6b"
 
@@ -469,7 +469,7 @@ acp_mcp:
 # J5. Gateway — Multi-platform messaging channel (Feishu, WeCom, etc.)
 # ---------------------------------------------------------------------------
 gateway:
-  enabled: false                      # global gateway toggle
+  enabled: true                    # global gateway toggle
   address: ":9093"                   # HTTP listen address
   default_timeout: "120s"             # agent single-run timeout
   max_concurrent_sessions: 100        # max concurrent agent sessions
@@ -479,9 +479,10 @@ gateway:
 
   # --- Feishu / Lark ---
   feishu:
-    enabled: false
-    app_id: ""
+    enabled: true
+    app_id: "cli_aa98378746f8dcd7"
     app_secret: "${FEISHU_APP_SECRET}"
+    api_base: "https://open.feishu.cn/open-apis"    # or open.larksuite.com for Lark
     encrypt_key: "${FEISHU_ENCRYPT_KEY}"
     verification_token: "${FEISHU_VERIFICATION_TOKEN}"
     stream_card_enabled: true

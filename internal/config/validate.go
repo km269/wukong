@@ -204,5 +204,23 @@ func (c *WukongConfig) Warnings() []string {
 				"E2EE key exchange requires meta-protocol for capability negotiation")
 	}
 
+	if c.Gateway.Enabled {
+		if c.Gateway.Feishu.Enabled && c.Gateway.Feishu.AppID == "" {
+			warnings = append(warnings,
+				"gateway.feishu.enabled is true but app_id is empty; "+
+					"Feishu channel may fail to authenticate")
+		}
+		if c.Gateway.WeCom.Enabled && c.Gateway.WeCom.CorpID == "" {
+			warnings = append(warnings,
+				"gateway.wecom.enabled is true but corpid is empty; "+
+					"WeCom channel may fail to authenticate")
+		}
+		if !c.Gateway.Feishu.Enabled && !c.Gateway.WeCom.Enabled {
+			warnings = append(warnings,
+				"gateway.enabled is true but no channel (feishu/wecom) is enabled; "+
+					"Gateway will start with no active message channels")
+		}
+	}
+
 	return warnings
 }

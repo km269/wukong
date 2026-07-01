@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	cryptorand "crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/binary"
@@ -236,8 +237,6 @@ func pkcs7Unpad(data []byte, blockSize int) ([]byte, error) {
 //
 // followed by PKCS7 padding and AES-256-CBC encryption.
 //
-// TODO: Used for encrypted passive reply in enterprise app mode.
-//
 //nolint:unused
 func (wc *WeComCrypto) encryptMessage(msg []byte) (string, error) {
 	if !wc.HasCryptoEnabled() {
@@ -248,10 +247,12 @@ func (wc *WeComCrypto) encryptMessage(msg []byte) (string, error) {
 	const randomLen = 16
 	plaintext := make([]byte, randomLen+4+len(msg)+len(wc.corpID))
 
-	// Random prefix (use a deterministic prefix in production,
-	// here we use zeroes for simplicity; real impl should use
-	// crypto/rand).
-	copy(plaintext[:randomLen], make([]byte, randomLen))
+	// Cryptographic random prefix required by WeCom encryption
+	// protocol to prevent deterministic ciphertext.
+	if _, err := cryptorand.Read(plaintext[:randomLen]); err != nil {
+		return "", fmt.Errorf(
+			"wecom: generate random prefix: %w", err)
+	}
 
 	binary.BigEndian.PutUint32(
 		plaintext[randomLen:randomLen+4],

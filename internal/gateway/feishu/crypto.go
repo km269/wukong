@@ -1,6 +1,8 @@
 package feishu
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -13,8 +15,13 @@ import (
 	"github.com/km269/wukong/internal/config"
 )
 
-// FeishuCrypto handles signature verification and optional message
-// decryption for Feishu/Lark event callbacks.
+// FeishuCrypto handles signature verification and message decryption
+// for Feishu/Lark event callbacks.
+//
+// Feishu security mechanisms:
+//   - HMAC-SHA256 signature verification (all callbacks)
+//   - AES-256-CBC message body decryption (when encrypt_key configured)
+//   - Timestamp freshness check (anti-replay, 5-minute window)
 type FeishuCrypto struct {
 	appSecret         string
 	encryptKey        string
@@ -91,35 +98,126 @@ func (fc *FeishuCrypto) IsEncrypted(body []byte) bool {
 	return hasEncrypt
 }
 
-// Decrypt decrypts an encrypted Feishu event body using AES-256-CBC.
-// The encrypt key is the Base64-decoded value from app settings.
+// Decrypt decrypts an encrypted Feishu event body.
 //
-// Feishu encryption format:
-//   - Encrypt field: Base64(AES-256-CBC(plaintext))
-//   - IV is the first 16 bytes of the encrypt key (AES block size)
+// Feishu encryption scheme:
+//  1. The encrypt_key from Feishu app settings is used as the AES
+//     key (must be Base64-decoded to get 32 bytes for AES-256).
+//  2. The encrypted payload is Base64(AES-256-CBC(plaintext)).
+//  3. IV is the first 16 bytes of the decoded key.
+//  4. After decryption, strip the random 16-byte prefix from the
+//     plaintext.
+//  5. PKCS7 padding is removed to get the final JSON.
 //
-// Note: Full AES decryption requires padding removal and random prefix
-// stripping. This is a simplified implementation for non-encrypted
-// events. For encrypted events, configure the encrypt key properly.
+// Returns the decrypted JSON body as bytes.
 func (fc *FeishuCrypto) Decrypt(body []byte) ([]byte, error) {
-	// For now, encrypted events are not fully supported.
-	// Return the raw body and let the caller handle it.
-	var raw map[string]any
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, fmt.Errorf("feishu: unmarshal encrypted: %w",
-			err)
-	}
-
-	// If we have an encrypt field but no key configured, it's an
-	// error.
 	if fc.encryptKey == "" {
 		return nil, fmt.Errorf(
 			"feishu: encrypted event received but no encrypt_key configured")
 	}
 
-	// TODO: Implement full AES-256-CBC decryption when encryption
-	// is enabled on the Feishu app.
-	return body, nil
+	// Parse the encrypted wrapper.
+	var encrypted struct {
+		Encrypt string `json:"encrypt"`
+	}
+	if err := json.Unmarshal(body, &encrypted); err != nil {
+		return nil, fmt.Errorf(
+			"feishu: unmarshal encrypted wrapper: %w", err)
+	}
+	if encrypted.Encrypt == "" {
+		return nil, fmt.Errorf(
+			"feishu: encrypted field is empty")
+	}
+
+	// Decode the AES key from Base64.
+	aesKey, err := base64.StdEncoding.DecodeString(fc.encryptKey)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"feishu: decode encrypt_key: %w", err)
+	}
+	if len(aesKey) != 32 {
+		return nil, fmt.Errorf(
+			"feishu: invalid AES key length: %d (expected 32)",
+			len(aesKey))
+	}
+
+	// Decode the encrypted payload from Base64.
+	ciphertext, err := base64.StdEncoding.DecodeString(
+		encrypted.Encrypt)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"feishu: decode encrypted payload: %w", err)
+	}
+
+	// Create AES-256-CBC cipher.
+	// IV is the first 16 bytes of the AES key.
+	block, err := aes.NewCipher(aesKey)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"feishu: create AES cipher: %w", err)
+	}
+	if len(ciphertext) < aes.BlockSize {
+		return nil, fmt.Errorf(
+			"feishu: ciphertext too short: %d bytes",
+			len(ciphertext))
+	}
+	if len(ciphertext)%aes.BlockSize != 0 {
+		return nil, fmt.Errorf(
+			"feishu: ciphertext not block-aligned: %d bytes",
+			len(ciphertext))
+	}
+
+	iv := aesKey[:aes.BlockSize]
+	mode := cipher.NewCBCDecrypter(block, iv)
+
+	// Decrypt in-place.
+	plaintext := make([]byte, len(ciphertext))
+	mode.CryptBlocks(plaintext, ciphertext)
+
+	// Remove PKCS7 padding.
+	plaintext, err = pkcs7Unpad(plaintext)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"feishu: remove padding: %w", err)
+	}
+
+	// Feishu prepends a random 16-byte string to the plaintext.
+	// Strip it to get the actual JSON body.
+	if len(plaintext) < 16 {
+		return nil, fmt.Errorf(
+			"feishu: plaintext too short after decrypt: %d bytes",
+			len(plaintext))
+	}
+	plaintext = plaintext[16:]
+
+	return plaintext, nil
+}
+
+// pkcs7Unpad removes PKCS7 padding from the decrypted plaintext.
+func pkcs7Unpad(data []byte) ([]byte, error) {
+	if len(data) == 0 {
+		return nil, fmt.Errorf("pkcs7: empty data")
+	}
+	paddingLen := int(data[len(data)-1])
+	if paddingLen == 0 || paddingLen > aes.BlockSize {
+		return nil, fmt.Errorf(
+			"pkcs7: invalid padding length: %d", paddingLen)
+	}
+	if paddingLen > len(data) {
+		return nil, fmt.Errorf(
+			"pkcs7: padding larger than data: %d > %d",
+			paddingLen, len(data))
+	}
+
+	// Verify all padding bytes have the correct value.
+	for i := range paddingLen {
+		if data[len(data)-1-i] != byte(paddingLen) {
+			return nil, fmt.Errorf(
+				"pkcs7: invalid padding at offset %d", i)
+		}
+	}
+
+	return data[:len(data)-paddingLen], nil
 }
 
 // computeSignature generates the HMAC-SHA256 signature as a Base64
@@ -161,3 +259,5 @@ func abs(x int64) int64 {
 	}
 	return x
 }
+
+

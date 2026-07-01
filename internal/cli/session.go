@@ -998,7 +998,7 @@ func bootstrapSession(
 
 	// Create artifact service for file versioning (visualiser outputs, etc.)
 	// Supports inmemory (default) and cos (Tencent Cloud Object Storage).
-	artifactSvc, err := artifacts.NewService(&wukongCfg.ArtifactConfig)
+	artifactSvc, err := artifacts.NewService(&wukongCfg.Artifact)
 	if err != nil {
 		return nil, nil, nil,
 			fmt.Errorf("create artifact service: %w", err)

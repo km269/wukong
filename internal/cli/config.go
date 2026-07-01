@@ -232,11 +232,11 @@ func runFullValidation(cfg *config.WukongConfig) []string {
 	validArtifactBackends := map[string]bool{
 		"inmemory": true, "cos": true,
 	}
-	if !validArtifactBackends[cfg.ArtifactConfig.Backend] {
+	if !validArtifactBackends[cfg.Artifact.Backend] {
 		issues = append(issues,
 			fmt.Sprintf("unknown artifact backend %q; "+
 				"supported: inmemory, cos",
-				cfg.ArtifactConfig.Backend))
+				cfg.Artifact.Backend))
 	}
 
 	return issues

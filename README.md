@@ -37,7 +37,7 @@
 | **消息平台** | 企业微信 + 飞书 (Gateway 通道插件架构) |
 | **知识格式** | OKF v0.1: 6 包集成 (okf/ard/cortex/evolution/knowledge/skill) |
 | **Agent 互通** | ANP: DID 身份 / 能力协商 / E2EE 加密 / HTTP 签名 |
-| **配置系统** | 34 结构体 · 4级加载优先级 · 配置验证 · env var 展开 (8 类敏感字段) |
+| **配置系统** | 34 结构体 · 4级加载优先级 · 配置验证 · env var 展开 (9 类敏感字段) |
 | **存储** | 单文件 wukong.db (SQLite WAL) |
 
 ---
@@ -138,7 +138,7 @@ wukong config validate
 | defaults.go | 内置默认值 (按子系统分组, 13 个方法) |
 | validate.go | 配置验证 (致命错误) + Warnings() (非致命警告) |
 
-env var 展开覆盖 8 类敏感字段: providers API key, A2A remotes, Gateway channels, observability, artifact COS, ACPServer, CortexDB, Dify。
+env var 展开覆盖 9 类敏感字段: providers API key, A2A remotes, Gateway 飞书/企微, observability Langfuse, artifact COS, ACPServer, CortexDB, Dify。
 
 ---
 
@@ -147,7 +147,7 @@ env var 展开覆盖 8 类敏感字段: providers API key, A2A remotes, Gateway 
 | 文档 | 说明 |
 |------|------|
 | [架构哲学](docs/README.md) | 七大哲学 · 核心特性 · 数据流 |
-| [系统架构](docs/ARCHITECTURE.md) | 19 章架构 · 19 ADR · 模块依赖 |
+| [系统架构](docs/ARCHITECTURE.md) | 19 章架构 · 20 ADR · 模块依赖 |
 | [配置手册](docs/CONFIG.md) | 34 结构体 · 全字段 · 推荐方案 |
 | [CLI & TUI 架构](docs/CLI_TUI.md) | 命令树 · TUI 架构 · 启动序列 |
 | [Gateway 通道设计](docs/GATEWAY_CHANNEL_DESIGN.md) | 多平台消息通道架构 |

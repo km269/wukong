@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -183,16 +184,26 @@ func (s *RedisSessionService) DeleteSession(
 	_ ...session.Option,
 ) error {
 	pfx := sessKey(key)
-	keys, _ := s.client.Keys(ctx, pfx+"*").Result()
+	keys, err := s.client.Keys(ctx, pfx+"*").Result()
+	if err != nil {
+		slog.Warn("redis: list session keys failed",
+			"pfx", pfx, "error", err.Error())
+	}
 	if len(keys) > 0 {
 		if err := s.client.Del(ctx, keys...).Err(); err != nil {
 			return fmt.Errorf("redis delete session: %w", err)
 		}
 	}
-	_ = s.client.SRem(ctx, userSessionsKey(session.UserKey{
+	if err := s.client.SRem(ctx, userSessionsKey(session.UserKey{
 		AppName: key.AppName,
 		UserID:  key.UserID,
-	}), key.SessionID).Err()
+	}), key.SessionID).Err(); err != nil {
+		slog.Warn("redis: remove session from index failed",
+			"app", key.AppName,
+			"user", key.UserID,
+			"session", key.SessionID,
+			"error", err.Error())
+	}
 	return nil
 }
 
@@ -391,7 +402,12 @@ func (s *RedisSessionService) updateState(
 		return fmt.Errorf("redis update state: %w", err)
 	}
 	if s.ttl > 0 {
-		_ = s.client.Expire(ctx, redisKey, s.ttl).Err()
+		if err := s.client.Expire(ctx, redisKey, s.ttl).Err(); err != nil {
+			slog.Warn("redis: set session TTL failed",
+				"key", redisKey,
+				"ttl", s.ttl.String(),
+				"error", err.Error())
+		}
 	}
 	return nil
 }

@@ -403,6 +403,8 @@ func (l *Loader) setGatewayDefaults() {
 
 	// Feishu channel
 	l.v.SetDefault("gateway.feishu.enabled", false)
+	l.v.SetDefault("gateway.feishu.api_base",
+		"https://open.feishu.cn/open-apis")
 	l.v.SetDefault("gateway.feishu.stream_card_enabled", true)
 	l.v.SetDefault("gateway.feishu.stream_card_update_interval", "500ms")
 	l.v.SetDefault("gateway.feishu.max_message_length", 4096)

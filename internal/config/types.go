@@ -73,6 +73,11 @@ type FeishuChannelConfig struct {
 	// Supports ${ENV_VAR} expansion.
 	AppSecret string `mapstructure:"app_secret"`
 
+	// APIBase is the base URL for the Feishu/Lark Open API.
+	// Default: "https://open.feishu.cn/open-apis".
+	// For Lark (international), use "https://open.larksuite.com/open-apis".
+	APIBase string `mapstructure:"api_base"`
+
 	// EncryptKey is the event encryption key from Feishu app
 	// settings. Supports ${ENV_VAR} expansion.
 	EncryptKey string `mapstructure:"encrypt_key"`

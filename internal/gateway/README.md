@@ -233,10 +233,9 @@ func (f *FeishuChannel) BuildSessionID(msg *GatewayMessage) string {
 | 文件 | 行数 | 平台 | 特征 |
 |------|------|------|------|
 | `feishu/channel.go` | ~280 | 飞书 | JSON 回调 + HMAC-SHA256 + 流式卡片 |
-| `feishu/crypto.go` | ~90 | — | HMAC-SHA256 + SHA1 token 校验 |
-| `feishu/sender.go` | ~380 | — | REST API + 流式卡片更新 |
-| `feishu/message.go` | ~260 | — | 消息解析 + 内容提取 |
-| `feishu/token.go` | ~100 | — | tenant_access_token 缓存 |
+| `feishu/crypto.go` | ~260 | — | HMAC-SHA256 签名 + AES-256-CBC 解密 |
+| `feishu/sender.go` | ~570 | — | Lark SDK 消息发送 + 流式卡片更新 |
+| `feishu/message.go` | ~140 | — | 消息解析 + 内容提取 |
 | `wecom/channel.go` | ~270 | 企业微信 | AI Bot JSON / 企业应用 XML 双模式 |
 | `wecom/crypto.go` | ~270 | — | SHA1 签名 + AES-256-CBC + PKCS7 |
 | `wecom/sender.go` | ~280 | — | 被动回复 + 流式 aibot/stream API |

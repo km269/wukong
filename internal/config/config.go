@@ -30,11 +30,17 @@
 //
 // # Environment Variable Expansion
 //
-// API keys and secrets support ${ENV_VAR} syntax for runtime expansion.
-// This applies to:
+// API keys and secrets support ${ENV_VAR} syntax for runtime expansion
+// via expandSecrets(). This applies to:
 //   - providers[].api_key
-//   - summon.a2a_remotes[].api_key
-//   - summon.a2a_remotes[].jwt_secret
+//   - summon.a2a_remotes[].api_key, jwt_secret
+//   - gateway.feishu.app_secret, encrypt_key, verification_token
+//   - gateway.wecom.secret, token, encoding_aes_key
+//   - observability.langfuse_public_key, secret_key
+//   - artifact.cos_secret_id, cos_secret_key
+//   - acp_server.api_key
+//   - cortex.embedding_api_key
+//   - dify.api_secret
 package config
 
 import (
@@ -218,9 +224,9 @@ type WukongConfig struct {
 	// Eval configures the evaluation/regression testing system.
 	Eval EvalConfig `mapstructure:"eval"`
 
-	// ArtifactConfig configures artifact storage backend
+	// Artifact configures artifact storage backend
 	// settings.
-	ArtifactConfig ArtifactConfig `mapstructure:"artifact"`
+	Artifact ArtifactConfig `mapstructure:"artifact"`
 
 	// Observability configures enhanced observability
 	// (Langfuse, etc.).
@@ -299,6 +305,64 @@ func NewLoader(configPath string) (*Loader, error) {
 	return l, nil
 }
 
+// expandSecrets expands ${ENV_VAR} references in all secret fields
+// that support environment variable injection. This is a security
+// measure that keeps secrets out of config files and version control.
+func (l *Loader) expandSecrets(cfg *WukongConfig) {
+	// Provider API keys.
+	for i := range cfg.Providers {
+		cfg.Providers[i].APIKey = os.ExpandEnv(cfg.Providers[i].APIKey)
+	}
+
+	// A2A remote secrets.
+	for i := range cfg.Summon.A2ARemotes {
+		cfg.Summon.A2ARemotes[i].APIKey =
+			os.ExpandEnv(cfg.Summon.A2ARemotes[i].APIKey)
+		cfg.Summon.A2ARemotes[i].JWTSecret =
+			os.ExpandEnv(cfg.Summon.A2ARemotes[i].JWTSecret)
+	}
+
+	// Gateway Feishu channel secrets.
+	cfg.Gateway.Feishu.AppSecret =
+		os.ExpandEnv(cfg.Gateway.Feishu.AppSecret)
+	cfg.Gateway.Feishu.EncryptKey =
+		os.ExpandEnv(cfg.Gateway.Feishu.EncryptKey)
+	cfg.Gateway.Feishu.VerificationToken =
+		os.ExpandEnv(cfg.Gateway.Feishu.VerificationToken)
+
+	// Gateway WeCom channel secrets.
+	cfg.Gateway.WeCom.Secret =
+		os.ExpandEnv(cfg.Gateway.WeCom.Secret)
+	cfg.Gateway.WeCom.Token =
+		os.ExpandEnv(cfg.Gateway.WeCom.Token)
+	cfg.Gateway.WeCom.EncodingAESKey =
+		os.ExpandEnv(cfg.Gateway.WeCom.EncodingAESKey)
+
+	// Observability (Langfuse) secrets.
+	cfg.Observability.LangfusePublicKey =
+		os.ExpandEnv(cfg.Observability.LangfusePublicKey)
+	cfg.Observability.LangfuseSecretKey =
+		os.ExpandEnv(cfg.Observability.LangfuseSecretKey)
+
+	// Artifact COS credentials.
+	cfg.Artifact.COSSecretID =
+		os.ExpandEnv(cfg.Artifact.COSSecretID)
+	cfg.Artifact.COSSecretKey =
+		os.ExpandEnv(cfg.Artifact.COSSecretKey)
+
+	// ACP Server API key.
+	cfg.ACPServer.APIKey =
+		os.ExpandEnv(cfg.ACPServer.APIKey)
+
+	// CortexDB embedding API key.
+	cfg.Cortex.EmbeddingAPIKey =
+		os.ExpandEnv(cfg.Cortex.EmbeddingAPIKey)
+
+	// Dify API secret.
+	cfg.Dify.APISecret =
+		os.ExpandEnv(cfg.Dify.APISecret)
+}
+
 // Load parses the configuration into a WukongConfig.
 // Results are cached; subsequent calls return the same instance.
 func (l *Loader) Load() (*WukongConfig, error) {
@@ -311,56 +375,8 @@ func (l *Loader) Load() (*WukongConfig, error) {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
 
-	// Expand ${ENV_VAR} references in API keys.
-	for i := range cfg.Providers {
-		cfg.Providers[i].APIKey = os.ExpandEnv(cfg.Providers[i].APIKey)
-	}
-
-	// Expand env vars in A2A remote secrets.
-	for i := range cfg.Summon.A2ARemotes {
-		cfg.Summon.A2ARemotes[i].APIKey =
-			os.ExpandEnv(cfg.Summon.A2ARemotes[i].APIKey)
-		cfg.Summon.A2ARemotes[i].JWTSecret =
-			os.ExpandEnv(cfg.Summon.A2ARemotes[i].JWTSecret)
-	}
-
-	// Expand env vars in gateway channel secrets.
-	cfg.Gateway.Feishu.AppSecret =
-		os.ExpandEnv(cfg.Gateway.Feishu.AppSecret)
-	cfg.Gateway.Feishu.EncryptKey =
-		os.ExpandEnv(cfg.Gateway.Feishu.EncryptKey)
-	cfg.Gateway.Feishu.VerificationToken =
-		os.ExpandEnv(cfg.Gateway.Feishu.VerificationToken)
-	cfg.Gateway.WeCom.Secret =
-		os.ExpandEnv(cfg.Gateway.WeCom.Secret)
-	cfg.Gateway.WeCom.Token =
-		os.ExpandEnv(cfg.Gateway.WeCom.Token)
-	cfg.Gateway.WeCom.EncodingAESKey =
-		os.ExpandEnv(cfg.Gateway.WeCom.EncodingAESKey)
-
-	// Expand env vars in observability secrets.
-	cfg.Observability.LangfusePublicKey =
-		os.ExpandEnv(cfg.Observability.LangfusePublicKey)
-	cfg.Observability.LangfuseSecretKey =
-		os.ExpandEnv(cfg.Observability.LangfuseSecretKey)
-
-	// Expand env vars in artifact COS credentials.
-	cfg.ArtifactConfig.COSSecretID =
-		os.ExpandEnv(cfg.ArtifactConfig.COSSecretID)
-	cfg.ArtifactConfig.COSSecretKey =
-		os.ExpandEnv(cfg.ArtifactConfig.COSSecretKey)
-
-	// Expand env vars in ACPServer API key.
-	cfg.ACPServer.APIKey =
-		os.ExpandEnv(cfg.ACPServer.APIKey)
-
-	// Expand env vars in CortexDB embedding API key.
-	cfg.Cortex.EmbeddingAPIKey =
-		os.ExpandEnv(cfg.Cortex.EmbeddingAPIKey)
-
-	// Expand env vars in Dify API secret.
-	cfg.Dify.APISecret =
-		os.ExpandEnv(cfg.Dify.APISecret)
+	// Expand ${ENV_VAR} references in all secret fields.
+	l.expandSecrets(&cfg)
 
 	l.config = &cfg
 	return l.config, nil

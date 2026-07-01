@@ -316,7 +316,7 @@ providers api_key, A2A remotes, Gateway channels (app_secret/encrypt_key/token/e
 
 | 文档 | 说明 |
 |------|------|
-| [系统架构](ARCHITECTURE.md) | 19 章架构、19 ADR、模块依赖、数据流 |
+| [系统架构](ARCHITECTURE.md) | 19 章架构、20 ADR、模块依赖、数据流 |
 | [配置手册](CONFIG.md) | 34 结构体、全字段、推荐方案 |
 | [CLI & TUI 架构](CLI_TUI.md) | 命令树、TUI Elm 架构、8阶段启动 |
 | [Gateway 通道设计](GATEWAY_CHANNEL_DESIGN.md) | 多平台消息通道架构 |

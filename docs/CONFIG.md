@@ -20,7 +20,7 @@
 
 ## env var 展开
 
-`${ENV_VAR}` 语法, 运行时自动展开。覆盖 8 类敏感字段:
+`${ENV_VAR}` 语法, 运行时自动展开。覆盖 9 类敏感字段:
 
 | 类别 | 字段 |
 |------|------|
@@ -64,6 +64,9 @@
 - okf.enrichment_enabled 但无 default_provider
 - anp.enabled 但 did_domain 为空
 - anp.e2ee_enabled 但 meta_protocol 未启用
+- gateway.feishu.enabled 但 app_id 为空
+- gateway.wecom.enabled 但 corpid 为空
+- gateway.enabled 但无任何 channel 激活
 
 ---
 
