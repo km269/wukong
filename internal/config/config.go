@@ -168,6 +168,11 @@ type WukongConfig struct {
   // Summon configures sub-agent delegation and A2A remotes.
   Summon SummonConfig `mapstructure:"summon"`
 
+  // ANP configures Agent Network Protocol (ANP) support
+  // including W3C DID identity, meta-protocol capability
+  // negotiation, E2EE encryption, and RFC 9421 HTTP signing.
+  ANP ANPConfig `mapstructure:"anp"`
+
   // Skill configures the tRPC Agent Skill repository system.
   Skill SkillConfig `mapstructure:"skill"`
 

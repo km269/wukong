@@ -250,8 +250,19 @@ func (l *Loader) setOrchestrationDefaults() {
   l.v.SetDefault("skill.auto_load", true)
   l.v.SetDefault("skill.max_skills", 20)
 
-  // Evolution
-  l.v.SetDefault("evolution.enabled", false)
+  // ANP
+  l.v.SetDefault("anp.enabled", false)
+  l.v.SetDefault("anp.port", 9092)
+  l.v.SetDefault("anp.discovery_enabled", true)
+  l.v.SetDefault("anp.meta_protocol_enabled", true)
+  l.v.SetDefault("anp.http_sign_enabled", true)
+  l.v.SetDefault("anp.e2ee_enabled", true)
+  l.v.SetDefault("anp.a2a_enabled", true)
+  l.v.SetDefault("anp.mcp_enabled", true)
+  l.v.SetDefault("anp.agui_enabled", true)
+
+	// Evolution
+	l.v.SetDefault("evolution.enabled", false)
   l.v.SetDefault("evolution.auto_patch", false)
   l.v.SetDefault("evolution.analysis_provider", "")
   l.v.SetDefault("evolution.analysis_model", "")

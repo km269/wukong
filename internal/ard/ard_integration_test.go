@@ -154,7 +154,7 @@ func TestRegisterA2AAgent(t *testing.T) {
 // returns nil when the port is 0 (disabled).
 func TestPublishAndServe_NilWhenDisabled(t *testing.T) {
 	ctx := context.Background()
-	srv, err := PublishAndServe(ctx, 0, "")
+	srv, err := PublishAndServe(ctx, 0, "", nil)
 	if err != nil {
 		t.Fatalf("PublishAndServe(0) error = %v", err)
 	}

@@ -116,6 +116,22 @@ func (c *WukongConfig) Validate() error {
     }
   }
 
+  // Validate ANP config.
+  if c.ANP.Enabled {
+    if c.ANP.Port < 0 || c.ANP.Port > 65535 {
+      return fmt.Errorf(
+        "anp.port %d is out of valid range [0, 65535]",
+        c.ANP.Port,
+      )
+    }
+    if c.ANP.MetaProtocolEnabled && c.ANP.Port <= 0 {
+      return fmt.Errorf(
+        "anp.meta_protocol_enabled requires a valid port (> 0), got %d",
+        c.ANP.Port,
+      )
+    }
+  }
+
   return nil
 }
 
@@ -174,6 +190,18 @@ func (c *WukongConfig) Warnings() []string {
     warnings = append(warnings,
       "okf.enrichment_enabled is true but no default_provider is set; "+
         "LLM-driven enrichment will use deterministic fallback")
+  }
+
+  if c.ANP.Enabled && c.ANP.DIDDomain == "" {
+    warnings = append(warnings,
+      "anp.enabled is true but did_domain is empty; "+
+        "DID identity will fall back to os.Hostname()")
+  }
+
+  if c.ANP.E2EEEnabled && !c.ANP.MetaProtocolEnabled {
+    warnings = append(warnings,
+      "anp.e2ee_enabled is true but meta_protocol_enabled is false; "+
+        "E2EE key exchange requires meta-protocol for capability negotiation")
   }
 
   return warnings

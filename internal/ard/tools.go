@@ -215,14 +215,29 @@ func (ts *ToolSet) ExportCatalog() ([]byte, error) {
 	return json.MarshalIndent(ts.manager.GetCatalog(), "", "  ")
 }
 
+// ANPPublishOptions configures ANP features for registry publishing.
+// When ANP is enabled, the registry server additionally exposes:
+//   - /.well-known/agent-descriptions (ActivityStreams CollectionPage)
+//   - /agents/{name}/ad.json (ADP documents)
+type ANPPublishOptions struct {
+	// Enabled controls ANP discovery endpoints.
+	Enabled bool
+	// BaseURL is the public base URL of the registry server,
+	// used in ADP document self-references.
+	BaseURL string
+}
+
 // PublishAndServe creates an ARD Registry, injects Wukong built-in
 // entries, and starts a RegistryServer on the configured port so
 // that other ARD-compatible AI Agents can discover Wukong.
 //
 // The returned RegistryServer can be shut down with Shutdown(ctx).
 // If publishPort is 0, no server is started and nil is returned.
+//
+// When anpOpts is non-nil and Enabled=true, the server also exposes
+// ANP discovery endpoints (ADP documents + agent descriptions).
 func PublishAndServe(ctx context.Context, publishPort int,
-	catalogPath string) (*RegistryServer, error) {
+	catalogPath string, anpOpts *ANPPublishOptions) (*RegistryServer, error) {
 	if publishPort <= 0 {
 		return nil, nil
 	}
@@ -237,6 +252,21 @@ func PublishAndServe(ctx context.Context, publishPort int,
 	}
 
 	server := NewRegistryServer(r, config)
+
+	// Register ANP discovery endpoints if enabled.
+	if anpOpts != nil && anpOpts.Enabled {
+		adpCfg := DefaultADPBuildConfig()
+		adpBuilder := NewUnsignedADPBuilder(adpCfg)
+		anpCfg := &ANPDiscoveryConfig{
+			Registry:   r,
+			ADPBuilder: adpBuilder,
+			BaseURL:    anpOpts.BaseURL,
+			PageSize:   50,
+		}
+		anpHandler := NewANPDiscoveryHandler(anpCfg)
+		server.WithANPDiscovery(anpHandler)
+	}
+
 	go func() {
 		util.Logger.Info("ard: registry server starting",
 			"port", publishPort,

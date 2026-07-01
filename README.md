@@ -2,8 +2,8 @@
 
 > 本地优先、框架组装、可深度扩展的开源 AI Agent 平台
 >
-> Go 1.26 | 233 `.go` (52 `_test.go`) | 29 内部包 | 45 配置结构体
-> CLI: 28 + 55+ 子命令 | 依赖: 29 direct + 105 indirect
+> Go 1.26 | 241 `.go` (52 `_test.go`) | 29 内部包 + 2 公共包 | 45 配置结构体
+> CLI: 28 顶层 + 55+ 子命令 | 依赖: 29 direct + 105 indirect
 
 ---
 
@@ -16,6 +16,7 @@
 | **多 Agent 原生** | 编排是第一公民 | 10 种显式编排模式 + HITL 人机协同 |
 | **进化智能** | 技能应从失败中学习 | LLM 分析 → 自动补丁 → 版本管理 → 热重载 |
 | **双向发现** | 发现别人，也被人发现 | ARD: 联邦搜索 + RegistryServer 发布 |
+| **开放互通** | 标准化协议促进生态互通 | ANP: DID 身份 + 能力协商 + E2EE 加密 |
 | **知识标准化** | 知识应有标准形状 | OKF v0.1: Markdown + YAML frontmatter 知识包 |
 
 ---
@@ -24,19 +25,37 @@
 
 | 维度 | 方案 |
 |------|------|
-| **代码规模** | 233 `.go` (52 `_test.go`) / 29 内部包 / 2 公共包 |
+| **代码规模** | 241 `.go` (52 `_test.go`) / 29 内部包 + 2 公共包 |
 | **编排模式** | 10 种：single / chain / parallel / cycle / graph / team_* / claude_code / codex / dify |
 | **LLM 后端** | 7 种：OpenAI / Anthropic / Google / DeepSeek / Ollama / LMStudio / ACP |
 | **记忆系统** | 双引擎三层：tRPC Memory × CortexDB (HNSW+FTS5+RDF) |
 | **安全防御** | 5 层纵深：Guard → goja JS 沙箱 → OS 沙箱 → `.wukongignore` → OS 权限 |
 | **网站克隆** | Chrome 渲染 → Settle 等待 → DOM 清理 → 单次遍历重写+发现 → 资源过滤 → 去重 → 断点续抓 → 多格式打包 |
-| **反反爬** | 5 层：Stealth (默认) → preflight (HEAD) → Antibot 5级升级 → cf_clearance 提取 → 161 UA 池 |
+| **反反爬** | 10 层：Stealth / Preflight / Antibot 5级升级 / cf_clearance / 161 UA 池 / sec-ch-ua / Referer / ErrNotHTML 路由 / Settle 网络空闲等待 |
 | **ZIM 打包** | Kiwix 兼容 (ZIM v6, zstd 编码 5)：元数据 + 图标 + 计数器 + 增量集群缓存 |
 | **扩展体系** | 12 内置扩展 + MCP Broker + ACP MCP Bridge |
-| **多协议** | A2A (:9090) / ACP (:9091) / AG-UI SSE (:8080) / ACP MCP (:3400) |
+| **多协议** | 5 协议：A2A (:9090) / ACP (:9091) / AG-UI SSE (:8080) / ACP MCP (:3400) / ANP (:9092) |
 | **知识格式** | OKF v0.1: 6 包集成 (okf/ard/cortex/evolution/knowledge/skill) |
-| **配置系统** | 45 结构体 · ~350 字段 · 4级加载优先级 · 配置验证 · 环境变量展开 |
+| **Agent 互通** | ANP: DID 身份 / 能力协商 / E2EE 加密 / HTTP 签名 |
+| **配置系统** | 45 结构体 · ~358 字段 · 4级加载优先级 · 配置验证 · 环境变量展开 |
 | **存储** | 单文件 `wukong.db` (SQLite WAL) |
+
+---
+
+## ANP — Agent Network Protocol
+
+Wukong 实现了 ANP (Agent Network Protocol) 协议栈，使 Agent 之间能够进行标准化的互通：
+
+| 组件 | 包 | 功能 |
+|------|---|------|
+| **DID 身份** | `internal/ard/did.go` | did:wba 方法：Ed25519 签名 + X25519 密钥交换 |
+| **ADP 发现** | `internal/ard/adp.go` + `anp_discovery.go` | Agent Description Protocol 文档 + 发现端点 |
+| **Meta-Protocol** | `internal/summon/meta_protocol.go` | JSON-RPC 2.0 能力协商引擎 |
+| **E2EE 加密** | `internal/summon/e2ee.go` | X25519 + ChaCha20-Poly1305 端到端加密 |
+| **HTTP 签名** | `internal/ard/http_sign.go` | RFC 9421 HTTP 消息签名 |
+| **A2A 桥接** | `internal/summon/anp_adapter.go` | JSON-RPC 2.0 → A2A 协议适配器 |
+
+**服务端点**：ANP HTTP Server 默认监听 `:9092`，注册 `/anp/meta-protocol` (JSON-RPC 2.0 POST) 和 `/anp/capabilities` (GET)。
 
 ---
 
@@ -115,6 +134,7 @@ docker run --rm -v ./out:/out wukong apps clone https://example.com
 | Agent 框架 | tRPC-Agent-Go | v1.10.0 | Agent 编排 |
 | MCP 协议 | tRPC-MCP-Go | v0.0.16 | 模型上下文协议 |
 | A2A 协议 | tRPC-A2A-Go | v0.2.5 | Agent 间通信 |
+| Agent 互通 | ANP (Agent Network Protocol) | — | DID + 能力协商 + E2EE |
 | 记忆引擎 | CortexDB | v2.25.0 | HNSW+FTS5+RDF |
 | 知识格式 | OKF (Open Knowledge Format) | v0.1 | 知识标准化 |
 | CLI | Cobra + Viper | v1.9.1 / v1.20.1 | 命令行 |
@@ -140,9 +160,9 @@ docker run --rm -v ./out:/out wukong apps clone https://example.com
 | 文件 | 职责 |
 |------|------|
 | `config.go` | 根结构体 `WukongConfig` + `Loader` + 查询方法 |
-| `types.go` | 所有子配置结构体定义 (44 个) |
-| `defaults.go` | 内置默认值 (按子系统分组) |
-| `validate.go` | 配置验证 + 非致命警告 |
+| `types.go` | 45 个子配置结构体定义 |
+| `defaults.go` | 内置默认值（按子系统分组，12 个方法） |
+| `validate.go` | 配置验证 (致命错误) + `Warnings()` (非致命警告) |
 
 环境变量支持 `${ENV_VAR}` 语法，运行时自动展开 API 密钥等敏感字段。
 
@@ -163,8 +183,8 @@ docker run --rm -v ./out:/out wukong apps clone https://example.com
 
 | 文档 | 说明 |
 |------|------|
-| [架构哲学](docs/README.md) | 六大哲学 · 核心特性 · 数据流 |
-| [系统架构](docs/ARCHITECTURE.md) | 17 章架构 · 18 ADR · 模块依赖 |
+| [架构哲学](docs/README.md) | 七大哲学 · 核心特性 · 数据流 |
+| [系统架构](docs/ARCHITECTURE.md) | 19 章架构 · 19 ADR · 模块依赖 |
 | [配置手册](docs/CONFIG.md) | 45 结构体 · 全字段 · 推荐方案 |
 | [变更日志](CHANGELOG.md) | 版本历史 |
 

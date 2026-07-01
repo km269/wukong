@@ -778,6 +778,59 @@ type A2ARemoteConfig struct {
   OAuthClientSecret string `mapstructure:"oauth_client_secret"`
 }
 
+// ANPConfig defines Agent Network Protocol (ANP) integration
+// settings. ANP enables W3C DID-based identity, multi-protocol
+// capability discovery, E2EE messaging, and JSON-RPC 2.0
+// agent-to-agent communication.
+//
+// When enabled, Wukong exposes:
+//   - ADP (Agent Description Protocol) documents for unified
+//     capability description
+//   - Meta-protocol endpoints for capability negotiation
+//     (JSON-RPC 2.0 over HTTP on port)
+//   - DID documents for cryptographic identity
+//     (did:wba:domain:path, Ed25519 + X25519)
+//   - HTTP message signing for request integrity (RFC 9421)
+//   - E2EE encrypted agent-to-agent messaging
+//     (X25519 + ChaCha20-Poly1305)
+type ANPConfig struct {
+  // Enabled enables ANP protocol support. Default: false.
+  Enabled bool `mapstructure:"enabled"`
+  // DIDDomain is the domain part of the did:wba identifier
+  // (e.g. "wukong.example.com"). Default: os.Hostname().
+  DIDDomain string `mapstructure:"did_domain"`
+  // DIDPath is the optional path suffix for the DID
+  // (e.g. "/agents/wukong").
+  DIDPath string `mapstructure:"did_path"`
+  // Port is the listen port for the ANP meta-protocol HTTP
+  // server that serves capability negotiation and E2EE relay
+  // endpoints. Default: 9092.
+  Port int `mapstructure:"port"`
+  // DiscoveryEnabled exposes .well-known/agent-descriptions
+  // and /agents/{name}/ad.json endpoints. Default: true.
+  DiscoveryEnabled bool `mapstructure:"discovery_enabled"`
+  // MetaProtocolEnabled enables JSON-RPC 2.0 meta-protocol
+  // for capability negotiation. Default: true.
+  MetaProtocolEnabled bool `mapstructure:"meta_protocol_enabled"`
+  // HTTPSignEnabled enables RFC 9421 HTTP message signing
+  // for outgoing agent requests. Default: true.
+  HTTPSignEnabled bool `mapstructure:"http_sign_enabled"`
+  // E2EEEnabled enables X25519+ChaCha20-Poly1305 end-to-end
+  // encryption for agent-to-agent messages. Default: true.
+  E2EEEnabled bool `mapstructure:"e2ee_enabled"`
+  // A2AEnabled autocreates an A2A Server card for ANP
+  // discovery when the A2A server is enabled. Default: true.
+  A2AEnabled bool `mapstructure:"a2a_enabled"`
+  // MCPEnabled autocreates an MCP Server card for ANP
+  // discovery when the ACP MCP bridge is enabled.
+  // Default: true.
+  MCPEnabled bool `mapstructure:"mcp_enabled"`
+  // AGUIEnabled autocreates an AG-UI Server card for ANP
+  // discovery when the AG-UI server is enabled.
+  // Default: true.
+  AGUIEnabled bool `mapstructure:"agui_enabled"`
+}
+
 // SkillConfig defines the tRPC Agent Skill repository system
 // settings.
 type SkillConfig struct {

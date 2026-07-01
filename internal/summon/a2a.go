@@ -77,21 +77,48 @@ type A2AServerConfig struct {
 
 // NewA2AServer creates an A2A server using tRPC-Agent-Go's
 // official server/a2a package.
+//
+// The tRPC-A2A-Go API has two modes:
+//  1. WithAgent(agent, streaming) — auto-creates a Runner; must
+//     NOT be combined with WithRunner.
+//  2. WithAgentCard(card) + WithRunner(runner) — manually provides
+//     a Runner with an AgentCard for discovery metadata.
+//
+// When a Runner is provided (shared with the main agent loop),
+// we use mode 2 to avoid the conflict. Otherwise, mode 1 is used
+// for standalone A2A servers.
 func NewA2AServer(cfg *A2AServerConfig) (*A2AServer, error) {
 	if cfg.Agent == nil {
 		return nil, fmt.Errorf("agent is required for A2A server")
 	}
 
 	var opts []a2aserver.Option
-	opts = append(opts,
-		a2aserver.WithAgent(cfg.Agent, cfg.Streaming),
-		a2aserver.WithHost(cfg.Host),
-	)
 
-	// Use provided Runner, or create one automatically.
 	if cfg.Runner != nil {
-		opts = append(opts, a2aserver.WithRunner(cfg.Runner))
+		// Mode 2: AgentCard + Runner (shared runner mode).
+		// Build an AgentCard from config metadata so the server
+		// can advertise its capabilities for A2A discovery.
+		agentCard, err := a2aserver.NewAgentCard(
+			cfg.Name, cfg.Description, cfg.Host, cfg.Streaming,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"create agent card: %w", err)
+		}
+
+		opts = append(opts,
+			a2aserver.WithAgentCard(agentCard),
+			a2aserver.WithRunner(cfg.Runner),
+			a2aserver.WithHost(cfg.Host),
+		)
+	} else {
+		// Mode 1: Agent only (auto-creates Runner internally).
+		opts = append(opts,
+			a2aserver.WithAgent(cfg.Agent, cfg.Streaming),
+			a2aserver.WithHost(cfg.Host),
+		)
 	}
+
 	if cfg.SessionService != nil {
 		opts = append(opts,
 			a2aserver.WithSessionService(cfg.SessionService))

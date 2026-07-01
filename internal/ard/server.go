@@ -14,10 +14,11 @@ import (
 
 // RegistryServer provides the ARD HTTP API endpoints.
 type RegistryServer struct {
-	registry *Registry
-	config   *RegistryConfig
-	server   *http.Server
-	mux      *http.ServeMux
+	registry    *Registry
+	config      *RegistryConfig
+	server      *http.Server
+	mux         *http.ServeMux
+	anpHandler  *ANPDiscoveryHandler
 }
 
 // NewRegistryServer creates a new registry server.
@@ -29,6 +30,16 @@ func NewRegistryServer(registry *Registry, config *RegistryConfig) *RegistryServ
 	}
 	
 	s.setupRoutes()
+	return s
+}
+
+// WithANPDiscovery registers an ANP discovery handler on this
+// registry server. Call before Start() to enable ANP-compatible
+// discovery endpoints (/.well-known/agent-descriptions and
+// /agents/{name}/ad.json).
+func (s *RegistryServer) WithANPDiscovery(handler *ANPDiscoveryHandler) *RegistryServer {
+	s.anpHandler = handler
+	handler.RegisterRoutes(s.mux)
 	return s
 }
 

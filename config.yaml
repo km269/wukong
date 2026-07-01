@@ -66,7 +66,7 @@ providers:
   - name: "lmstudio"
     type: "lmstudio"
     api_key: "lmstudio"
-    base_url: "http://localhost:1234/v1"
+    base_url: "http://192.168.50.97:1234/v1"
     model: "google/gemma-4-26b-a4b"
 
   # ACP provider: connects to a remote ACP agent via MCP bridge.
@@ -405,7 +405,35 @@ summon:
   a2a_remotes: []                    # list of A2ARemoteConfig
 
 # ---------------------------------------------------------------------------
-# 21. Skill — tRPC Agent Skill repository
+# 21. ANP — Agent Network Protocol (DID + Meta-Protocol + E2EE + HTTP Sign)
+# ---------------------------------------------------------------------------
+# ANP enables interoperable agent-to-agent communication via
+# W3C DID-based identity (did:wba), capability discovery (ADP),
+# encrypted messaging (E2EE), and RFC 9421 request signing.
+#
+# When enabled, Wukong starts an HTTP server on `port` and exposes:
+#   - /anp/meta-protocol    — JSON-RPC 2.0 capability negotiation
+#   - /anp/capabilities     — GET endpoint for capability cards
+#   - DID Document          — cryptographic keys + service endpoints
+#
+# Protocol stack dependencies:
+#   DID → MetaProtocol → E2EE (key exchange via meta-protocol)
+#   HTTP Sign is independent and signs all outgoing ANP requests
+anp:
+  enabled: false                            # enable ANP protocol stack
+  # did_domain: "wukong.example.com"        # domain for did:wba identity (default: os.Hostname())
+  # did_path: "/agents/wukong"              # path suffix for DID (default: "/agents/<agent_name>")
+  port: 9092                                # ANP meta-protocol HTTP server port
+  discovery_enabled: true                   # expose ADP discovery endpoints (.well-known/agent-descriptions)
+  meta_protocol_enabled: true               # enable JSON-RPC 2.0 capability negotiation
+  http_sign_enabled: true                   # enable RFC 9421 HTTP message signing
+  e2ee_enabled: true                        # enable X25519+ChaCha20-Poly1305 E2EE encryption
+  a2a_enabled: true                         # auto-create A2A Server card for ANP discovery
+  mcp_enabled: true                         # auto-create MCP Server card for ANP discovery
+  agui_enabled: true                        # auto-create AG-UI Server card for ANP discovery
+
+# ---------------------------------------------------------------------------
+# 22. Skill — tRPC Agent Skill repository
 # ---------------------------------------------------------------------------
 skill:
   enabled: true
@@ -414,7 +442,7 @@ skill:
   max_skills: 20
 
 # ---------------------------------------------------------------------------
-# 22. Evolution — Skill self-evolution system
+# 23. Evolution — Skill self-evolution system
 # ---------------------------------------------------------------------------
 evolution:
   enabled: false
@@ -429,7 +457,7 @@ evolution:
   analysis_timeout: "60s"
 
 # ---------------------------------------------------------------------------
-# 23. Knowledge — RAG knowledge base
+# 24. Knowledge — RAG knowledge base
 # ---------------------------------------------------------------------------
 knowledge:
   enabled: false
@@ -444,7 +472,7 @@ knowledge:
   search_tool_name: "knowledge_search"
 
 # ---------------------------------------------------------------------------
-# 24. OKF — Open Knowledge Format (v0.1) interoperability
+# 25. OKF — Open Knowledge Format (v0.1) interoperability
 # ---------------------------------------------------------------------------
 # OKF is a vendor-neutral standard for representing knowledge as
 # Markdown files with YAML frontmatter. When enabled, Wukong can
@@ -460,7 +488,7 @@ okf:
   register_in_ard: false                # register OKF bundles in ARD catalog
 
 # ---------------------------------------------------------------------------
-# 25. Workflow — Multi-mode agent orchestration
+# 26. Workflow — Multi-mode agent orchestration
 # ---------------------------------------------------------------------------
 # Modes: single | chain | parallel | cycle | graph |
 #        team_coordinator | team_swarm | claude_code | codex | dify
@@ -477,7 +505,7 @@ workflow:
   # codex_bin: "codex"               # for codex mode
 
 # ---------------------------------------------------------------------------
-# 26. Dify — Dify AI platform integration
+# 27. Dify — Dify AI platform integration
 # ---------------------------------------------------------------------------
 dify:
   enabled: false
@@ -488,7 +516,7 @@ dify:
   timeout: "120s"
 
 # ---------------------------------------------------------------------------
-# 27. Service Endpoints — 4 protocols
+# 28. Service Endpoints — 4 protocols
 # ---------------------------------------------------------------------------
 # A2A server: Agent-to-Agent protocol
 a2a_server:
@@ -519,7 +547,7 @@ acp_mcp:
   path: "/mcp"
 
 # ---------------------------------------------------------------------------
-# 28. Evaluation — Agent regression testing
+# 29. Evaluation — Agent regression testing
 # ---------------------------------------------------------------------------
 eval:
   enabled: false
@@ -530,7 +558,7 @@ eval:
   #     threshold: 0.8
 
 # ---------------------------------------------------------------------------
-# 29. Extensions — MCP external servers
+# 30. Extensions — MCP external servers
 # ---------------------------------------------------------------------------
 extensions: []
 # Example external MCP extension:
@@ -544,7 +572,7 @@ extensions: []
 #     mcp_broker: false               # true = on-demand discovery via broker
 
 # ---------------------------------------------------------------------------
-# 30. Telemetry — OpenTelemetry distributed tracing
+# 31. Telemetry — OpenTelemetry distributed tracing
 # ---------------------------------------------------------------------------
 telemetry:
   enabled: false
@@ -556,7 +584,7 @@ telemetry:
   sample_rate: 1.0                   # 0.0-1.0
 
 # ---------------------------------------------------------------------------
-# 31. Observability — Langfuse LLM tracing
+# 32. Observability — Langfuse LLM tracing
 # ---------------------------------------------------------------------------
 observability:
   langfuse_enabled: false
@@ -565,7 +593,7 @@ observability:
   # langfuse_secret_key: "${LANGFUSE_SECRET_KEY}"
 
 # ---------------------------------------------------------------------------
-# 31. Artifact — Named, versioned binary storage
+# 33. Artifact — Named, versioned binary storage
 # ---------------------------------------------------------------------------
 artifact:
   backend: "inmemory"                # inmemory | cos
@@ -574,6 +602,6 @@ artifact:
   # cos_secret_key: "${COS_SECRETKEY}"
 
 # ---------------------------------------------------------------------------
-# 33. Project — Project tracking data directory
+# 34. Project — Project tracking data directory
 # ---------------------------------------------------------------------------
 project_dir: "~/.config/wukong/"

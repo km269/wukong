@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -206,6 +207,10 @@ func runSession(cmd *cobra.Command, args []string) error {
 		if bootstrapState.ARDRegistry != nil {
 			_ = bootstrapState.ARDRegistry.Shutdown(shutdownCtx)
 		}
+		// Shutdown ANP server if running
+		if bootstrapState.ANPServer != nil {
+			_ = bootstrapState.ANPServer.Shutdown(shutdownCtx)
+		}
 		// Shutdown knowledge manager
 		if bootstrapState.KnowledgeMgr != nil {
 			if err := bootstrapState.KnowledgeMgr.Close(); err != nil {
@@ -249,6 +254,10 @@ func runSession(cmd *cobra.Command, args []string) error {
 		if bootstrapState.ARDRegistry != nil {
 			_ = bootstrapState.ARDRegistry.Shutdown(shutdownCtx)
 		}
+		// Shutdown ANP server if running
+		if bootstrapState.ANPServer != nil {
+			_ = bootstrapState.ANPServer.Shutdown(shutdownCtx)
+		}
 		if bootstrapState.KnowledgeMgr != nil {
 			if err := bootstrapState.KnowledgeMgr.Close(); err != nil {
 				util.Logger.Warn("knowledge manager close error",
@@ -280,6 +289,9 @@ type BootstrapState struct {
 	ACPServer     *server.ACPServer
 	ACPMCPBridge  *extension.ACPMCPBridge
 	ARDRegistry   *ard.RegistryServer
+	ANPServer     *http.Server
+	ANPMeta       *summon.MetaProtocol
+	ANPMessenger  *summon.E2EEMessenger
 	KnowledgeMgr  *knowledge.Manager
 	ProjectMgr    *project.Manager
 }
@@ -453,10 +465,17 @@ func bootstrapSession(
 
 		// Start Wukong's own ARD registry server for inbound discovery.
 		if wukongCfg.ARD.PublishEnabled && wukongCfg.ARD.PublishPort > 0 {
+			anpOpts := ard.ANPPublishOptions{
+				Enabled: wukongCfg.ANP.Enabled &&
+					wukongCfg.ANP.DiscoveryEnabled,
+				BaseURL: fmt.Sprintf("http://localhost:%d",
+					wukongCfg.ARD.PublishPort),
+			}
 			ardSrv, pubErr := ard.PublishAndServe(
 				context.Background(),
 				wukongCfg.ARD.PublishPort,
 				wukongCfg.ARD.CatalogPath,
+				&anpOpts,
 			)
 			if pubErr != nil {
 				util.Logger.Warn("ard: failed to start registry server",
@@ -1139,6 +1158,131 @@ func bootstrapSession(
 		}
 	}
 
+	// Initialize ANP protocol stack if enabled.
+	// Creates DID identity, meta-protocol engine, E2EE messenger,
+	// and starts the ANP HTTP server for capability negotiation.
+	if wukongCfg.ANP.Enabled {
+		anpPort := wukongCfg.ANP.Port
+		if anpPort <= 0 {
+			anpPort = 9092
+		}
+
+		// Determine agent name and base URL for DID identity.
+		anpAgentName := wukongCfg.A2AServer.AgentName
+		if anpAgentName == "" {
+			anpAgentName = "wukong"
+		}
+		anpBaseURL := fmt.Sprintf("http://localhost:%d", anpPort)
+
+		// Resolve DID domain from config or use localhost as fallback.
+		didDomain := wukongCfg.ANP.DIDDomain
+		if didDomain == "" {
+			hostname, _ := os.Hostname()
+			didDomain = hostname
+		}
+		if didDomain == "" {
+			didDomain = "localhost"
+		}
+
+		// Step 1: Create DID Manager for cryptographic identity.
+		didMgr, didErr := ard.NewDIDManager(&ard.DIDManagerConfig{
+			Domain:    didDomain,
+			Path:      wukongCfg.ANP.DIDPath,
+			AgentName: anpAgentName,
+			BaseURL:   anpBaseURL,
+		})
+		if didErr != nil {
+			util.Logger.Warn("ANP: DID manager creation failed",
+				"error", didErr.Error())
+		}
+
+		// Step 2: Build meta-protocol engine for capability
+		// negotiation.
+		if didMgr != nil && wukongCfg.ANP.MetaProtocolEnabled {
+			metaCfg := summon.BuildMetaProtocolConfig(
+				didMgr.DID(),
+				anpBaseURL,
+				wukongCfg.A2AServer.Enabled,
+				parsePort(wukongCfg.A2AServer.Address),
+				wukongCfg.ACPServer.Enabled,
+				parsePort(wukongCfg.ACPServer.Address),
+				wukongCfg.AGUI.Enabled,
+				parsePort(wukongCfg.AGUI.Address),
+				"didwba_sc",
+			)
+			metaEngine := summon.NewMetaProtocol(metaCfg)
+			state.ANPMeta = metaEngine
+
+			util.Logger.Info("ANP: meta-protocol engine initialized",
+				"did", didMgr.DID(),
+				"port", anpPort)
+		}
+
+		// Step 3: Create E2EE messenger for encrypted
+		// agent-to-agent messaging.
+		if didMgr != nil && wukongCfg.ANP.E2EEEnabled {
+			e2eeMgr := summon.NewE2EEMessenger(
+				&summon.E2EEMessengerConfig{
+					DIDManager: didMgr,
+				},
+			)
+			state.ANPMessenger = e2eeMgr
+
+			util.Logger.Info("ANP: E2EE messenger initialized",
+				"did", didMgr.DID(),
+				"active_sessions",
+				e2eeMgr.ActiveSessions())
+		}
+
+		// Step 4: Start ANP HTTP server for meta-protocol
+		// and capability discovery endpoints.
+		if wukongCfg.ANP.MetaProtocolEnabled {
+			anpMux := http.NewServeMux()
+
+			// Register meta-protocol handler (JSON-RPC 2.0)
+			if state.ANPMeta != nil {
+				metaHandler := summon.NewMetaProtocolHandler(
+					state.ANPMeta,
+				)
+				anpMux.Handle(
+					"/anp/meta-protocol",
+					metaHandler,
+				)
+				anpMux.HandleFunc(
+					"/anp/capabilities",
+					func(w http.ResponseWriter,
+						r *http.Request) {
+						metaHandler.ServeHTTP(w, r)
+					},
+				)
+				util.Logger.Info(
+					"ANP: meta-protocol endpoints registered",
+					"endpoints",
+					"/anp/meta-protocol, /anp/capabilities")
+			}
+
+			anpAddr := fmt.Sprintf(":%d", anpPort)
+			anpSrv := &http.Server{
+				Addr:         anpAddr,
+				Handler:      anpMux,
+				ReadTimeout:  10 * time.Second,
+				WriteTimeout: 30 * time.Second,
+				IdleTimeout:  60 * time.Second,
+			}
+			state.ANPServer = anpSrv
+
+			go func() {
+				util.Logger.Info("ANP: server starting",
+					"address", anpAddr)
+				if err := anpSrv.ListenAndServe(); err != nil &&
+					err != http.ErrServerClosed {
+					util.Logger.Warn("ANP: server error",
+						"error", err.Error())
+				}
+			}()
+		}
+	}
+
 	// Report sandbox capability at startup so users know what
 	// filesystem write protection is active.
 	probe := sandbox.Probe()
@@ -1382,6 +1526,28 @@ func (a *skillEvoAdapter) RecordExecution(
 		OutputLength: trace.OutputLength,
 		Success:      trace.Success,
 	})
+}
+
+// parsePort extracts the numeric port from an address string like
+// ":9090" or "localhost:9090". Returns the port or 0 if unparseable.
+func parsePort(address string) int {
+	if address == "" {
+		return 0
+	}
+	// Strip the optional host prefix.
+	colonIdx := strings.LastIndex(address, ":")
+	if colonIdx < 0 {
+		return 0
+	}
+	portStr := address[colonIdx+1:]
+	p := 0
+	for _, c := range portStr {
+		if c < '0' || c > '9' {
+			return 0
+		}
+		p = p*10 + int(c-'0')
+	}
+	return p
 }
 
 
