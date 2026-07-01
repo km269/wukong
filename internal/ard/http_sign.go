@@ -544,22 +544,22 @@ func parseSignatureInput(header string) (string, map[string]string) {
 
 	// Split into covered components and parameters
 	rest := header[eqIdx+1:] // skip "=("
-	closeIdx := strings.Index(rest, ");")
-	if closeIdx < 0 {
+	_, rest, found := strings.Cut(rest, ");")
+	if !found {
 		return tag, nil // Covered components only, no params
 	}
 
 	// Parameters are after ");"
-	paramPart := rest[closeIdx+2:] // skip ");"
+	paramPart := rest
 
 	// Parse semicolon-separated parameters
-	for _, param := range strings.Split(paramPart, ";") {
-		parts := strings.SplitN(param, "=", 2)
-		if len(parts) != 2 {
+	for param := range strings.SplitSeq(paramPart, ";") {
+		key, value, ok := strings.Cut(param, "=")
+		if !ok {
 			continue
 		}
-		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
 
 		// Strip quotes
 		value = strings.Trim(value, `"`)

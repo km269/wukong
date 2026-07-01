@@ -208,6 +208,24 @@ func printServerStartup(cfg *config.WukongConfig) {
 			cfg.ARD.PublishPort)
 	}
 
+	if cfg.Gateway.Enabled {
+		addr := cfg.Gateway.Address
+		if addr == "" {
+			addr = ":9093"
+		}
+		channels := ""
+		if cfg.Gateway.Feishu.Enabled {
+			channels += " Feishu"
+		}
+		if cfg.Gateway.WeCom.Enabled {
+			channels += " WeCom"
+		}
+		fmt.Printf("  ✓ Gateway  http://localhost%s  (Messaging:%s)\n",
+			addr, channels)
+	} else {
+		fmt.Println("  - Gateway  disabled")
+	}
+
 	fmt.Printf("\nProvider: %s\n", cfg.DefaultProvider)
 	fmt.Printf("Model:    %s\n", resolveEffectiveModel(cfg))
 	fmt.Println("\nServer is running. Press Ctrl+C to stop.")
@@ -251,8 +269,8 @@ func registerHealthCheckers(
 	// Memory backend
 	reg.Register("memory", func(ctx context.Context) health.ComponentHealth {
 		return health.ComponentHealth{
-			Name:    "memory",
-			Status:  health.StatusHealthy,
+			Name:   "memory",
+			Status: health.StatusHealthy,
 			Message: fmt.Sprintf("backend: %s, auto_extract: %v",
 				cfg.Memory.Backend, cfg.Memory.AutoExtract),
 		}
@@ -289,5 +307,9 @@ func shutdownServers(ctx context.Context, state *BootstrapState) {
 	if state.KnowledgeMgr != nil {
 		_ = state.KnowledgeMgr.Close()
 		fmt.Println("  Knowledge manager stopped")
+	}
+	if state.GatewayServer != nil {
+		_ = state.GatewayServer.Stop(ctx)
+		fmt.Println("  Gateway server stopped")
 	}
 }

@@ -2,6 +2,7 @@
 package ard
 
 import (
+	"context"
 	"testing"
 )
 
@@ -18,7 +19,7 @@ func TestSemanticIndex(t *testing.T) {
 	}
 
 	// IndexEntry should work without embedder (no vectors)
-	err := si.IndexEntry(nil, entry)
+	err := si.IndexEntry(context.Background(), entry)
 	if err != nil {
 		t.Errorf("SemanticIndex.IndexEntry() error = %v", err)
 	}
@@ -152,7 +153,7 @@ func TestHybridSearch(t *testing.T) {
 		Limit: 10,
 	}
 
-	resp, err := hs.Search(nil, req)
+	resp, err := hs.Search(context.Background(), req)
 	if err != nil {
 		t.Errorf("HybridSearch.Search() error = %v", err)
 	}

@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -385,12 +386,7 @@ func (a *ANPAdapter) AddTextArtifact(
 // SupportsProfile checks if the adapter supports a given ANP
 // message profile.
 func (a *ANPAdapter) SupportsProfile(profile string) bool {
-	for _, p := range a.supportedProfiles {
-		if p == profile {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(a.supportedProfiles, profile)
 }
 
 // SupportedProfiles returns the list of supported ANP profiles.

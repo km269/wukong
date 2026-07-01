@@ -6,6 +6,25 @@ All changes after v0.1.14 baseline.
 
 ## [Unreleased] — 2026-07-01
 
+### Config & Documentation Overhaul
+
+- **config.yaml 重构**: 35 未分组节 → 15 逻辑分组 (A-O)，包含清晰层次结构
+  - A: 全局, B: 提供商, C: Agent, D: 安全, E: 存储 (E1-E4), F: CortexDB 栈 (F1-F4),
+    G: 上下文管理, H: 功能工具 (H1-H6), I: 扩展, J: 服务端点 (J1-J5),
+    K: Agent-to-Agent (K1-K4), L: 知识与技能 (L1-L4), M: 工作流,
+    N: 可观测性 (N1-N4), O: 项目
+- **config.go 扩展**: 环境变量展开从 2 个类别扩展到 10 个类别
+  - 新增: 飞书密钥 (3 个)、企微密钥 (3 个)、可观测性 Secret、Artifact COS 密钥、ACP 服务器密钥、CortexDB 密码、Dify 密钥
+- **defaults.go 扩展**:
+  - 新增 `browser.stealth` 默认值 (之前缺失)
+  - 新增 `apps.clone` 完整默认值 (30 个字段，之前全部缺失)
+- **Bug 修复**: `config.yaml` 中 `okf.enabled: truee` → `true`
+- **文档重构**:
+  - `README.md`: 更新统计、新增 Gateway/CLI_TUI 文档链接、简化快速开始、新增环境变量展开覆盖表
+  - `docs/README.md`: 更新统计、新增 ANP/Gateway 章节、重组文档链接
+  - `docs/ARCHITECTURE.md`: 新增第 6 节 (Gateway 多平台消息通道，含 9 步流水线)、更新系统全景图、新增 ADR #20
+  - `docs/CONFIG.md`: 完整重写以匹配 A-O 分组结构、34 结构体索引表、环境变量展开覆盖表、所有组完整 YAML 示例
+
 ### ANP Integration — Agent Network Protocol
 
 - **新增 8 个 ANP 源文件**: 完整的 Agent Network Protocol 协议栈实现
@@ -48,11 +67,12 @@ All changes after v0.1.14 baseline.
 |------|------|------|
 | `.go` 文件 | 233 | 241 (+8 ANP 文件) |
 | `_test.go` 文件 | 52 | 52 |
-| 内部包 | 29 | 29 |
-| 配置结构体 | 45 | 45 |
-| 配置结构体字段 | ~350 | ~358 |
-| 服务端点 (协议) | 4 | 5 (+1 ANP) |
-| ADR 数 | 18 | 19 (+1 ANP 决策) |
+| 内部包 | 29 | 30 (+1 Gateway) |
+| 配置结构体 | 45 | 34 (重组为 A-O 分层分组) |
+| 配置分组 | 35 (平铺编号) | 15 (A-O 逻辑分组) |
+| 服务端点 (协议) | 4 | 6 (+1 ANP, +1 Gateway :9093) |
+| ADR 数 | 18 | 20 (+1 ANP, +1 Gateway) |
+| 环境变量展开类别 | 2 | 10 (+8 类别) |
 
 ---
 

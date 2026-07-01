@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -431,14 +432,7 @@ func VerifyDIDDocument(doc *DIDDocument) error {
 	}
 
 	// 4. Verify key-1 is in authentication list
-	found := false
-	for _, auth := range doc.Authentication {
-		if auth == key1.ID {
-			found = true
-			break
-		}
-	}
-	if !found {
+	if !slices.Contains(doc.Authentication, key1.ID) {
 		return fmt.Errorf(
 			"did: key-1 not authorized for authentication")
 	}

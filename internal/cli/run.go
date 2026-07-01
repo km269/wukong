@@ -357,4 +357,7 @@ func cleanupBootstrap(state *BootstrapState) {
 	if state.KnowledgeMgr != nil {
 		_ = state.KnowledgeMgr.Close()
 	}
+	if state.GatewayServer != nil {
+		_ = state.GatewayServer.Stop(context.Background())
+	}
 }

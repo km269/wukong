@@ -320,7 +320,10 @@ func BuildRepresentativeQueries(tags []string, capabilities []string) []string {
 	
 	// Generate queries based on capabilities
 	for _, cap := range capabilities {
-		capName := strings.Title(strings.ReplaceAll(cap, "Tool", ""))
+		capName := strings.ReplaceAll(cap, "Tool", "")
+		if len(capName) > 0 {
+			capName = strings.ToUpper(capName[:1]) + capName[1:]
+		}
 		queries = append(queries, fmt.Sprintf("can you %s", strings.ToLower(capName)))
 		queries = append(queries, fmt.Sprintf("help me %s", strings.ToLower(capName)))
 	}

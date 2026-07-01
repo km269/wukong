@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"slices"
 	"sync"
 
 	"github.com/km269/wukong/internal/util"
@@ -72,10 +73,8 @@ func (ts *ToolSet) SetRegistryURL(rawURL string) error {
 	defer ts.mu.Unlock()
 
 	// Deduplicate.
-	for _, existing := range ts.registryURLs {
-		if existing == rawURL {
-			return nil
-		}
+	if slices.Contains(ts.registryURLs, rawURL) {
+		return nil
 	}
 
 	ts.registryURLs = append(ts.registryURLs, rawURL)

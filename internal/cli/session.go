@@ -17,15 +17,17 @@ import (
 	"github.com/km269/wukong/internal/agent"
 	"github.com/km269/wukong/internal/apps"
 	"github.com/km269/wukong/internal/ard"
+	artifacts "github.com/km269/wukong/internal/artifact"
 	"github.com/km269/wukong/internal/cli/tui"
 	"github.com/km269/wukong/internal/codemode"
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/cortex"
-	"github.com/liliang-cn/cortexdb/v2/pkg/graphflow"
-	"github.com/liliang-cn/cortexdb/v2/pkg/memoryflow"
+	"github.com/km269/wukong/internal/evolution"
 	"github.com/km269/wukong/internal/extension"
 	"github.com/km269/wukong/internal/extension/builtin"
-	artifacts "github.com/km269/wukong/internal/artifact"
+	"github.com/km269/wukong/internal/gateway"
+	"github.com/km269/wukong/internal/gateway/feishu"
+	"github.com/km269/wukong/internal/gateway/wecom"
 	"github.com/km269/wukong/internal/knowledge"
 	"github.com/km269/wukong/internal/memory"
 	"github.com/km269/wukong/internal/observability"
@@ -33,7 +35,6 @@ import (
 	"github.com/km269/wukong/internal/provider"
 	"github.com/km269/wukong/internal/recall"
 	"github.com/km269/wukong/internal/security"
-	"github.com/km269/wukong/internal/evolution"
 	"github.com/km269/wukong/internal/server"
 	wksession "github.com/km269/wukong/internal/session"
 	"github.com/km269/wukong/internal/skill"
@@ -43,6 +44,8 @@ import (
 	"github.com/km269/wukong/internal/topofmind"
 	"github.com/km269/wukong/internal/util"
 	"github.com/km269/wukong/pkg/sandbox"
+	"github.com/liliang-cn/cortexdb/v2/pkg/graphflow"
+	"github.com/liliang-cn/cortexdb/v2/pkg/memoryflow"
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
@@ -294,6 +297,7 @@ type BootstrapState struct {
 	ANPMessenger  *summon.E2EEMessenger
 	KnowledgeMgr  *knowledge.Manager
 	ProjectMgr    *project.Manager
+	GatewayServer *gateway.GatewayServer
 }
 
 // bootstrapSession initializes all components needed for a session.
@@ -391,7 +395,7 @@ func bootstrapSession(
 					"error", err.Error())
 				extractorModel = nil
 			} else {
-				util.Logger.Info("auto memory extraction: "+
+				util.Logger.Info("auto memory extraction: " +
 					"using default model as extractor fallback")
 			}
 		}
@@ -931,7 +935,7 @@ func bootstrapSession(
 	}
 
 	// Add Agent tools (code-reviewer, summarizer)
-	if agentToolSet != nil && len(agentToolSet.Tools(nil)) > 0 {
+	if agentToolSet != nil && len(agentToolSet.Tools(context.TODO())) > 0 {
 		toolSets = append(toolSets, agentToolSet)
 	}
 
@@ -1032,24 +1036,24 @@ func bootstrapSession(
 
 	// Create agent loop
 	loop, err := agent.NewCoreLoop(agent.CoreLoopConfig{
-		Config:             wukongCfg,
-		Factory:            factory,
-		SessionService:     sessionSvc,
-		MemoryService:      memoryMgr.Service(),
-		ArtifactService:    artifactSvc,
-		ToolSets:           toolSets,
-		FunctionTools:      functionTools,
-		SecurityGuard:      guard,
-		RecallStore:        recallStore,
-		CortexStore:        cortexStore,
-		RevisionModel:      revisionModel,
-		MemoryFlowService:  memoryFlowSvc,
-		GraphFlowService:   graphFlowSvc,
+		Config:                wukongCfg,
+		Factory:               factory,
+		SessionService:        sessionSvc,
+		MemoryService:         memoryMgr.Service(),
+		ArtifactService:       artifactSvc,
+		ToolSets:              toolSets,
+		FunctionTools:         functionTools,
+		SecurityGuard:         guard,
+		RecallStore:           recallStore,
+		CortexStore:           cortexStore,
+		RevisionModel:         revisionModel,
+		MemoryFlowService:     memoryFlowSvc,
+		GraphFlowService:      graphFlowSvc,
 		TopOfMindInstructions: topOfMindInstructions,
-		TelemetryShutdown:  combinedShutdown,
-		MemoryClose:        memoryMgr.Close,
-		EvolutionClose:     evoEngineClose(evoEngine),
-		DBPoolClose:        dbPool.Close,
+		TelemetryShutdown:     combinedShutdown,
+		MemoryClose:           memoryMgr.Close,
+		EvolutionClose:        evoEngineClose(evoEngine),
+		DBPoolClose:           dbPool.Close,
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create agent loop: %w", err)
@@ -1069,9 +1073,9 @@ func bootstrapSession(
 	}
 
 	state := &BootstrapState{
-		KnowledgeMgr:  knowledgeMgr,
-		ProjectMgr:    projectMgr,
-		ARDRegistry:   ardRegistryServer,
+		KnowledgeMgr: knowledgeMgr,
+		ProjectMgr:   projectMgr,
+		ARDRegistry:  ardRegistryServer,
 	}
 	if wukongCfg.A2AServer.Enabled {
 		hostAddr := wukongCfg.A2AServer.Address
@@ -1296,6 +1300,47 @@ func bootstrapSession(
 			"reason", sandbox.ReasonUnavailable(),
 			"warning", probe.Warning,
 		)
+	}
+
+	// Initialize Gateway server for multi-platform messaging
+	// channels (Feishu, WeCom, Slack, etc.).
+	if wukongCfg.Gateway.Enabled {
+		gwStore := gateway.NewGatewaySessionStore(dbPool.Shared())
+		state.GatewayServer = gateway.NewGatewayServer(
+			wukongCfg, loop, gwStore,
+		)
+
+		// Register Feishu channel if enabled.
+		if wukongCfg.Gateway.Feishu.Enabled {
+			fc := feishu.NewFeishuChannel(wukongCfg, loop)
+			if err := state.GatewayServer.RegisterChannel(fc); err != nil {
+				util.Logger.Warn("gateway: register feishu failed",
+					slog.String("error", err.Error()))
+			} else {
+				util.Logger.Info("gateway: feishu channel registered")
+			}
+		}
+
+		// Register WeCom channel if enabled.
+		if wukongCfg.Gateway.WeCom.Enabled {
+			wc := wecom.NewWeComChannel(wukongCfg, loop)
+			if err := state.GatewayServer.RegisterChannel(wc); err != nil {
+				util.Logger.Warn("gateway: register wecom failed",
+					slog.String("error", err.Error()))
+			} else {
+				util.Logger.Info("gateway: wecom channel registered")
+			}
+		}
+
+		go func() {
+			util.Logger.Info("gateway: server starting",
+				"address", wukongCfg.Gateway.Address)
+			if err := state.GatewayServer.Start(); err != nil &&
+				err.Error() != "http: Server closed" {
+				util.Logger.Warn("gateway: server error",
+					"error", err.Error())
+			}
+		}()
 	}
 
 	return wukongCfg, loop, state, nil
@@ -1549,6 +1594,3 @@ func parsePort(address string) int {
 	}
 	return p
 }
-
-
-

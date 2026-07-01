@@ -167,10 +167,7 @@ func (h *ANPDiscoveryHandler) buildCollectionPage(
 	}
 
 	// Paginate
-	endIdx := startIdx + h.pageSize
-	if endIdx > len(entries) {
-		endIdx = len(entries)
-	}
+	endIdx := min(startIdx+h.pageSize, len(entries))
 
 	if startIdx >= len(entries) {
 		return collection

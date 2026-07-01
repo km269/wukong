@@ -8,9 +8,9 @@ import (
 
 func TestResolvePath(t *testing.T) {
 	tests := []struct {
-		name     string
-		input    string
-		isAbs    bool
+		name  string
+		input string
+		isAbs bool
 	}{
 		{"absolute path", "/tmp/test.db", true},
 		{"relative path", "test.db", false},
