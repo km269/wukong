@@ -373,8 +373,10 @@ iptables -A INPUT -p tcp --dport 9093 -j DROP
 | 层级 | 机制 | 默认值 |
 |------|------|--------|
 | 去重 | MessageID + TTL Map | 5 分钟窗口 |
-| 用户限流 | 滑动窗口计数 | 10 req/10s per user |
+| 用户限流 | 滑动窗口计数 | 20 req/60s per user |
 | 并发控制 | Semaphore | 100 并发 sessions |
+
+> 限流触发时 Gateway 返回 HTTP 200（而非 429），避免平台因非 2xx 而重试、放大负载。用户可稍后手动重发。
 
 配置文件调整：
 
@@ -383,7 +385,7 @@ gateway:
   max_concurrent_sessions: 50   # 降低并发限制
   message_dedup_ttl: "10m"      # 延长去重窗口
   rate_limit_per_user: 5        # 收紧用户限流
-  rate_limit_window: "10s"
+  rate_limit_window: "60s"
 ```
 
 ### 3. 密钥管理

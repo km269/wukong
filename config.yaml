@@ -474,8 +474,8 @@ gateway:
   default_timeout: "120s"             # agent single-run timeout
   max_concurrent_sessions: 100        # max concurrent agent sessions
   message_dedup_ttl: "5m"            # message dedup window
-  rate_limit_per_user: 10             # max requests per user per window
-  rate_limit_window: "10s"            # per-user rate limit sliding window
+  rate_limit_per_user: 20             # max requests per user per window
+  rate_limit_window: "60s"            # per-user rate limit sliding window
 
   # --- Feishu / Lark ---
   feishu:

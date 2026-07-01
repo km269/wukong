@@ -12,11 +12,11 @@ import (
 	"sync"
 	"time"
 
-	lark "github.com/larksuite/oapi-sdk-go/v3"
-	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/gateway"
 	"github.com/km269/wukong/internal/util"
+	lark "github.com/larksuite/oapi-sdk-go/v3"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 )
 
@@ -41,8 +41,8 @@ const (
 //     via SDK for a "long connection" streaming experience
 //   - Proactive response_url replies (when available, bypasses SDK)
 type FeishuSender struct {
-	cfg          *config.FeishuChannelConfig
-	larkClient   *lark.Client
+	cfg           *config.FeishuChannelConfig
+	larkClient    *lark.Client
 	respURLClient *http.Client
 }
 
@@ -330,17 +330,31 @@ func (fs *FeishuSender) sendTextViaAPI(
 	msg *gateway.GatewayMessage,
 	content string,
 ) error {
+	util.Logger.Info("feishu: sendTextViaAPI called",
+		slog.String("user_id", msg.PlatformUserID),
+		slog.String("conversation_id", msg.ConversationID),
+		slog.Int("content_length", len(content)))
+
 	if fs.larkClient == nil {
-		return nil // No credentials; can't send.
+		util.Logger.Error("feishu: lark client not initialized, check AppID/AppSecret")
+		return fmt.Errorf("feishu: lark client not initialized")
 	}
 
 	receiveID, receiveIDType := fs.resolveReceiveID(msg)
+	util.Logger.Info("feishu: resolved receive ID",
+		slog.String("receive_id", receiveID),
+		slog.String("receive_id_type", receiveIDType),
+		slog.String("original_conversation_id", msg.ConversationID),
+		slog.String("original_user_id", msg.PlatformUserID))
 
 	maxLen := fs.cfg.MaxMessageLength
 	if maxLen <= 0 {
 		maxLen = defaultMaxMessageLength
 	}
 	content = sanitizeContent(content, maxLen)
+	util.Logger.Debug("feishu: content sanitized",
+		slog.Int("final_length", len(content)),
+		slog.String("content_preview", previewContent(content)))
 
 	textContent := string(mustMarshal(map[string]string{
 		"text": content,
@@ -355,17 +369,46 @@ func (fs *FeishuSender) sendTextViaAPI(
 			Build()).
 		Build()
 
+	util.Logger.Info("feishu: calling Lark SDK Im.V1.Message.Create",
+		slog.String("receive_id", receiveID),
+		slog.String("receive_id_type", receiveIDType))
+
 	resp, err := fs.larkClient.Im.V1.Message.Create(ctx, req)
 	if err != nil {
+		util.Logger.Error("feishu: Lark SDK API call failed",
+			slog.String("receive_id", receiveID),
+			slog.String("error", err.Error()))
 		return fmt.Errorf("feishu: send message: %w", err)
 	}
+
 	if !resp.Success() {
+		util.Logger.Error("feishu: Lark SDK API returned error",
+			slog.String("receive_id", receiveID),
+			slog.Int("code", resp.Code),
+			slog.String("msg", resp.Msg))
 		return fmt.Errorf(
 			"feishu: send message API error: code=%d, msg=%s",
 			resp.Code, resp.Msg)
 	}
 
+	if resp.Data != nil && resp.Data.MessageId != nil {
+		util.Logger.Info("feishu: message sent successfully",
+			slog.String("message_id", *resp.Data.MessageId),
+			slog.String("receive_id", receiveID))
+	} else {
+		util.Logger.Warn("feishu: message sent but no message_id returned",
+			slog.String("receive_id", receiveID))
+	}
+
 	return nil
+}
+
+// previewContent returns a truncated preview of content for logging.
+func previewContent(content string) string {
+	if len(content) <= 100 {
+		return content
+	}
+	return content[:100] + "..."
 }
 
 // createCardMessage creates an interactive card message via the Lark

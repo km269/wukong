@@ -13,6 +13,7 @@ import (
 	"github.com/km269/wukong/internal/agent"
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/util"
+	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
@@ -46,13 +47,15 @@ func NewGatewayServer(
 	dedup := NewMessageDeduplicator(gc.MessageDedupTTL)
 
 	// Rate limiter: per-user sliding window + concurrency cap.
+	// Defaults chosen so normal interactive use never trips the
+	// limit; tune up if serving power users, down if under abuse.
 	rateLimitWindow := gc.RateLimitWindow
 	if rateLimitWindow <= 0 {
-		rateLimitWindow = 10 * time.Second
+		rateLimitWindow = 60 * time.Second
 	}
 	rateLimitPerUser := gc.RateLimitPerUser
 	if rateLimitPerUser <= 0 {
-		rateLimitPerUser = 10
+		rateLimitPerUser = 20
 	}
 	ratelimit := NewRateLimiter(
 		rateLimitWindow,
@@ -155,27 +158,30 @@ func (gs *GatewayServer) IsRunning() bool {
 
 // handleChannel is the central request handler that coordinates the
 // full message processing pipeline for each incoming platform
-// callback:
+// callback.
 //
-//  1. Verify the request signature
-//  2. Parse the platform message
-//  3. Check for platform events (URL verification, etc.)
-//  4. Deduplicate by MessageID
-//  5. Map platform identity to Wukong user/session
-//  6. Rate-limit per user + concurrency gate
-//  7. Ensure session persistence
-//  8. Run the agent loop
-//  9. Send the reply back to the platform
+// Critical timing constraint: platforms (Feishu, WeCom) require the
+// callback to return HTTP 200 within ~3 seconds, otherwise they treat
+// it as a failure and retry — which the dedup layer then silently
+// drops, leaving the user with no visible reply even though the agent
+// eventually runs. To honor this, the handler performs only the
+// fast synchronous pre-processing (verify → parse → dedup → rate
+// limit → session map) and then:
+//
+//  1. Acknowledges the callback immediately with 200.
+//  2. Launches the agent run + reply in a background goroutine whose
+//     context is detached from the HTTP request lifecycle, so the
+//     agent keeps running even after the connection closes.
+//
+// Dedup and rate-limit acquisition happen BEFORE the ack so that
+// platform retries do not spawn duplicate agent runs.
 func (gs *GatewayServer) handleChannel(
 	ch Channel, w http.ResponseWriter, r *http.Request,
 ) {
-	ctx, cancel := context.WithTimeout(
-		r.Context(),
-		gs.cfg.DefaultTimeout,
-	)
-	defer cancel()
-
 	// Step 1: Verify request authenticity.
+	// Use a short-lived context tied to the request only for the
+	// synchronous pre-processing; the agent run gets its own
+	// detached context (see processMessageAsync).
 	body, err := ch.VerifyRequest(r)
 	if err != nil {
 		util.Logger.Warn("gateway: verification failed",
@@ -238,7 +244,8 @@ func (gs *GatewayServer) handleChannel(
 
 	// Step 4: Message deduplication.  Platform retries with the
 	// same MessageID are silently dropped here to avoid hitting
-	// the agent loop multiple times.
+	// the agent loop multiple times. MUST happen before the ack
+	// so retries do not spawn duplicate background runs.
 	if gs.dedup.IsDuplicate(msg.Platform, msg.MessageID) {
 		util.Logger.Debug("gateway: duplicate message dropped",
 			slog.String("channel", msg.Platform),
@@ -253,18 +260,20 @@ func (gs *GatewayServer) handleChannel(
 	sessionID := ch.BuildSessionID(msg)
 
 	// Step 6: Rate limiting — per-user rate check + concurrency
-	// gate.
+	// gate. The release func is handed to the background runner so
+	// the concurrency slot is held for the full agent run.
 	release, allowed := gs.ratelimit.Allow(msg.Platform, userID)
 	if !allowed {
 		util.Logger.Warn("gateway: rate limit exceeded",
 			slog.String("channel", msg.Platform),
 			slog.String("user", userID),
 		)
-		http.Error(w, "Too many requests",
-			http.StatusTooManyRequests)
+		// Return 200 (not 429) so the platform does NOT retry —
+		// a retry would just hit the rate limit again and amplify
+		// load. The user may resend manually.
+		w.WriteHeader(http.StatusOK)
 		return
 	}
-	defer release()
 
 	// Step 7: Ensure session mapping persistence.
 	_, err = gs.sessStore.GetOrCreateSession(
@@ -284,21 +293,64 @@ func (gs *GatewayServer) handleChannel(
 		slog.Int("content_len", len(msg.Content)),
 	)
 
-	// Step 8: Run the agent loop.
+	// Step 8: Acknowledge the callback IMMEDIATELY. The platform
+	// (Feishu/WeCom) requires a 200 within ~3s; the agent run takes
+	// far longer, so we must not wait for it. The agent + reply run
+	// in a background goroutine with a detached context.
+	w.WriteHeader(http.StatusOK)
+
+	// Step 9: Run the agent loop + send reply asynchronously.
+	go gs.processMessageAsync(ch, msg, userID, sessionID, release)
+}
+
+// processMessageAsync runs the agent loop and sends the reply in the
+// background, fully detached from the HTTP request that triggered it.
+//
+// The context is derived from context.Background() so that closing the
+// HTTP connection (after the early ack) does NOT cancel the agent.
+// The concurrency-slot release func is invoked when the run completes
+// (including on error/panic), preventing slot leaks.
+func (gs *GatewayServer) processMessageAsync(
+	ch Channel,
+	msg *GatewayMessage,
+	userID, sessionID string,
+	release func(),
+) {
+	// Always release the concurrency slot, even on panic.
+	defer func() {
+		if r := recover(); r != nil {
+			util.Logger.Error("gateway: panic in async processing",
+				slog.String("channel", ch.Name()),
+				slog.String("user", userID),
+				slog.Any("panic", r),
+			)
+		}
+		release()
+	}()
+
+	// Detached context: survives HTTP connection close. Bounded by
+	// the configured per-run timeout.
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		gs.cfg.DefaultTimeout,
+	)
+	defer cancel()
+
+	// Run the agent loop.
 	agentMsg := model.NewUserMessage(msg.Content)
-	events, err := gs.coreLoop.Run(
-		ctx, userID, sessionID, agentMsg)
+	events, err := gs.coreLoop.Run(ctx, userID, sessionID, agentMsg)
 	if err != nil {
 		util.Logger.Error("gateway: agent run failed",
 			slog.String("channel", ch.Name()),
+			slog.String("user", userID),
 			slog.String("error", err.Error()))
 		gs.sendErrorReply(ch, msg, err)
-		// Still return 200 to the platform so it doesn't retry.
-		w.WriteHeader(http.StatusOK)
 		return
 	}
 
-	// Step 9: Send the reply (this handles streaming internally).
+	// Send the reply (handles streaming internally). Re-derives a
+	// fresh context so the reply is not cut short by the run ctx
+	// being exhausted mid-stream.
 	replyCtx, replyCancel := context.WithTimeout(
 		context.Background(),
 		gs.cfg.DefaultTimeout,
@@ -308,20 +360,62 @@ func (gs *GatewayServer) handleChannel(
 	if err := ch.SendReply(replyCtx, msg, events); err != nil {
 		util.Logger.Error("gateway: send reply failed",
 			slog.String("channel", ch.Name()),
+			slog.String("user", userID),
 			slog.String("error", err.Error()))
 	}
-
-	// Always acknowledge the platform callback.
-	w.WriteHeader(http.StatusOK)
 }
 
-// sendErrorReply logs an agent execution error. In the future, this
-// could send a user-friendly error message back to the platform.
+// sendErrorReply sends a user-friendly error message back to the
+// platform when agent execution fails. This ensures users receive
+// feedback instead of seeing no response.
 func (gs *GatewayServer) sendErrorReply(
-	_ Channel, _ *GatewayMessage, err error,
+	ch Channel, msg *GatewayMessage, err error,
 ) {
 	util.Logger.Error("gateway: agent execution error",
-		slog.String("error", err.Error()))
+		slog.String("channel", ch.Name()),
+		slog.String("error", err.Error()),
+		slog.String("user_id", msg.PlatformUserID),
+		slog.String("conversation_id", msg.ConversationID))
+
+	errorMsg := fmt.Sprintf("抱歉，处理您的请求时出现错误：%v", err)
+	util.Logger.Info("gateway: preparing error reply",
+		slog.String("channel", ch.Name()),
+		slog.String("error_message", errorMsg),
+		slog.Int("message_length", len(errorMsg)))
+
+	replyCtx, replyCancel := context.WithTimeout(
+		context.Background(),
+		30*time.Second,
+	)
+	defer replyCancel()
+
+	util.Logger.Debug("gateway: creating error event channel")
+	events := make(chan *event.Event, 1)
+	events <- &event.Event{
+		Response: &model.Response{
+			Choices: []model.Choice{
+				{
+					Delta: model.Message{
+						Content: errorMsg,
+					},
+				},
+			},
+		},
+	}
+	close(events)
+	util.Logger.Debug("gateway: error event channel ready, sending reply")
+
+	if sendErr := ch.SendReply(replyCtx, msg, events); sendErr != nil {
+		util.Logger.Error("gateway: send error reply failed",
+			slog.String("channel", ch.Name()),
+			slog.String("user_id", msg.PlatformUserID),
+			slog.String("conversation_id", msg.ConversationID),
+			slog.String("error", sendErr.Error()))
+	} else {
+		util.Logger.Info("gateway: error reply sent successfully",
+			slog.String("channel", ch.Name()),
+			slog.String("user_id", msg.PlatformUserID))
+	}
 }
 
 // handleMetrics exposes a simple JSON endpoint for monitoring

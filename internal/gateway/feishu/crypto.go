@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -19,11 +20,10 @@ import (
 // for Feishu/Lark event callbacks.
 //
 // Feishu security mechanisms:
-//   - HMAC-SHA256 signature verification (all callbacks)
+//   - SHA256 signature verification (when encrypt_key configured)
 //   - AES-256-CBC message body decryption (when encrypt_key configured)
 //   - Timestamp freshness check (anti-replay, 5-minute window)
 type FeishuCrypto struct {
-	appSecret         string
 	encryptKey        string
 	verificationToken string
 }
@@ -31,23 +31,34 @@ type FeishuCrypto struct {
 // NewFeishuCrypto creates a new FeishuCrypto from channel config.
 func NewFeishuCrypto(cfg *config.FeishuChannelConfig) *FeishuCrypto {
 	return &FeishuCrypto{
-		appSecret:         cfg.AppSecret,
 		encryptKey:        cfg.EncryptKey,
 		verificationToken: cfg.VerificationToken,
 	}
 }
 
-// VerifySignature validates the HMAC-SHA256 signature in the request
-// headers against the computed signature of the body.
+// VerifySignature validates the signature in the request headers
+// against the computed signature of the body.
 //
-// Feishu v2 signature format:
+// Feishu event subscription signature (official spec, see
+// https://open.feishu.cn/document/ukTMukTMukTM/uYDNxYjL2QTM24iN0EjN/event-subscription-configure-/encrypt-key-encryption-configuration-case):
 //
-//	timestamp: Unix timestamp in seconds
-//	nonce:     Random nonce string
+//	timestamp: Unix timestamp in seconds (X-Lark-Request-Timestamp)
+//	nonce:     Random nonce string        (X-Lark-Request-Nonce)
+//	encrypt_key: Application Encrypt Key from Feishu app settings
 //	body:      Raw request body
-//	signature: Base64(HMAC-SHA256(timestamp + nonce + encrypt_key, body))
+//	signature: HEX( SHA256( timestamp + nonce + encrypt_key + body ) )
+//
+// NOTE: Feishu uses a plain SHA256 over the concatenated string,
+// NOT HMAC-SHA256. The key material is the Encrypt Key (encrypt_key),
+// NOT the App Secret. The digest is hex-encoded, NOT base64.
 //
 // The signature is sent in the X-Lark-Signature header.
+//
+// When no Encrypt Key is configured on the Feishu app, the platform
+// does not send signature headers; in that case we skip verification
+// (this is the "no encryption" mode). When an Encrypt Key IS
+// configured but the signature headers are missing, we reject the
+// request as a potential forged callback.
 func (fc *FeishuCrypto) VerifySignature(
 	headers http.Header,
 	body []byte,
@@ -56,10 +67,20 @@ func (fc *FeishuCrypto) VerifySignature(
 	nonce := headers.Get("X-Lark-Request-Nonce")
 	signature := headers.Get("X-Lark-Signature")
 
-	// If no signature header is present, skip verification.
-	// This allows testing without a real Feishu backend.
-	if timestamp == "" || nonce == "" || signature == "" {
+	// No Encrypt Key configured on our side → the platform runs in
+	// "no encryption" mode and will not send signature headers.
+	// Skip verification (matches Feishu's documented behavior).
+	if fc.encryptKey == "" {
 		return nil
+	}
+
+	// Encrypt Key is configured but the platform did not send
+	// signature headers. This is either a forged request or a
+	// misconfiguration; reject it rather than silently accepting.
+	if timestamp == "" || nonce == "" || signature == "" {
+		return fmt.Errorf(
+			"feishu: missing signature headers " +
+				"(encrypt_key configured but no X-Lark-Signature)")
 	}
 
 	// Verify timestamp freshness (within 5 minutes).
@@ -76,6 +97,7 @@ func (fc *FeishuCrypto) VerifySignature(
 	// Compute expected signature.
 	expected := fc.computeSignature(timestamp, nonce, body)
 
+	// Constant-time comparison to prevent timing attacks.
 	if !hmac.Equal([]byte(signature), []byte(expected)) {
 		return fmt.Errorf("feishu: signature mismatch")
 	}
@@ -220,8 +242,16 @@ func pkcs7Unpad(data []byte) ([]byte, error) {
 	return data[:len(data)-paddingLen], nil
 }
 
-// computeSignature generates the HMAC-SHA256 signature as a Base64
-// string.
+// computeSignature generates the Feishu event signature as a
+// lowercase hex string.
+//
+// Algorithm (per Feishu official spec):
+//
+//	signature = HEX( SHA256( timestamp + nonce + encrypt_key + body ) )
+//
+// where "+" denotes plain string/byte concatenation. This is a plain
+// SHA256 digest (not HMAC), keyed by the Encrypt Key through
+// concatenation rather than as an HMAC key.
 func (fc *FeishuCrypto) computeSignature(
 	timestamp, nonce string, body []byte,
 ) string {
@@ -231,14 +261,11 @@ func (fc *FeishuCrypto) computeSignature(
 	var baseBuilder strings.Builder
 	baseBuilder.WriteString(timestamp)
 	baseBuilder.WriteString(nonce)
-	if fc.appSecret != "" {
-		baseBuilder.WriteString(fc.appSecret)
-	}
+	baseBuilder.WriteString(fc.encryptKey)
 	baseBuilder.Write(body)
 
-	mac := hmac.New(sha256.New, []byte(fc.appSecret))
-	mac.Write([]byte(baseBuilder.String()))
-	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	sum := sha256.Sum256([]byte(baseBuilder.String()))
+	return hex.EncodeToString(sum[:])
 }
 
 // parseTimestamp parses a timestamp string and returns the Unix

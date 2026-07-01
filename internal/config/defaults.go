@@ -398,8 +398,8 @@ func (l *Loader) setGatewayDefaults() {
 	l.v.SetDefault("gateway.default_timeout", "120s")
 	l.v.SetDefault("gateway.max_concurrent_sessions", 100)
 	l.v.SetDefault("gateway.message_dedup_ttl", "5m")
-	l.v.SetDefault("gateway.rate_limit_per_user", 10)
-	l.v.SetDefault("gateway.rate_limit_window", "10s")
+	l.v.SetDefault("gateway.rate_limit_per_user", 20)
+	l.v.SetDefault("gateway.rate_limit_window", "60s")
 
 	// Feishu channel
 	l.v.SetDefault("gateway.feishu.enabled", false)

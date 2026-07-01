@@ -47,11 +47,11 @@ type GatewayConfig struct {
 	MessageDedupTTL time.Duration `mapstructure:"message_dedup_ttl"`
 
 	// RateLimitPerUser is the maximum number of agent runs per
-	// user within the rate limit window. Default: 10.
+	// user within the rate limit window. Default: 20.
 	RateLimitPerUser int `mapstructure:"rate_limit_per_user"`
 
 	// RateLimitWindow is the sliding window duration for per-user
-	// rate limiting. Default: "10s".
+	// rate limiting. Default: "60s".
 	RateLimitWindow time.Duration `mapstructure:"rate_limit_window"`
 
 	// Feishu contains the Feishu/Lark channel configuration.

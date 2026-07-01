@@ -3,13 +3,14 @@ package feishu
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,9 +26,6 @@ func TestCryptoNewFeishuCrypto(t *testing.T) {
 	if crypto == nil {
 		t.Fatal("NewFeishuCrypto returned nil")
 	}
-	if crypto.appSecret != "secret_xyz" {
-		t.Errorf("appSecret = %q, want %q", crypto.appSecret, "secret_xyz")
-	}
 	if crypto.encryptKey != "VGhpcyBpcyBhIDMyLWJ5dGUgZW5jcnlwdGlvbjBrZXk" {
 		t.Errorf("encryptKey mismatch")
 	}
@@ -36,29 +34,37 @@ func TestCryptoNewFeishuCrypto(t *testing.T) {
 	}
 }
 
-// TestCryptoVerifySignatureEmptyHeaders verifies that missing
-// signature headers result in no error (passthrough for testing).
+// TestCryptoVerifySignatureEmptyHeaders verifies the behavior when
+// no signature headers are present. With no encrypt_key configured
+// (no-encryption mode), verification is skipped. With an encrypt_key
+// configured, missing headers are rejected.
 func TestCryptoVerifySignatureEmptyHeaders(t *testing.T) {
+	// No encrypt_key → skip verification (no-encryption mode).
 	crypto := NewFeishuCrypto(makeFeishuConfig("", "secret", "", ""))
 	body := []byte(`{"type":"event_callback"}`)
 	headers := http.Header{}
 
-	err := crypto.VerifySignature(headers, body)
-	if err != nil {
-		t.Errorf("expected nil error for empty headers, got: %v", err)
+	if err := crypto.VerifySignature(headers, body); err != nil {
+		t.Errorf("expected nil error with no encrypt_key, got: %v", err)
+	}
+
+	// encrypt_key configured but headers missing → reject.
+	cryptoEnc := NewFeishuCrypto(makeFeishuConfig("", "secret", "mykey", ""))
+	if err := cryptoEnc.VerifySignature(headers, body); err == nil {
+		t.Error("expected error when encrypt_key set but headers missing")
 	}
 }
 
-// TestCryptoVerifySignatureValid verifies correct HMAC-SHA256
-// signature computation and validation.
+// TestCryptoVerifySignatureValid verifies correct SHA256 signature
+// computation and validation per the Feishu event subscription spec.
 func TestCryptoVerifySignatureValid(t *testing.T) {
-	crypto := NewFeishuCrypto(makeFeishuConfig("", "secret", "", ""))
+	crypto := NewFeishuCrypto(makeFeishuConfig("", "secret", "my_encrypt_key", ""))
 	body := []byte(`{"type":"event_callback","event":{}}`)
 	timestamp := fmt.Sprintf("%d", time.Now().Unix())
 	nonce := "random_nonce_42"
 
-	// Compute the expected signature manually.
-	expected := computeHMACSignature(timestamp, nonce, "secret", body)
+	// Compute the expected signature using the Feishu spec.
+	expected := computeFeishuSignature(timestamp, nonce, "my_encrypt_key", body)
 
 	headers := http.Header{}
 	headers.Set("X-Lark-Request-Timestamp", timestamp)
@@ -74,13 +80,15 @@ func TestCryptoVerifySignatureValid(t *testing.T) {
 // TestCryptoVerifySignatureInvalid verifies that wrong signatures
 // are rejected.
 func TestCryptoVerifySignatureInvalid(t *testing.T) {
-	crypto := NewFeishuCrypto(makeFeishuConfig("", "secret", "", ""))
+	// An encrypt_key must be configured for signature verification
+	// to be enforced; otherwise verification is skipped.
+	crypto := NewFeishuCrypto(makeFeishuConfig("", "secret", "my_encrypt_key", ""))
 	body := []byte(`{"type":"event_callback"}`)
 
 	headers := http.Header{}
 	headers.Set("X-Lark-Request-Timestamp", fmt.Sprintf("%d", time.Now().Unix()))
 	headers.Set("X-Lark-Request-Nonce", "random")
-	headers.Set("X-Lark-Signature", "invalid_signature_base64=")
+	headers.Set("X-Lark-Signature", "deadbeef0000000000000000000000000000000000000000000000000000dead")
 
 	err := crypto.VerifySignature(headers, body)
 	if err == nil {
@@ -217,18 +225,18 @@ func TestCryptoDecryptEmptyEncryptField(t *testing.T) {
 	}
 }
 
-// TestComputeSignature verifies the HMAC signature matches the
-// Feishu v2 signing spec.
+// TestComputeSignature verifies the signature matches the Feishu
+// event subscription spec: HEX(SHA256(timestamp+nonce+encrypt_key+body)).
 func TestComputeSignature(t *testing.T) {
-	crypto := NewFeishuCrypto(makeFeishuConfig("", "test_secret", "", ""))
+	crypto := NewFeishuCrypto(makeFeishuConfig("", "test_secret", "test_encrypt_key", ""))
 	body := []byte(`"test_body"`)
 	timestamp := fmt.Sprintf("%d", time.Now().Unix())
 	nonce := "abcdef"
 
 	sig := crypto.computeSignature(timestamp, nonce, body)
 
-	// Manually compute the expected signature.
-	expected := computeHMACSignature(timestamp, nonce, "test_secret", body)
+	// Manually compute the expected signature per the Feishu spec.
+	expected := computeFeishuSignature(timestamp, nonce, "test_encrypt_key", body)
 
 	if sig != expected {
 		t.Errorf("signature = %s, want %s", sig, expected)
@@ -349,15 +357,20 @@ func makeFeishuConfig(appID, appSecret, encryptKey, verificationToken string) *c
 	}
 }
 
-// computeHMACSignature mimics the Feishu v2 signing algorithm for
-// test verification purposes.
-func computeHMACSignature(timestamp, nonce, secret string, body []byte) string {
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(timestamp))
-	mac.Write([]byte(nonce))
-	mac.Write([]byte(secret))
-	mac.Write(body)
-	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
+// computeFeishuSignature mimics the Feishu event subscription signing
+// algorithm for test verification purposes:
+//
+//	HEX( SHA256( timestamp + nonce + encrypt_key + body ) )
+//
+// This is a plain SHA256 digest (not HMAC), hex-encoded.
+func computeFeishuSignature(timestamp, nonce, encryptKey string, body []byte) string {
+	var sb strings.Builder
+	sb.WriteString(timestamp)
+	sb.WriteString(nonce)
+	sb.WriteString(encryptKey)
+	sb.Write(body)
+	sum := sha256.Sum256([]byte(sb.String()))
+	return hex.EncodeToString(sum[:])
 }
 
 // feishuEncrypt encrypts plaintext following the Feishu encryption

@@ -105,7 +105,7 @@ func (l *CoreLoop) RunStream(ctx context.Context, userID string, sessionID strin
 | **消息接收** | Event Subscription 回调（HTTP POST），含签名验证 |
 | **消息回复** | 被动回复（响应回调）+ 主动回复（response_url / 飞书卡片消息 API） |
 | **流式支持** | AI 流式卡片（streaming card），建议使用 |
-| **验证机制** | URL 挑战 + HMAC-SHA256 签名 |
+| **验证机制** | URL 挑战 + SHA256 签名（基于 Encrypt Key） |
 | **认证方式** | tenant_access_token → API 调用 |
 | **消息类型** | 文本、富文本、卡片、图片、文件等 |
 
@@ -375,9 +375,11 @@ POST /gateway/feishu/callback
    { "type": "url_verification", "challenge": "xxx" }
    → 直接返回 { "challenge": "xxx" }
      ↓
-2. Event Callback 签名验证
-   计算: HMAC-SHA256(timestamp + nonce + encrypt_key, body)
-   比对: 请求头 X-Lark-Signature
+2. Event Callback 签名验证（基于 Encrypt Key）
+   计算: SHA256(timestamp + nonce + encrypt_key + body) → HEX 小写
+   比对: 请求头 X-Lark-Signature（常量时间比较）
+   注意: 飞书使用纯 SHA256 摘要（非 HMAC），密钥经字符串拼接参与计算；
+        仅当应用配置了 Encrypt Key 时启用校验，否则跳过（明文模式）。
      ↓
 3. 解密事件体（如果加密）
    使用应用的 Encrypt Key 进行 AES-256-CBC 解密
@@ -596,7 +598,7 @@ type WeComChannelConfig struct {
 
 | 任务 | 产出 | 说明 |
 |------|------|------|
-| 2.1 URL 验证 & 签名 | `internal/gateway/feishu/crypto.go` | HMAC-SHA256 签名、token 缓存 |
+| 2.1 URL 验证 & 签名 | `internal/gateway/feishu/crypto.go` | SHA256 签名（基于 Encrypt Key）、AES 解密 |
 | 2.2 消息解析 | `internal/gateway/feishu/message.go` | JSON 解析、text/image/card 消息处理 |
 | 2.3 Channel 主体 | `internal/gateway/feishu/channel.go` | 实现 Channel 接口 |
 | 2.4 消息发送 | `internal/gateway/feishu/sender.go` | 被动回复、API 主动推送、流式卡片 |

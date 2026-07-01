@@ -1313,7 +1313,14 @@ func bootstrapSession(
 		// Register Feishu channel if enabled.
 		if wukongCfg.Gateway.Feishu.Enabled {
 			fc := feishu.NewFeishuChannel(wukongCfg, loop)
-			if err := state.GatewayServer.RegisterChannel(fc); err != nil {
+			// Fail-fast: refuse to register a misconfigured channel
+			// rather than silently accepting messages it can never
+			// reply to. This surfaces missing env vars (e.g.
+			// FEISHU_APP_SECRET) at startup instead of at runtime.
+			if err := fc.Validate(); err != nil {
+				util.Logger.Error("gateway: feishu channel NOT registered",
+					slog.String("reason", err.Error()))
+			} else if err := state.GatewayServer.RegisterChannel(fc); err != nil {
 				util.Logger.Warn("gateway: register feishu failed",
 					slog.String("error", err.Error()))
 			} else {

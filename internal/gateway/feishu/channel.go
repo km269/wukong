@@ -65,6 +65,54 @@ func NewFeishuChannel(
 	}
 }
 
+// Validate checks that the credentials required to send replies are
+// present. It should be called before registering the channel; a
+// non-nil error means the channel cannot function and should not be
+// registered.
+//
+// Required:
+//   - AppID:        identifies the Feishu app (cli_xxx)
+//   - AppSecret:    used by the Lark SDK to obtain tenant_access_token,
+//     which is mandatory for sending any proactive reply (text or
+//     streaming card). Without it every SendReply silently fails.
+//
+// Optional but recommended (only required when event encryption is
+// enabled on the Feishu app):
+//   - EncryptKey:          enables signature verification + decryption
+//   - VerificationToken:   legacy URL verification token
+//
+// Missing optional fields only produce a warning, since the channel
+// can still operate in "no encryption" mode.
+func (fc *FeishuChannel) Validate() error {
+	var missing []string
+	if fc.cfg.AppID == "" {
+		missing = append(missing, "app_id")
+	}
+	if fc.cfg.AppSecret == "" {
+		missing = append(missing, "app_secret")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf(
+			"feishu: missing required credentials: %s "+
+				"(check FEISHU_APP_SECRET and app_id in config)",
+			strings.Join(missing, ", "))
+	}
+
+	// Warn (not fail) on missing optional security fields.
+	if fc.cfg.EncryptKey == "" {
+		util.Logger.Warn("feishu: encrypt_key not configured — " +
+			"event signature verification & decryption disabled. " +
+			"Set FEISHU_ENCRYPT_KEY if event encryption is enabled " +
+			"on the Feishu app.")
+	}
+	if fc.cfg.VerificationToken == "" {
+		util.Logger.Warn("feishu: verification_token not configured — " +
+			"URL verification token check is relaxed. " +
+			"Set FEISHU_VERIFICATION_TOKEN for production use.")
+	}
+	return nil
+}
+
 // Name returns "feishu".
 func (fc *FeishuChannel) Name() string {
 	return channelName

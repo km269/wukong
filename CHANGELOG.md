@@ -6,6 +6,17 @@ All changes after v0.1.14 baseline.
 
 ## [Unreleased] — 2026-07-01
 
+### Gateway — 飞书无响应根因修复
+
+修复飞书机器人无响应的根因，并加固 Gateway 稳健性。
+
+- **签名验证算法修正** (`internal/gateway/feishu/crypto.go`): HMAC-SHA256+appSecret+Base64 → **纯 SHA256+encryptKey+hex**，对齐飞书事件订阅官方规范。收紧空签名头校验：未配置 Encrypt Key 时跳过（明文模式），配置后强制校验。
+- **异步 ACK 模式** (`internal/gateway/gateway.go`): handleChannel 改为先返回 200 再后台跑 agent，解决「agent 耗时 > 飞书 3s 回调超时 → 重试被去重丢弃 → 用户无响应」的死锁。agent 运行脱离 HTTP 生命周期，使用独立 context。
+- **凭证 fail-fast 校验** (`internal/gateway/feishu/channel.go`, `internal/cli/session.go`): 新增 `Validate()`，app_id/app_secret 缺失时拒绝注册 channel 并明确报错，避免运行时静默失败。
+- **限流参数放宽** (`config.yaml`, `defaults.go`, `types.go`, `gateway.go`): `rate_limit_window` 10s→60s，`rate_limit_per_user` 10→20；超限返回 200 而非 429，避免平台重试雪崩。
+- **路由精确匹配** (`internal/gateway/router.go`): 路径段边界匹配替代 `HasPrefix`，`/feishu` 不再误吃 `/feishuabc`；注册路径归一化（补 leading `/`、去 trailing `/`），修正去重检测。新增 `router_test.go` (9 用例)。
+- **文档同步** (`docs/GATEWAY_DEPLOY.md`, `docs/GATEWAY_CHANNEL_DESIGN.md`): 限流默认值、签名算法说明、文件职责表。
+
 ### Config & Documentation Overhaul
 
 - **config.yaml 重构**: 35 未分组节 → 15 逻辑分组 (A-O)，包含清晰层次结构

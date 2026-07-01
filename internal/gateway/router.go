@@ -38,7 +38,7 @@ func (r *ChannelRouter) Register(ch Channel) error {
 	defer r.mu.Unlock()
 
 	name := ch.Name()
-	path := ch.RoutePath()
+	path := normalizeRoutePath(ch.RoutePath())
 
 	if _, exists := r.channels[name]; exists {
 		return fmt.Errorf(
@@ -49,14 +49,23 @@ func (r *ChannelRouter) Register(ch Channel) error {
 			"gateway: route path %q already registered", path)
 	}
 
-	// Ensure path starts with "/"
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-
 	r.channels[name] = ch
 	r.paths[path] = ch
 	return nil
+}
+
+// normalizeRoutePath canonicalizes a channel route path: it must
+// start with "/" and must not end with "/" (except for the bare
+// root "/"). This keeps path-segment matching in Route() correct.
+func normalizeRoutePath(path string) string {
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	// Strip trailing slash unless this is the root "/".
+	for len(path) > 1 && strings.HasSuffix(path, "/") {
+		path = strings.TrimSuffix(path, "/")
+	}
+	return path
 }
 
 // Unregister removes a channel by name. Returns an error if the
@@ -72,7 +81,7 @@ func (r *ChannelRouter) Unregister(name string) error {
 	}
 
 	delete(r.channels, name)
-	delete(r.paths, ch.RoutePath())
+	delete(r.paths, normalizeRoutePath(ch.RoutePath()))
 	return nil
 }
 
@@ -83,24 +92,49 @@ func (r *ChannelRouter) Lookup(name string) Channel {
 	return r.channels[name]
 }
 
-// Route matches a URL path to a registered channel. The matching is
-// prefix-based: if a channel is registered with path "/feishu", then
-// "/feishu/callback" will match it.
+// Route matches a URL path to a registered channel. Matching is
+// path-segment based: a channel registered with "/feishu" matches
+// "/feishu" and "/feishu/callback", but NOT "/feishuabc" or
+// "/feishuxyz". This prevents one channel's prefix from shadowing
+// another (e.g. "/fe" vs "/feishu").
+//
+// Returns the matched Channel and the sub-path after the prefix
+// (e.g. "/callback"); the sub-path is "/" when the URL equals the
+// prefix exactly. Returns (nil, "") if no channel matches.
 func (r *ChannelRouter) Route(urlPath string) (Channel, string) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	// Normalize for consistent matching regardless of trailing slash.
+	target := normalizeRoutePath(urlPath)
+
 	for prefix, ch := range r.paths {
-		if strings.HasPrefix(urlPath, prefix) {
-			// Extract the sub-path after the prefix.
-			subPath := urlPath[len(prefix):]
-			if subPath == "" {
-				subPath = "/"
-			}
-			return ch, subPath
+		if !pathHasPrefix(target, prefix) {
+			continue
 		}
+		// Extract the sub-path after the prefix.
+		subPath := target[len(prefix):]
+		if subPath == "" {
+			subPath = "/"
+		}
+		return ch, subPath
 	}
 	return nil, ""
+}
+
+// pathHasPrefix reports whether path equals prefix or begins with
+// prefix+"/". This enforces a path-segment boundary so that prefix
+// "/feishu" matches "/feishu/callback" but rejects "/feishuabc".
+//
+// The root prefix "/" is a special case: it matches everything.
+func pathHasPrefix(path, prefix string) bool {
+	if prefix == "/" {
+		return true
+	}
+	if path == prefix {
+		return true
+	}
+	return strings.HasPrefix(path, prefix+"/")
 }
 
 // List returns metadata for all registered channels.

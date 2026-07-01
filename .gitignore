@@ -14,3 +14,8 @@ github.com/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local runtime database (SQLite WAL files)
+wukong.db
+wukong.db-shm
+wukong.db-wal
