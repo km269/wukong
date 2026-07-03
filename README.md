@@ -33,8 +33,8 @@
 | **反反爬** | 10 层: Stealth / Preflight / Antibot 5级升级 / cf_clearance / 161 UA 池 / sec-ch-ua / Referer / ErrNotHTML 路由 / Settle 网络空闲等待 |
 | **ZIM 打包** | Kiwix 兼容 (ZIM v6, zstd 编码 5): 元数据 + 图标 + 计数器 + 增量集群缓存 |
 | **扩展体系** | 12 内置扩展 + MCP Broker + ACP MCP Bridge |
-| **多协议** | 6 端点: Gateway (:9093) / A2A (:9090) / ACP (:9091) / AG-UI SSE (:8080) / ACP MCP (:3400) / ANP (:9092) |
-| **消息平台** | 企业微信 + 飞书 (Gateway 通道插件架构) |
+| **多协议** | 5 端点: A2A (:9090) / ACP (:9091) / AG-UI SSE (:8080) / ACP MCP (:3400) / ANP (:9092) |
+| **消息平台** | 飞书 (Gateway WebSocket 长连接，无需公网回调地址) |
 | **知识格式** | OKF v0.1: 6 包集成 (okf/ard/cortex/evolution/knowledge/skill) |
 | **Agent 互通** | ANP: DID 身份 / 能力协商 / E2EE 加密 / HTTP 签名 |
 | **配置系统** | 34 结构体 · 4级加载优先级 · 配置验证 · env var 展开 (9 类敏感字段) |

@@ -12,6 +12,17 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
+// makeFeishuConfig builds a FeishuChannelConfig populated with the
+// given credentials for use in tests.
+func makeFeishuConfig(appID, appSecret, encryptKey, verificationToken string) *gateway.FeishuChannelConfig {
+	return &gateway.FeishuChannelConfig{
+		AppID:             appID,
+		AppSecret:         appSecret,
+		EncryptKey:        encryptKey,
+		VerificationToken: verificationToken,
+	}
+}
+
 // TestResolveReceiveIDGroupChat detects group chat (oc_ prefix).
 func TestResolveReceiveIDGroupChat(t *testing.T) {
 	sender := NewFeishuSender(makeFeishuConfig("", "", "", ""))

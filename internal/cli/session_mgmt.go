@@ -5,7 +5,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -182,6 +181,3 @@ func createSessionService(
 
 	return svc.Service, cleanup, nil
 }
-
-// Ensure os is used.
-var _ = os.Getenv

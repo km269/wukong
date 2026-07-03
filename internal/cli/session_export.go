@@ -185,7 +185,7 @@ func exportSessionJSON(sess *session.Session) ([]byte, error) {
 		}
 	}
 
-	output := map[string]interface{}{
+	output := map[string]any{
 		"session_id":   sess.ID,
 		"exported_at":  time.Now().Format(time.RFC3339),
 		"event_count":  idx,

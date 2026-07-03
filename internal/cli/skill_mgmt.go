@@ -14,7 +14,6 @@ import (
 
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/skill"
-	"github.com/km269/wukong/internal/util"
 )
 
 // newSkillCmd creates the "wukong skill" command group.
@@ -209,6 +208,3 @@ func createSkillManager(configPath string) (*skill.Manager, error) {
 
 	return mgr, nil
 }
-
-// Ensure util is used
-var _ = util.Logger

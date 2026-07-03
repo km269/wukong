@@ -1,6 +1,20 @@
 # Gateway 部署文档
 
-> Wukong Gateway 将外部 IM 平台（飞书、企业微信）的回调桥接到 Wukong Agent 核心循环。
+> ⚠️ **本文档反映的是旧的 HTTP Webhook 架构，已过时。**
+>
+> 自 2026-07-02 起，Gateway 重构为**飞书 WebSocket 长连接**：Wukong 作为
+> client 主动拨号连飞书开放平台，**不再监听 HTTP 端口、不再需要公网回调
+> 地址/域名/HTTPS**，企业微信（WeCom）channel 也已移除（无 Go 官方 WS SDK）。
+>
+> 当前部署方式：
+> 1. 飞书开发者后台 → 事件订阅方式选「使用长连接接收事件/回调」，订阅
+>    `im.message.receive_v1`。
+> 2. 配置 `gateway.feishu.app_id` / `app_secret`（可选 `encrypt_key`）。
+> 3. 启动 Wukong 即可，无需 Nginx / 公网 IP / 端口暴露。
+>
+> 下文保留作历史参考。最新架构见 `internal/gateway/README.md` 与 `CHANGELOG.md`。
+
+> Wukong Gateway 将外部 IM 平台（飞书）的事件桥接到 Wukong Agent 核心循环。
 
 ## 目录
 
@@ -8,7 +22,6 @@
 - [架构](#架构)
 - [各平台接入步骤](#各平台接入步骤)
   - [飞书 / Lark](#飞书--lark)
-  - [企业微信 / WeCom](#企业微信--wecom)
 - [Nginx 反向代理（生产环境）](#nginx-反向代理生产环境)
 - [Docker 部署](#docker-部署)
 - [健康检查 & 监控](#健康检查--监控)

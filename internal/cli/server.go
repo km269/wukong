@@ -5,6 +5,8 @@ package cli
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -108,7 +110,33 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 	// Build health registry
 	healthReg := health.NewRegistry(Version)
-	registerHealthCheckers(healthReg, wukongCfg)
+	registerHealthCheckers(healthReg, wukongCfg, bootstrapState)
+
+	// Expose the health registry over HTTP so it is actually reachable
+	// (previously it was built but never attached to a listener).
+	// /healthz serves the full CheckResult JSON; /livez and /readyz are
+	// lightweight k8s-style liveness/readiness probes.
+	healthMux := http.NewServeMux()
+	// /healthz and /readyz both run the full check (503 when
+	// unhealthy); /livez is an always-200 liveness probe.
+	healthMux.Handle("/healthz", healthReg.HTTPHandler())
+	healthMux.Handle("/readyz", healthReg.HTTPHandler())
+	healthMux.Handle("/livez", health.LivenessHandler())
+	healthSrv := &http.Server{
+		Addr:         ":8086",
+		Handler:      healthMux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+	}
+	go func() {
+		util.Logger.Info("health: HTTP endpoint starting on :8086",
+			slog.String("paths", "/healthz /livez /readyz"))
+		if err := healthSrv.ListenAndServe(); err != nil &&
+			err != http.ErrServerClosed {
+			util.Logger.Warn("health: HTTP server error",
+				slog.String("error", err.Error()))
+		}
+	}()
 
 	// Print startup summary
 	printServerStartup(wukongCfg)
@@ -129,8 +157,11 @@ func runServer(cmd *cobra.Command, args []string) error {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		shutdownServers(shutdownCtx, bootstrapState)
-		loop.Close()
+		// Stop the health HTTP server first (best-effort).
+		_ = healthSrv.Shutdown(shutdownCtx)
+		// shutdownBootstrap stops servers AND closes the loop
+		// (idempotent via sync.Once).
+		_ = shutdownBootstrap(shutdownCtx, bootstrapState, loop)
 	}()
 
 	select {
@@ -209,25 +240,19 @@ func printServerStartup(cfg *config.WukongConfig) {
 	}
 
 	if cfg.Gateway.Enabled {
-		addr := cfg.Gateway.Address
-		if addr == "" {
-			addr = ":9093"
-		}
 		channels := ""
 		if cfg.Gateway.Feishu.Enabled {
 			channels += " Feishu"
 		}
-		if cfg.Gateway.WeCom.Enabled {
-			channels += " WeCom"
-		}
-		fmt.Printf("  ✓ Gateway  http://localhost%s  (Messaging:%s)\n",
-			addr, channels)
+		fmt.Printf("  ✓ Gateway  ws:// outbound  (Messaging:%s)\n",
+			channels)
 	} else {
 		fmt.Println("  - Gateway  disabled")
 	}
 
 	fmt.Printf("\nProvider: %s\n", cfg.DefaultProvider)
 	fmt.Printf("Model:    %s\n", resolveEffectiveModel(cfg))
+	fmt.Println("  Health    http://localhost:8086/healthz  (/livez /readyz)")
 	fmt.Println("\nServer is running. Press Ctrl+C to stop.")
 }
 
@@ -241,15 +266,20 @@ func resolveEffectiveModel(cfg *config.WukongConfig) string {
 }
 
 // registerHealthCheckers registers all subsystem health checkers.
+// state provides live handles (e.g. DBPing); cfg drives static config.
 func registerHealthCheckers(
 	reg *health.Registry,
 	cfg *config.WukongConfig,
+	state *BootstrapState,
 ) {
-	// Database health
-	reg.Register("database", health.DBChecker("database", func(ctx context.Context) error {
-		// Basic check: database pool exists
-		return nil
-	}))
+	// Database health — a real ping (no longer a no-op). Falls back to
+	// a healthy-with-note result when no DB pool is configured (e.g.
+	// pure in-memory test setups).
+	dbPing := func(ctx context.Context) error { return nil }
+	if state != nil && state.DBPing != nil {
+		dbPing = state.DBPing
+	}
+	reg.Register("database", health.DBChecker("database", dbPing))
 
 	// A2A server health
 	if cfg.A2AServer.Enabled {
@@ -275,41 +305,25 @@ func registerHealthCheckers(
 				cfg.Memory.Backend, cfg.Memory.AutoExtract),
 		}
 	})
+
+	// Gateway health — reports the live running state so operators
+	// can tell whether the messaging channels are connected.
+	if state != nil && state.GatewayServer != nil {
+		reg.Register("gateway", func(ctx context.Context) health.ComponentHealth {
+			st := health.StatusHealthy
+			msg := "running"
+			if !state.GatewayServer.IsRunning() {
+				st = health.StatusUnhealthy
+				msg = "not running"
+			}
+			return health.ComponentHealth{
+				Name: "gateway", Status: st, Message: msg,
+			}
+		})
+	}
 }
 
-// shutdownServers gracefully shuts down all protocol servers.
-func shutdownServers(ctx context.Context, state *BootstrapState) {
-	if state.A2AServer != nil {
-		if err := state.A2AServer.Stop(ctx); err != nil {
-			util.Logger.Warn("A2A server stop error", "error", err.Error())
-		}
-		fmt.Println("  A2A server stopped")
-	}
-	if state.AGUIServer != nil {
-		_ = state.AGUIServer.Stop(ctx)
-		fmt.Println("  AG-UI server stopped")
-	}
-	if state.ACPServer != nil {
-		_ = state.ACPServer.Stop(ctx)
-		fmt.Println("  ACP server stopped")
-	}
-	if state.ACPMCPBridge != nil {
-		if err := state.ACPMCPBridge.Stop(); err != nil {
-			util.Logger.Warn("ACP MCP bridge stop error",
-				"error", err.Error())
-		}
-		fmt.Println("  ACP MCP bridge stopped")
-	}
-	if state.ARDRegistry != nil {
-		_ = state.ARDRegistry.Shutdown(ctx)
-		fmt.Println("  ARD registry stopped")
-	}
-	if state.KnowledgeMgr != nil {
-		_ = state.KnowledgeMgr.Close()
-		fmt.Println("  Knowledge manager stopped")
-	}
-	if state.GatewayServer != nil {
-		_ = state.GatewayServer.Stop(ctx)
-		fmt.Println("  Gateway server stopped")
-	}
-}
+// shutdownServers has been replaced by the unified shutdownBootstrap
+// (see shutdown.go), which covers all BootstrapState fields including
+// ANPServer and is idempotent via sync.Once.
+

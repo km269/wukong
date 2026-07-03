@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/km269/wukong/internal/config"
 
@@ -119,8 +120,7 @@ func TestExtractCommandFromArgs(t *testing.T) {
 }
 
 func TestBuildSystemInstruction_WithTopOfMind(t *testing.T) {
-	cfg := &config.WukongConfig{}
-	instruction := buildSystemInstruction(cfg, "Always use Chinese.", "")
+	instruction := buildSystemInstruction("Always use Chinese.", "")
 	if instruction == "" {
 		t.Error("expected non-empty instruction with top of mind")
 	}
@@ -133,8 +133,7 @@ func TestBuildSystemInstruction_WithTopOfMind(t *testing.T) {
 }
 
 func TestBuildSystemInstruction_WithoutTopOfMind(t *testing.T) {
-	cfg := &config.WukongConfig{}
-	instruction := buildSystemInstruction(cfg, "", "")
+	instruction := buildSystemInstruction("", "")
 	if instruction == "" {
 		t.Error("expected non-empty instruction")
 	}
@@ -262,3 +261,68 @@ func TestCoreLoop_CloseIsIdempotent(t *testing.T) {
 		t.Errorf("third close should succeed: %v", err)
 	}
 }
+
+// TestCoreLoop_CloseWaitsForInFlightRun verifies that Close() blocks
+// until all in-flight RunStream synchronous side effects (tracked by
+// runWg) have completed. This is the regression test for the race in
+// which post-run recall/cortex/MemoryFlow writes hit a DB pool that
+// closeFn has already closed.
+//
+// We simulate an in-flight RunStream by Add(1)-ing runWg directly and
+// gating the matching Done() on a channel, then asserting Close does
+// not return until that channel is closed. Run under `-race` to catch
+// any unsynchronized access.
+func TestCoreLoop_CloseWaitsForInFlightRun(t *testing.T) {
+	loop := &CoreLoop{
+		cfg: &config.WukongConfig{},
+	}
+
+	// Simulate an in-flight RunStream that holds runWg.
+	loop.runWg.Add(1)
+	release := make(chan struct{})
+
+	closeReturned := make(chan error, 1)
+	go func() {
+		closeReturned <- loop.Close()
+	}()
+
+	// Close must be blocked waiting on runWg (give it a moment to
+	// reach runWg.Wait()). If Close returned already, the fix is broken.
+	select {
+	case err := <-closeReturned:
+		t.Fatalf("Close returned %v before the in-flight run finished", err)
+	case <-time.After(50 * time.Millisecond):
+		// Expected: Close is still blocked on runWg.Wait().
+	}
+
+	// Release the simulated in-flight run.
+	close(release)
+	loop.runWg.Done()
+
+	// Now Close should return promptly.
+	select {
+	case err := <-closeReturned:
+		if err != nil {
+			t.Errorf("Close returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return after in-flight run finished")
+	}
+}
+
+// TestCoreLoop_CloseRejectsNewRun verifies that once Close has flipped
+// l.closed, subsequent Run calls are rejected (so no new runWg entries
+// can appear after Close begins waiting).
+func TestCoreLoop_CloseRejectsNewRun(t *testing.T) {
+	loop := &CoreLoop{cfg: &config.WukongConfig{}}
+	if err := loop.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	_, err := loop.Run(
+		context.Background(), "u", "s", model.NewUserMessage("x"),
+	)
+	if err == nil {
+		t.Fatal("expected Run to be rejected after Close")
+	}
+}
+

@@ -20,6 +20,7 @@
 package gateway
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 	"time"
@@ -62,11 +63,17 @@ type RateLimiter struct {
 	maxReqPerWin  int
 	maxConcurrent int
 
-	// Semaphore-style concurrency control.
-	concurrent int
-	cond       *sync.Cond
-	ticker     *time.Ticker
-	stopCh     chan struct{}
+	// Semaphore-style concurrency control. slots is a buffered channel
+	// of capacity maxConcurrent; acquiring a slot sends into it and
+	// releasing drains one. Unlike the previous sync.Cond approach,
+	// this lets acquisition honour a context (AllowCtx) so a saturated
+	// gateway no longer blocks the platform SDK's receive loop
+	// indefinitely — when ctx is cancelled (e.g. gateway shutdown) the
+	// waiter returns immediately instead of parking forever.
+	slots chan struct{}
+
+	ticker *time.Ticker
+	stopCh chan struct{}
 }
 
 // NewRateLimiter creates a rate limiter with the given parameters.
@@ -88,7 +95,9 @@ func NewRateLimiter(
 		ticker:        time.NewTicker(60 * time.Second),
 		stopCh:        make(chan struct{}),
 	}
-	rl.cond = sync.NewCond(&rl.mu)
+	if maxConcurrent > 0 {
+		rl.slots = make(chan struct{}, maxConcurrent)
+	}
 
 	if maxReqPerWin > 0 {
 		go rl.cleanupLoop()
@@ -101,59 +110,88 @@ func NewRateLimiter(
 	return rl
 }
 
-// Allow checks whether a request from a given platform user is
-// allowed.  It first checks the per-user rate limit, then acquires a
-// concurrency slot (if maxConcurrent > 0).
-//
-// On success it returns a release func that the caller must invoke
-// after the agent run completes.  On failure it returns an error
-// describing the rejection reason.
+// Allow checks whether a request from a given platform user is allowed
+// without any cancellation. It is a convenience wrapper around AllowCtx
+// with a background context, kept for backward compatibility.
 func (rl *RateLimiter) Allow(
 	platform, userID string,
+) (release func(), allowed bool) {
+	return rl.AllowCtx(context.Background(), platform, userID)
+}
+
+// AllowCtx checks whether a request from a given platform user is
+// allowed. It first applies the per-user sliding-window rate check
+// (immediate reject), then acquires a concurrency slot honouring ctx:
+// if all slots are taken it blocks until either a slot frees or ctx is
+// cancelled (in which case it returns (nil, false) promptly).
+//
+// On success it returns a release func that the caller MUST invoke
+// after the agent run completes (typically via defer) to free the slot.
+// On failure it returns a nil release and allowed=false.
+//
+// The ctx-awareness is critical: dispatch() is invoked synchronously by
+// a Channel (e.g. the Feishu SDK's receive goroutine), so an
+// unbounded wait here would stall all subsequent message reception
+// whenever concurrency is saturated. Passing the gateway run context
+// ensures shutdown (or any cancellation) promptly unblocks the waiter.
+func (rl *RateLimiter) AllowCtx(
+	ctx context.Context, platform, userID string,
 ) (release func(), allowed bool) {
 	if rl.maxReqPerWin <= 0 && rl.maxConcurrent <= 0 {
 		return func() {}, true
 	}
 
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-
-	// 1. Per-user rate check.
+	// 1. Per-user rate check (instant reject, never blocks).
 	if rl.maxReqPerWin > 0 {
+		rl.mu.Lock()
 		key := platform + ":" + userID
 		sw := rl.users[key]
 		if sw == nil {
 			sw = &slidingWindow{}
 			rl.users[key] = sw
 		}
-		if !sw.allow(time.Now(), rl.window, rl.maxReqPerWin) {
+		ok := sw.allow(time.Now(), rl.window, rl.maxReqPerWin)
+		rl.mu.Unlock()
+		if !ok {
 			return nil, false
 		}
 	}
 
-	// 2. Concurrency gate (block until a slot opens).
+	// 2. Concurrency gate via a buffered-channel semaphore. select on
+	//    ctx.Done() so a cancelled dispatch returns immediately rather
+	//    than blocking the SDK receive loop.
 	if rl.maxConcurrent > 0 {
-		for rl.concurrent >= rl.maxConcurrent {
-			rl.cond.Wait()
+		select {
+		case rl.slots <- struct{}{}:
+			// Acquired.
+		case <-ctx.Done():
+			return nil, false
 		}
-		rl.concurrent++
 	}
 
-	return func() { rl.release() }, true
+	return rl.release, true
 }
 
-// release decrements the concurrency counter and signals waiters.
+// release drains one concurrency slot. It is safe to call even when
+// concurrency limiting is disabled (no-op) and is idempotent only in
+// the sense that the caller is contractually required to call it once
+// per successful AllowCtx.
 func (rl *RateLimiter) release() {
-	if rl.maxConcurrent <= 0 {
+	if rl.maxConcurrent <= 0 || rl.slots == nil {
 		return
 	}
-	rl.mu.Lock()
-	rl.concurrent--
-	rl.cond.Signal()
-	rl.mu.Unlock()
+	select {
+	case <-rl.slots:
+	default:
+		// Defensive: a release without a matching acquire would
+		// underflow; ignore rather than block forever.
+	}
 }
 
-// Stop cleanly shuts down the background cleanup goroutine.
+// Stop cleanly shuts down the background cleanup goroutine. The
+// channel-based semaphore needs no explicit wake-up: any AllowCtx
+// waiter blocked on rl.slots is unblocked by ctx cancellation at the
+// caller (the gateway cancels the run context during Stop).
 func (rl *RateLimiter) Stop() {
 	rl.ticker.Stop()
 	close(rl.stopCh)
@@ -202,11 +240,19 @@ type RateLimiterMetrics struct {
 // Metrics returns a snapshot of current rate limiter state.
 func (rl *RateLimiter) Metrics() RateLimiterMetrics {
 	rl.mu.Lock()
-	defer rl.mu.Unlock()
+	activeUsers := len(rl.users)
+	rl.mu.Unlock()
+
+	concurrent := 0
+	if rl.maxConcurrent > 0 && rl.slots != nil {
+		// Each element in slots is one occupied token (acquired by
+		// sending, freed by receiving), so len(slots) == in-use count.
+		concurrent = len(rl.slots)
+	}
 
 	return RateLimiterMetrics{
-		ActiveUsers:   len(rl.users),
-		Concurrent:    rl.concurrent,
+		ActiveUsers:   activeUsers,
+		Concurrent:    concurrent,
 		MaxConcurrent: rl.maxConcurrent,
 	}
 }

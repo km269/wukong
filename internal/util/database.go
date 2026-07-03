@@ -3,6 +3,7 @@ package util
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -188,7 +189,7 @@ func (mp *MultiPool) Close() error {
 	mp.pools = make(map[string]*DatabasePool)
 
 	if len(errs) > 0 {
-		return fmt.Errorf("multi-pool close errors: %v", errs)
+		return fmt.Errorf("multi-pool close errors: %w", errors.Join(errs...))
 	}
 	return nil
 }

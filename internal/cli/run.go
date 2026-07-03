@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -78,10 +79,12 @@ Examples:
 					"bootstrap failed: %w", err)
 			}
 			defer func() {
-				if loop != nil {
-					loop.Close()
-				}
-				cleanupBootstrap(state)
+				// shutdownBootstrap closes both the servers (in
+				// state) and the agent loop, and is idempotent.
+				shutdownCtx, cancel := context.WithTimeout(
+					context.Background(), 10*time.Second)
+				defer cancel()
+				_ = shutdownBootstrap(shutdownCtx, state, loop)
 			}()
 
 			// Track working directory for project recovery.
@@ -337,27 +340,7 @@ func resolveUserID() string {
 	return userID
 }
 
-// cleanupBootstrap shuts down the bootstrapped resources.
-func cleanupBootstrap(state *BootstrapState) {
-	if state == nil {
-		return
-	}
-	if state.A2AServer != nil {
-		_ = state.A2AServer.Stop(context.Background())
-	}
-	if state.AGUIServer != nil {
-		_ = state.AGUIServer.Stop(context.Background())
-	}
-	if state.ACPServer != nil {
-		_ = state.ACPServer.Stop(context.Background())
-	}
-	if state.ACPMCPBridge != nil {
-		_ = state.ACPMCPBridge.Stop()
-	}
-	if state.KnowledgeMgr != nil {
-		_ = state.KnowledgeMgr.Close()
-	}
-	if state.GatewayServer != nil {
-		_ = state.GatewayServer.Stop(context.Background())
-	}
-}
+// cleanupBootstrap has been replaced by the unified shutdownBootstrap
+// (see shutdown.go), which covers all BootstrapState fields (including
+// ARDRegistry and ANPServer) and is idempotent via sync.Once.
+

@@ -15,7 +15,6 @@ import (
 	"github.com/km269/wukong/internal/apps"
 	"github.com/km269/wukong/internal/apps/server"
 	"github.com/km269/wukong/internal/config"
-	"github.com/km269/wukong/internal/util"
 )
 
 // newAppsCmd creates the "wukong apps" command group.
@@ -729,9 +728,6 @@ Examples:
 
 	return cmd
 }
-
-// Ensure util is used.
-var _ = util.Logger
 
 // ==========================================================================
 // apps clone

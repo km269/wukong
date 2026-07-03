@@ -27,7 +27,6 @@
 | Providers | api_key |
 | A2A Remotes | api_key, jwt_secret |
 | Gateway Feishu | app_secret, encrypt_key, verification_token |
-| Gateway WeCom | secret, token, encoding_aes_key |
 | CortexDB | embedding_api_key |
 | Dify | api_secret |
 | Observability (Langfuse) | public_key, secret_key |
@@ -65,7 +64,6 @@
 - anp.enabled 但 did_domain 为空
 - anp.e2ee_enabled 但 meta_protocol 未启用
 - gateway.feishu.enabled 但 app_id 为空
-- gateway.wecom.enabled 但 corpid 为空
 - gateway.enabled 但无任何 channel 激活
 
 ---
@@ -470,17 +468,6 @@ gateway:
     stream_card_update_interval: "500ms"
     max_message_length: 4096
     enable_file_receive: false
-
-  wecom:
-    enabled: false
-    corpid: ""
-    secret: "${WECOM_SECRET}"
-    token: "${WECOM_TOKEN}"
-    encoding_aes_key: "${WECOM_ENCODING_AES_KEY}"
-    stream_enabled: true
-    stream_update_interval: "1s"
-    max_message_length: 2048
-    enable_card_reply: true
 ```
 
 ---
@@ -735,7 +722,7 @@ gateway: { enabled: true }
 | H5 | code_mode | CodeModeConfig | 3 |
 | H6 | apps | AppsConfig + CloneDefaults(31) + PackDefaults(5) | 39 |
 | I | extensions | ExtensionConfig | 18 |
-| J1 | gateway | GatewayConfig + FeishuChannel(8) + WeComChannel(8) | 25 |
+| J1 | gateway | GatewayConfig + FeishuChannel(8) | 17 |
 | J2 | a2a_server | A2AServerConfig | 4 |
 | J3 | agui | AGUIConfig | 3 |
 | J4 | acp_server | ACPServerConfig | 6 |

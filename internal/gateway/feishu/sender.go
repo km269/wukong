@@ -12,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/gateway"
 	"github.com/km269/wukong/internal/util"
 	lark "github.com/larksuite/oapi-sdk-go/v3"
@@ -41,7 +40,7 @@ const (
 //     via SDK for a "long connection" streaming experience
 //   - Proactive response_url replies (when available, bypasses SDK)
 type FeishuSender struct {
-	cfg           *config.FeishuChannelConfig
+	cfg           *gateway.FeishuChannelConfig
 	larkClient    *lark.Client
 	respURLClient *http.Client
 }
@@ -50,7 +49,7 @@ type FeishuSender struct {
 // for authenticated API calls. The SDK handles token caching and
 // auto-refresh internally.
 func NewFeishuSender(
-	cfg *config.FeishuChannelConfig,
+	cfg *gateway.FeishuChannelConfig,
 ) *FeishuSender {
 	apiBase := cfg.APIBase
 	if apiBase == "" {
@@ -69,6 +68,16 @@ func NewFeishuSender(
 			Timeout: senderHTTPTimeout,
 		},
 	}
+}
+
+// Close releases the sender's resources. The Lark SDK client does not
+// require explicit teardown; this closes idle connections held by the
+// response_url HTTP client. It is safe to call multiple times.
+func (fs *FeishuSender) Close() error {
+	if fs.respURLClient != nil {
+		fs.respURLClient.CloseIdleConnections()
+	}
+	return nil
 }
 
 // SendTextReply sends a text message via the Feishu Send Message API

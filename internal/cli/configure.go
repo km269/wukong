@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -197,20 +198,20 @@ func defaultConfig() *config.WukongConfig {
 			MaxToolIterations:     30,
 			ParallelTools:         true,
 			Streaming:             true,
-			MaxRunDuration:        300 * 1000000000, // 300s in ns
+			MaxRunDuration:        300 * time.Second,
 			Temperature:           0.7,
 			MaxTokens:             4096,
 			ToolRetryEnabled:      true,
 			ToolRetryMaxAttempts:  3,
-			ToolRetryInitialWait:  1 * 1000000000, // 1s in ns
+			ToolRetryInitialWait:  time.Second,
 			ToolRetryBackoffFactor: 2.0,
 			EnablePostToolPrompt:  true,
 		},
 		Security: config.SecurityConfig{
 			MalwareScanEnabled:     true,
 			BlockDangerousCommands: true,
-			DefaultTimeout:         30 * 1000000000, // 30s in ns
-			MaxTimeout:             300 * 1000000000, // 300s in ns
+			DefaultTimeout:         30 * time.Second,
+			MaxTimeout:             300 * time.Second,
 			BlockedCommands: []string{
 				"rm -rf /", "dd if=/dev/zero",
 				"mkfs.", "> /dev/sda", "fork bomb",
@@ -232,7 +233,7 @@ func defaultConfig() *config.WukongConfig {
 			Headless:        true,
 			CacheDir:        ".wukong_cache",
 			MaxDownloadSize: 104857600, // 100MB
-			Timeout:         60 * 1000000000, // 60s in ns
+			Timeout:         60 * time.Second,
 		},
 		Recall: config.RecallConfig{
 			Enabled:              true,
@@ -258,7 +259,7 @@ func defaultConfig() *config.WukongConfig {
 		},
 		CodeMode: config.CodeModeConfig{
 			Enabled:     true,
-			Timeout:     10 * 1000000000, // 10s default
+			Timeout:     10 * time.Second,
 			MaxMemoryMB: 128,
 		},
 		Apps: config.AppsConfig{

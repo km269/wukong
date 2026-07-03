@@ -10,7 +10,31 @@
 // starting.
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"net/url"
+)
+
+// validateURLField returns a non-empty warning string if raw is non-empty
+// but does not parse as a valid URL with a scheme and host. An empty raw
+// value is allowed (the field is optional). This is a sanity check, not
+// a reachability probe — it catches typos like "htp://" or a missing
+// scheme before the value reaches a subsystem that would fail opaquely.
+func validateURLField(raw, field string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Sprintf("%s %q is not a valid URL: %v", field, raw, err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return fmt.Sprintf(
+			"%s %q is missing a scheme or host (expected e.g. https://host)",
+			field, raw)
+	}
+	return ""
+}
 
 // Validate checks the loaded configuration for common errors and
 // returns an error for fatal issues. Non-fatal issues are logged
@@ -78,33 +102,6 @@ func (c *WukongConfig) Validate() error {
 		}
 	}
 
-	// Validate memory cleanup thresholds.
-	if c.Memory.EnableSmartCleanup {
-		if c.Memory.CleanupTriggerThreshold < 0.0 ||
-			c.Memory.CleanupTriggerThreshold > 1.0 {
-			return fmt.Errorf(
-				"memory.cleanup_trigger_threshold %.2f is out of range [0.0, 1.0]",
-				c.Memory.CleanupTriggerThreshold,
-			)
-		}
-		if c.Memory.CleanupTargetThreshold < 0.0 ||
-			c.Memory.CleanupTargetThreshold > 1.0 {
-			return fmt.Errorf(
-				"memory.cleanup_target_threshold %.2f is out of range [0.0, 1.0]",
-				c.Memory.CleanupTargetThreshold,
-			)
-		}
-		if c.Memory.CleanupTargetThreshold >=
-			c.Memory.CleanupTriggerThreshold {
-			return fmt.Errorf(
-				"memory.cleanup_target_threshold (%.2f) must be "+
-					"less than cleanup_trigger_threshold (%.2f)",
-				c.Memory.CleanupTargetThreshold,
-				c.Memory.CleanupTriggerThreshold,
-			)
-		}
-	}
-
 	// Validate telemetry sample rate.
 	if c.Telemetry.Enabled {
 		if c.Telemetry.SampleRate < 0.0 ||
@@ -159,10 +156,10 @@ func (c *WukongConfig) Warnings() []string {
 	}
 
 	if c.Recall.SearchMode == "hybrid" &&
-		c.Recall.EmbeddingProvider == "" &&
+		c.Recall.EmbeddingModel == "" &&
 		c.DefaultProvider == "" {
 		warnings = append(warnings,
-			"recall.search_mode is hybrid but no embedding provider "+
+			"recall.search_mode is hybrid but no embedding model "+
 				"or default_provider is configured")
 	}
 
@@ -210,15 +207,47 @@ func (c *WukongConfig) Warnings() []string {
 				"gateway.feishu.enabled is true but app_id is empty; "+
 					"Feishu channel may fail to authenticate")
 		}
-		if c.Gateway.WeCom.Enabled && c.Gateway.WeCom.CorpID == "" {
+		if !c.Gateway.Feishu.Enabled {
 			warnings = append(warnings,
-				"gateway.wecom.enabled is true but corpid is empty; "+
-					"WeCom channel may fail to authenticate")
-		}
-		if !c.Gateway.Feishu.Enabled && !c.Gateway.WeCom.Enabled {
-			warnings = append(warnings,
-				"gateway.enabled is true but no channel (feishu/wecom) is enabled; "+
+				"gateway.enabled is true but no channel (feishu) is enabled; "+
 					"Gateway will start with no active message channels")
+		}
+	}
+
+	// URL sanity checks for enabled subsystems. These catch malformed
+	// URLs (missing scheme/host, typos) before they reach a subsystem
+	// that would fail opaquely at runtime. Only non-empty fields are
+	// checked — empty means "use the default".
+	if w := validateURLField(c.Session.RedisURL, "session.redis_url"); w != "" {
+		warnings = append(warnings, w)
+	}
+	if c.Cortex.Enabled {
+		if w := validateURLField(c.Cortex.EmbeddingBaseURL,
+			"cortex.embedding_base_url"); w != "" {
+			warnings = append(warnings, w)
+		}
+	}
+	if c.ARD.Enabled {
+		if w := validateURLField(c.ARD.RegistryURL,
+			"ard.registry_url"); w != "" {
+			warnings = append(warnings, w)
+		}
+	}
+	if c.Dify.Enabled {
+		if w := validateURLField(c.Dify.BaseURL, "dify.base_url"); w != "" {
+			warnings = append(warnings, w)
+		}
+	}
+	for _, p := range c.Providers {
+		if w := validateURLField(p.BaseURL,
+			"providers["+p.Name+"].base_url"); w != "" {
+			warnings = append(warnings, w)
+		}
+	}
+	for _, r := range c.Summon.A2ARemotes {
+		if w := validateURLField(r.ServerURL,
+			"summon.a2a_remotes["+r.Name+"].server_url"); w != "" {
+			warnings = append(warnings, w)
 		}
 	}
 

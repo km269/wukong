@@ -68,7 +68,7 @@ providers:
   - name: "lmstudio"
     type: "lmstudio"
     api_key: "lmstudio"
-    base_url: "http://localhost:1234/v1"
+    base_url: "http://192.168.50.97:1234/v1"
     model: "google/gemma-4-26b-a4b"
 
   # ACP provider: connects to a remote ACP agent via MCP bridge.
@@ -466,11 +466,15 @@ acp_mcp:
   path: "/mcp"
 
 # ---------------------------------------------------------------------------
-# J5. Gateway — Multi-platform messaging channel (Feishu, WeCom, etc.)
+# J5. Gateway — messaging channel (Feishu WebSocket long-connection)
 # ---------------------------------------------------------------------------
 gateway:
   enabled: true                    # global gateway toggle
-  address: ":9093"                   # HTTP listen address
+  # NOTE: The gateway no longer listens on an HTTP port. Each channel
+  # owns its own inbound transport (Feishu uses a WebSocket
+  # long-connection that dials out to the platform), so no public
+  # callback URL / domain / HTTPS ingress is required — it runs from
+  # a local or intranet host.
   default_timeout: "120s"             # agent single-run timeout
   max_concurrent_sessions: 100        # max concurrent agent sessions
   message_dedup_ttl: "5m"            # message dedup window
@@ -478,29 +482,21 @@ gateway:
   rate_limit_window: "60s"            # per-user rate limit sliding window
 
   # --- Feishu / Lark ---
+  # Receives messages over a WebSocket long-connection (dial-out to the
+  # Feishu open platform). In the Feishu developer console, set the
+  # event subscription mode to "使用长连接接收事件/回调" (receive events
+  # via long connection) and subscribe to im.message.receive_v1.
   feishu:
     enabled: true
     app_id: "cli_aa98378746f8dcd7"
     app_secret: "${FEISHU_APP_SECRET}"
     api_base: "https://open.feishu.cn/open-apis"    # or open.larksuite.com for Lark
-    encrypt_key: "${FEISHU_ENCRYPT_KEY}"
-    verification_token: "${FEISHU_VERIFICATION_TOKEN}"
+    encrypt_key: "${FEISHU_ENCRYPT_KEY}"             # only if encryption strategy is enabled
+    verification_token: "${FEISHU_VERIFICATION_TOKEN}"  # deprecated in long-connection mode
     stream_card_enabled: true
     stream_card_update_interval: "500ms"
     max_message_length: 4096
     enable_file_receive: true
-
-  # --- WeCom / 企业微信 ---
-  wecom:
-    enabled: false
-    corpid: ""
-    secret: "${WECOM_SECRET}"
-    token: "${WECOM_TOKEN}"
-    encoding_aes_key: "${WECOM_ENCODING_AES_KEY}"
-    stream_enabled: true
-    stream_update_interval: "1s"
-    max_message_length: 2048
-    enable_card_reply: true
 
 # ===========================================================================
 # K. Agent-to-Agent Communication

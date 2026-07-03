@@ -7,6 +7,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -30,6 +31,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/memory"
 	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/planner/builtin"
 	"trpc.group/trpc-go/trpc-agent-go/planner/react"
 	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail"
@@ -66,19 +68,22 @@ type CoreLoop struct {
 	mu     sync.RWMutex
 	closed bool
 	bgWg   sync.WaitGroup // tracks background goroutines for graceful shutdown
+	runWg  sync.WaitGroup // tracks in-flight RunStream calls' synchronous
+	// post-run side effects (recall/cortex/MemoryFlow writes) so
+	// Close waits for them before closing the DB pool.
 }
 
 // CoreLoopConfig holds the dependencies for creating a CoreLoop.
 type CoreLoopConfig struct {
-	Config         *config.WukongConfig
-	Factory        *provider.Factory
-	SessionService session.Service
-	MemoryService  memory.Service
+	Config          *config.WukongConfig
+	Factory         *provider.Factory
+	SessionService  session.Service
+	MemoryService   memory.Service
 	ArtifactService artifact.Service
-	ToolSets       []tool.ToolSet
-	FunctionTools  []tool.Tool
-	SecurityGuard  *security.Guard
-	RecallStore    *recall.Store
+	ToolSets        []tool.ToolSet
+	FunctionTools   []tool.Tool
+	SecurityGuard   *security.Guard
+	RecallStore     *recall.Store
 	// CortexStore is an optional CortexDB-backed store for
 	// HNSW vector indexing alongside FTS5 recall storage.
 	CortexStore   *cortex.CortexStore
@@ -138,7 +143,7 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 	// Add tRPC-native todo_write tool for structured task tracking.
 	// Tasks persist in Session state and survive across conversation turns.
 	// Uses session.State (temp: prefix) per invocation branch for isolation.
-	if cfg.Config.Agent.TodoToolEnabled {
+	if cfg.Config.Todo.EnableNativeTodo {
 		todoTool := todotool.New()
 		allTools = append(allTools, todoTool)
 		util.Logger.Info("todo_write tool enabled (tRPC-native, session-persisted)")
@@ -232,32 +237,11 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 	// before being passed to the agent. This creates a lightweight
 	// agent+runner for the reviewer, separate from the main agent.
 	if cfg.Config.Security.GuardrailEnabled {
-		guardModel, gErr := cfg.Factory.CreateDefaultModel()
-		if gErr == nil && guardModel != nil {
-			guardRunner, grErr := createGuardrailRunner(
-				guardModel, cfg.Config,
+		if grPlugin := buildGuardrailPlugin(cfg.Factory); grPlugin != nil {
+			runnerOpts = append(runnerOpts, runner.WithPlugins(grPlugin))
+			util.Logger.Info(
+				"guardrail plugin enabled (prompt injection detection)",
 			)
-			if grErr == nil {
-				piReviewer, rErr := review.New(guardRunner)
-				if rErr == nil {
-					piPlugin, pErr := promptinjection.New(
-						promptinjection.WithReviewer(piReviewer),
-					)
-					if pErr == nil {
-						grPlugin, gErr2 := guardrail.New(
-							guardrail.WithPromptInjection(piPlugin),
-						)
-						if gErr2 == nil {
-							runnerOpts = append(runnerOpts,
-								runner.WithPlugins(grPlugin),
-							)
-							util.Logger.Info(
-								"guardrail plugin enabled (prompt injection detection)",
-							)
-						}
-					}
-				}
-			}
 		}
 	}
 
@@ -269,8 +253,8 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 	// Since tRPC-Agent-Go v1.10.0 does not yet ship an official
 	// todoenforcer extension, we use a lightweight in-house
 	// implementation as a runner plugin.
-	if cfg.Config.Agent.TodoEnforcerEnabled &&
-		cfg.Config.Agent.TodoToolEnabled {
+	if cfg.Config.Todo.EnableEnforcer &&
+		cfg.Config.Todo.EnableNativeTodo {
 		runnerOpts = append(runnerOpts,
 			runner.WithPlugins(newTodoEnforcer()),
 		)
@@ -378,7 +362,7 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 				}
 			}
 			if len(errs) > 0 {
-				return fmt.Errorf("close errors: %v", errs)
+				return fmt.Errorf("close errors: %w", errors.Join(errs...))
 			}
 			return nil
 		},
@@ -463,7 +447,7 @@ func (l *CoreLoop) Run(
 			util.Logger.Warn("memoryflow: wakeup failed",
 				slog.String("error", wErr.Error()))
 		} else if wc == "" {
-			util.Logger.Debug("memoryflow: wakeup empty "+
+			util.Logger.Debug("memoryflow: wakeup empty " +
 				"(no prior conversation history yet)")
 		} else {
 			wakeCtx = wc
@@ -589,6 +573,14 @@ func (l *CoreLoop) RunStream(
 		return "", err
 	}
 
+	// Track this in-flight RunStream so Close() waits for the
+	// synchronous post-run side effects (recall/cortex/MemoryFlow
+	// writes, contextMgr.AfterRun) to finish before closing the DB
+	// pool. Add only after Run succeeded: a closed/errored Run never
+	// reaches the post-run write path, so it must not be tracked.
+	l.runWg.Add(1)
+	defer l.runWg.Done()
+
 	var responseText string
 	var textBuilder strings.Builder
 	var allEvents []event.Event
@@ -713,7 +705,11 @@ func (l *CoreLoop) RunStream(
 						slog.String("error", err.Error()))
 				}
 				if l.cortexStore != nil {
-					_ = l.cortexStore.StoreMessage(toolMsg)
+					if err := l.cortexStore.StoreMessage(toolMsg); err != nil {
+						util.Logger.Debug(
+							"cortex: store tool call failed",
+							slog.String("error", err.Error()))
+					}
 				}
 			}
 			// Store tool response content.
@@ -731,7 +727,11 @@ func (l *CoreLoop) RunStream(
 						slog.String("error", err.Error()))
 				}
 				if l.cortexStore != nil {
-					_ = l.cortexStore.StoreMessage(toolResp)
+					if err := l.cortexStore.StoreMessage(toolResp); err != nil {
+						util.Logger.Debug(
+							"cortex: store tool response failed",
+							slog.String("error", err.Error()))
+					}
 				}
 			}
 		}
@@ -901,6 +901,18 @@ func (l *CoreLoop) Close() error {
 	}
 	l.closed = true
 
+	// Wait for in-flight RunStream synchronous side effects (e.g.
+	// recall/cortex/MemoryFlow post-run writes) to finish before any
+	// resource below is torn down. New Run calls are already rejected
+	// because l.closed is true, so this quiesces the remaining writes.
+	// Without this wait, those writes could hit a closed DB pool inside
+	// closeFn (step 6), causing "database is closed" errors or lost data.
+	//
+	// Note: this runs while holding l.mu (write-locked). A concurrent
+	// RunStream does not take l.mu — it only Add/Done's runWg — so there
+	// is no deadlock; the defer in RunStream will decrement runWg.
+	l.runWg.Wait()
+
 	// Wait for background goroutines (e.g. PromoteFacts) to finish
 	// before proceeding with shutdown. This prevents database
 	// access after connection close.
@@ -1001,7 +1013,7 @@ func createSingleAgent(
 	templateText := tmplMgr.LoadTemplates(templateVars)
 
 	instructions := buildSystemInstruction(
-		cfg.Config, cfg.TopOfMindInstructions,
+		cfg.TopOfMindInstructions,
 		templateText,
 	)
 
@@ -1118,49 +1130,7 @@ func createSingleAgent(
 	}
 	if cfg.Config.Agent.ContextCompaction {
 		agentOpts = append(agentOpts,
-			llmagent.WithEnableContextCompaction(true),
-		)
-		// Pass 1: Replace old oversized tool results with placeholder.
-		// Default threshold is 1024 tokens if not configured.
-		if cfg.Config.Agent.ContextCompactionToolResultMaxTokens > 0 {
-			agentOpts = append(agentOpts,
-				llmagent.WithContextCompactionToolResultMaxTokens(
-					cfg.Config.Agent.ContextCompactionToolResultMaxTokens,
-				),
-			)
-		}
-		// Pass 2: Truncate head+tail of remaining large tool results.
-		// Only active when explicitly configured (recommended: 8192).
-		if cfg.Config.Agent.ContextCompactionOversizedMaxTokens > 0 {
-			agentOpts = append(agentOpts,
-				llmagent.WithContextCompactionOversizedToolResultMaxTokens(
-					cfg.Config.Agent.ContextCompactionOversizedMaxTokens,
-				),
-			)
-		}
-		// Protect recent requests from Pass 1 placeholder replacement.
-		if cfg.Config.Agent.ContextCompactionKeepRecentRequests > 0 {
-			agentOpts = append(agentOpts,
-				llmagent.WithContextCompactionKeepRecentRequests(
-					cfg.Config.Agent.ContextCompactionKeepRecentRequests,
-				),
-			)
-		}
-		// Per-tool compaction configuration: force-clean noisy tools,
-		// exclude critical tools from compaction.
-		if len(cfg.Config.Agent.ContextCompactionForceCleanTools) > 0 ||
-			len(cfg.Config.Agent.ContextCompactionKeepTools) > 0 {
-			tcc := &llmagent.ToolResultCompactionConfig{}
-			if len(cfg.Config.Agent.ContextCompactionForceCleanTools) > 0 {
-				tcc.ForceCleanToolNames = cfg.Config.Agent.ContextCompactionForceCleanTools
-			}
-			if len(cfg.Config.Agent.ContextCompactionKeepTools) > 0 {
-				tcc.KeepToolNames = cfg.Config.Agent.ContextCompactionKeepTools
-			}
-			agentOpts = append(agentOpts,
-				llmagent.WithToolResultCompactionConfig(tcc),
-			)
-		}
+			buildContextCompactionOptions(cfg.Config.Agent)...)
 	}
 
 	// Session recall: inject previous session context
@@ -1216,18 +1186,67 @@ func createSingleAgent(
 	return llmagent.New("wukong", agentOpts...), nil
 }
 
+// buildContextCompactionOptions translates the agent's context-compaction
+// config fields into llmagent options. Returns an empty slice (with the
+// enable flag) when compaction is on but no thresholds are configured,
+// in which case only Pass 1 (placeholder) runs with the framework
+// default. Extracted from createSingleAgent to flatten the nested
+// conditional block there.
+func buildContextCompactionOptions(agentCfg config.AgentConfig) []llmagent.Option {
+	var opts []llmagent.Option
+	opts = append(opts, llmagent.WithEnableContextCompaction(true))
+
+	// Pass 1: Replace old oversized tool results with placeholder.
+	// Default threshold is 1024 tokens if not configured.
+	if agentCfg.ContextCompactionToolResultMaxTokens > 0 {
+		opts = append(opts,
+			llmagent.WithContextCompactionToolResultMaxTokens(
+				agentCfg.ContextCompactionToolResultMaxTokens,
+			),
+		)
+	}
+	// Pass 2: Truncate head+tail of remaining large tool results.
+	// Only active when explicitly configured (recommended: 8192).
+	if agentCfg.ContextCompactionOversizedMaxTokens > 0 {
+		opts = append(opts,
+			llmagent.WithContextCompactionOversizedToolResultMaxTokens(
+				agentCfg.ContextCompactionOversizedMaxTokens,
+			),
+		)
+	}
+	// Protect recent requests from Pass 1 placeholder replacement.
+	if agentCfg.ContextCompactionKeepRecentRequests > 0 {
+		opts = append(opts,
+			llmagent.WithContextCompactionKeepRecentRequests(
+				agentCfg.ContextCompactionKeepRecentRequests,
+			),
+		)
+	}
+	// Per-tool compaction configuration: force-clean noisy tools,
+	// exclude critical tools from compaction.
+	if len(agentCfg.ContextCompactionForceCleanTools) > 0 ||
+		len(agentCfg.ContextCompactionKeepTools) > 0 {
+		tcc := &llmagent.ToolResultCompactionConfig{}
+		if len(agentCfg.ContextCompactionForceCleanTools) > 0 {
+			tcc.ForceCleanToolNames = agentCfg.ContextCompactionForceCleanTools
+		}
+		if len(agentCfg.ContextCompactionKeepTools) > 0 {
+			tcc.KeepToolNames = agentCfg.ContextCompactionKeepTools
+		}
+		opts = append(opts, llmagent.WithToolResultCompactionConfig(tcc))
+	}
+	return opts
+}
+
 // buildSystemInstruction builds the complete system instruction.
 // It combines prompt templates (if available), the base instruction,
 // memory guidance, and optional Top of Mind persistent instructions.
 // The framework placeholder {current_time} is injected via
 // WithAddCurrentTime(true).
 func buildSystemInstruction(
-	cfg *config.WukongConfig,
 	topOfMind string,
 	templateText string,
 ) string {
-	_ = cfg
-
 	// Use template if provided; otherwise fall back to hardcoded base.
 	var base string
 	if templateText != "" {
@@ -1238,33 +1257,33 @@ func buildSystemInstruction(
 			"Respect the instructions above when using tools.\n\n"
 	} else {
 		base = "You are Wukong, a helpful and capable AI agent. " +
-		"You have access to various tools that let you " +
-		"interact with the user's system. " +
-		"Use tools proactively to complete tasks. " +
-		"If a tool call fails, analyze the error and " +
-		"try a different approach. " +
-		"Break complex tasks into smaller steps and " +
-		"use the todo tools to track progress. " +
-		"Prefer file_replace over file_write for targeted edits. " +
-		"When executing commands, check their output carefully.\n\n" +
+			"You have access to various tools that let you " +
+			"interact with the user's system. " +
+			"Use tools proactively to complete tasks. " +
+			"If a tool call fails, analyze the error and " +
+			"try a different approach. " +
+			"Break complex tasks into smaller steps and " +
+			"use the todo tools to track progress. " +
+			"Prefer file_replace over file_write for targeted edits. " +
+			"When executing commands, check their output carefully.\n\n" +
 
-		// Memory guidance
-		"Your memory about the user is automatically loaded " +
-		"into this prompt at the start of each conversation. " +
-		"\n\n**IMPORTANT — Memory Tools**: " +
-		"You have memory tools available: " +
-		"memory_add, memory_search, memory_update, " +
-		"memory_delete, memory_load, memory_clear. " +
-		"\n- Use **memory_add** immediately when the user " +
-		"shares preferences, personal details, project info, " +
-		"decisions, or important context. Do NOT wait — store it now. " +
-		"\n- Use **memory_search** when the user asks " +
-		"\"what do you remember\", \"what do you know about me\", " +
-		"or needs past context. " +
-		"\n- Use **memory_update** to correct outdated memories. " +
-		"\n- Use **memory_load** to review all stored memories. " +
-		"\n- This is critical for providing personalized, " +
-		"context-aware assistance across sessions."
+			// Memory guidance
+			"Your memory about the user is automatically loaded " +
+			"into this prompt at the start of each conversation. " +
+			"\n\n**IMPORTANT — Memory Tools**: " +
+			"You have memory tools available: " +
+			"memory_add, memory_search, memory_update, " +
+			"memory_delete, memory_load, memory_clear. " +
+			"\n- Use **memory_add** immediately when the user " +
+			"shares preferences, personal details, project info, " +
+			"decisions, or important context. Do NOT wait — store it now. " +
+			"\n- Use **memory_search** when the user asks " +
+			"\"what do you remember\", \"what do you know about me\", " +
+			"or needs past context. " +
+			"\n- Use **memory_update** to correct outdated memories. " +
+			"\n- Use **memory_load** to review all stored memories. " +
+			"\n- This is critical for providing personalized, " +
+			"context-aware assistance across sessions."
 	}
 
 	// Inject Top of Mind persistent instructions if available
@@ -1502,13 +1521,22 @@ func buildModelCallbacks() *model.Callbacks {
 	return callbacks
 }
 
-// createGuardrailRunner creates a minimal runner for the prompt
-// injection guardrail reviewer.
-func createGuardrailRunner(
-	mdl model.Model,
-	cfg *config.WukongConfig,
-) (runner.Runner, error) {
-	_ = cfg
+// buildGuardrailPlugin assembles the prompt-injection guardrail
+// runner plugin: a dedicated lightweight model → runner → reviewer →
+// prompt-injection detector → guardrail plugin. It returns nil (with a
+// warning log) if any step fails, since guardrail is a non-fatal
+// enhancement — the agent still runs without it.
+//
+// This flattens what was previously a 6-level-deep `if err == nil`
+// chain in NewCoreLoop into early returns.
+func buildGuardrailPlugin(factory *provider.Factory) plugin.Plugin {
+	mdl, err := factory.CreateDefaultModel()
+	if err != nil || mdl == nil {
+		util.Logger.Warn("guardrail: model unavailable, plugin disabled",
+			slog.String("error", errOrEmpty(err)))
+		return nil
+	}
+
 	reviewAgent := llmagent.New("guardrail-reviewer",
 		llmagent.WithModel(mdl),
 		llmagent.WithGenerationConfig(model.GenerationConfig{
@@ -1518,9 +1546,42 @@ func createGuardrailRunner(
 		}),
 		llmagent.WithMaxLLMCalls(1),
 	)
-	return runner.NewRunner(
-		"wukong-guardrail", reviewAgent,
-	), nil
+	guardRunner := runner.NewRunner("wukong-guardrail", reviewAgent)
+
+	piReviewer, err := review.New(guardRunner)
+	if err != nil {
+		util.Logger.Warn("guardrail: reviewer init failed, plugin disabled",
+			slog.String("error", err.Error()))
+		return nil
+	}
+
+	piPlugin, err := promptinjection.New(
+		promptinjection.WithReviewer(piReviewer),
+	)
+	if err != nil {
+		util.Logger.Warn("guardrail: prompt-injection plugin init failed",
+			slog.String("error", err.Error()))
+		return nil
+	}
+
+	grPlugin, err := guardrail.New(
+		guardrail.WithPromptInjection(piPlugin),
+	)
+	if err != nil {
+		util.Logger.Warn("guardrail: guardrail plugin init failed",
+			slog.String("error", err.Error()))
+		return nil
+	}
+	return grPlugin
+}
+
+// errOrEmpty returns err.Error() or "" for a nil error. Used by
+// buildGuardrailPlugin to format a possibly-nil model-creation error.
+func errOrEmpty(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // isMemoryDuplicated checks whether a memory content string is

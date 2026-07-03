@@ -1,81 +1,21 @@
 package feishu
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+	"log/slog"
+	"regexp"
 	"strings"
+
+	"github.com/km269/wukong/internal/gateway"
+	"github.com/km269/wukong/internal/util"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
-
-// FeishuEvent is the top-level event structure for Feishu/Lark event
-// subscription callbacks.
-type FeishuEvent struct {
-	Schema string       `json:"schema"`
-	Header *EventHeader `json:"header"`
-	Type   string       `json:"type"`
-	Event  *EventBody   `json:"event"`
-	// Challenge is only present in URL verification requests.
-	Challenge string `json:"challenge,omitempty"`
-	Token     string `json:"token,omitempty"`
-	// ResponseURL is provided by Feishu for certain event types
-	// (e.g., card action callbacks). When available, it allows
-	// sending a reply without a tenant_access_token.
-	// Not present in standard im.message.receive_v1 events.
-	ResponseURL string `json:"response_url,omitempty"`
-}
-
-// EventHeader contains event metadata.
-type EventHeader struct {
-	EventID    string `json:"event_id"`
-	EventType  string `json:"event_type"`
-	CreateTime string `json:"create_time"`
-	Token      string `json:"token"`
-	AppID      string `json:"app_id"`
-	TenantKey  string `json:"tenant_key"`
-}
-
-// EventBody contains the actual event payload.
-type EventBody struct {
-	Sender    *EventSender `json:"sender"`
-	MessageID string       `json:"message_id"`
-	ChatID    string       `json:"chat_id,omitempty"`
-	ChatType  string       `json:"chat_type,omitempty"`
-	Type      string       `json:"type,omitempty"`
-	MsgType   string       `json:"msg_type,omitempty"`
-	Text      string       `json:"text,omitempty"`
-	Content   string       `json:"content,omitempty"`
-}
-
-// EventSender identifies the user who sent the message.
-type EventSender struct {
-	SenderID *SenderID `json:"sender_id"`
-}
-
-// SenderID holds user identification fields.
-type SenderID struct {
-	UnionID string `json:"union_id"`
-	UserID  string `json:"user_id"`
-	OpenID  string `json:"open_id"`
-}
 
 // FeishuTextContent is the parsed structure of Feishu message content.
 // Content is a JSON string containing the text.
 type FeishuTextContent struct {
 	Text string `json:"text"`
-}
-
-// FeishuReplyMessage is the response format for passive message
-// replies (returned directly in the HTTP response to the callback).
-type FeishuReplyMessage struct {
-	Content *FeishuReplyContent `json:"content,omitempty"`
-	MsgType string              `json:"msg_type,omitempty"`
-}
-
-// FeishuReplyContent is the content portion of a reply message.
-type FeishuReplyContent struct {
-	Text string `json:"text,omitempty"`
 }
 
 // FeishuAPIResponse is the standard Feishu API response format.
@@ -85,8 +25,88 @@ type FeishuAPIResponse struct {
 	Data json.RawMessage `json:"data,omitempty"`
 }
 
-// extractTextContent parses a Feishu message content JSON string and
-// returns the text field.
+// mentionPlaceholderRe matches Feishu's in-text mention placeholders
+// such as "@_user_1" that the platform injects when a user @-mentions
+// someone (including the bot) in a group. They are stripped from the
+// text before it reaches the agent so the agent sees clean input.
+var mentionPlaceholderRe = regexp.MustCompile(`@_user_\d+\s*`)
+
+// parseP2MessageReceiveV1 converts a typed Feishu
+// im.message.receive_v1 event (delivered over the WebSocket
+// long-connection) into a unified *gateway.GatewayMessage.
+//
+// Returns nil for messages that should be silently ignored (e.g.
+// non-user senders). In all other cases a placeholder content is
+// produced for unsupported types so the user still gets a coherent
+// reply from the agent.
+func (fc *FeishuChannel) parseP2MessageReceiveV1(
+	evt *larkim.P2MessageReceiveV1,
+) *gateway.GatewayMessage {
+	if evt == nil || evt.Event == nil {
+		return nil
+	}
+	data := evt.Event
+
+	gm := &gateway.GatewayMessage{
+		RawData: mustMarshal(evt),
+	}
+
+	// Message identity + conversation. The SDK exposes these as
+	// *string pointers on *larkim.EventMessage.
+	if msg := data.Message; msg != nil {
+		gm.MessageID = strPtr(msg.MessageId)
+		gm.ConversationID = strPtr(msg.ChatId)
+		gm.ContentType = strPtr(msg.MessageType)
+
+		switch gm.ContentType {
+		case "text":
+			gm.Content = cleanTextContent(
+				extractTextContent(strPtr(msg.Content)))
+
+		case "image":
+			gm.Content = fmt.Sprintf("[图片: %s]", gm.MessageID)
+
+		case "file":
+			if fc.cfg.EnableFileReceive {
+				gm.Content = fmt.Sprintf("[文件: %s]", gm.MessageID)
+			} else {
+				gm.Content = "[文件消息暂不支持]"
+			}
+
+		case "audio":
+			gm.Content = "[语音消息]"
+
+		case "media":
+			gm.Content = "[富媒体消息]"
+
+		default:
+			if gm.ContentType == "" {
+				gm.ContentType = "unknown"
+			}
+			gm.Content = fmt.Sprintf("[收到消息类型: %s]", gm.ContentType)
+		}
+	}
+
+	// Sender identity.
+	if data.Sender != nil {
+		if data.Sender.SenderType != nil &&
+			*data.Sender.SenderType != "" &&
+			*data.Sender.SenderType != "user" {
+			// Ignore messages not sent by a real user (e.g. other bots).
+			util.Logger.Debug("feishu: ignoring non-user sender",
+				slog.String("sender_type", *data.Sender.SenderType))
+			return nil
+		}
+		if data.Sender.SenderId != nil {
+			gm.PlatformUserID = strPtr(data.Sender.SenderId.OpenId)
+		}
+	}
+
+	return gm
+}
+
+// extractTextContent parses a Feishu text message content JSON string
+// and returns the text field.
 //
 // Feishu text message content format:
 //
@@ -106,23 +126,22 @@ func extractTextContent(content string) string {
 	return content
 }
 
-// readBody reads the full request body and resets it for subsequent
-// reads.
-func readBody(r *http.Request) ([]byte, error) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read body: %w", err)
-	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	return body, nil
+// cleanTextContent trims whitespace and strips Feishu @-mention
+// placeholders ("@_user_N") so the agent receives clean user input.
+// In a group, when a user @-mentions the bot, Feishu prefixes the text
+// with such a placeholder; without cleaning the agent would see it as
+// part of the prompt.
+func cleanTextContent(s string) string {
+	s = mentionPlaceholderRe.ReplaceAllString(s, "")
+	return strings.TrimSpace(s)
 }
 
-// mustMarshal marshals a value to JSON, returning an empty array on
+// mustMarshal marshals a value to JSON, returning an empty object on
 // failure.
-func mustMarshal(v any) json.RawMessage {
+func mustMarshal(v any) []byte {
 	data, err := json.Marshal(v)
 	if err != nil {
-		return json.RawMessage("{}")
+		return []byte("{}")
 	}
 	return data
 }
@@ -137,4 +156,12 @@ func truncateText(text string, maxLen int) string {
 		return text
 	}
 	return strings.TrimSpace(string(runes[:maxLen])) + "..."
+}
+
+// strPtr safely dereferences a *string, returning "" for nil.
+func strPtr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }

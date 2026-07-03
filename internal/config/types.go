@@ -18,132 +18,6 @@ package config
 import "time"
 
 // ============================================================================
-// Gateway & Multi-Platform Channel Configuration
-// ============================================================================
-
-// GatewayConfig defines settings for the multi-platform messaging
-// gateway server. The gateway serves as a unified entry point for
-// external IM platforms (Feishu, WeCom, Slack, etc.).
-type GatewayConfig struct {
-	// Enabled enables the Gateway server.
-	// Default: false.
-	Enabled bool `mapstructure:"enabled"`
-
-	// Address is the HTTP listen address for the gateway server.
-	// Default: ":9093".
-	Address string `mapstructure:"address"`
-
-	// DefaultTimeout is the maximum duration for an agent run
-	// triggered by a platform message. Default: "120s".
-	DefaultTimeout time.Duration `mapstructure:"default_timeout"`
-
-	// MaxConcurrentSessions limits concurrent agent sessions
-	// across all channels. Default: 100.
-	MaxConcurrentSessions int `mapstructure:"max_concurrent_sessions"`
-
-	// MessageDedupTTL is the deduplication window for platform
-	// messages. Messages with the same MessageID within this
-	// window are silently dropped. Default: "5m".
-	MessageDedupTTL time.Duration `mapstructure:"message_dedup_ttl"`
-
-	// RateLimitPerUser is the maximum number of agent runs per
-	// user within the rate limit window. Default: 20.
-	RateLimitPerUser int `mapstructure:"rate_limit_per_user"`
-
-	// RateLimitWindow is the sliding window duration for per-user
-	// rate limiting. Default: "60s".
-	RateLimitWindow time.Duration `mapstructure:"rate_limit_window"`
-
-	// Feishu contains the Feishu/Lark channel configuration.
-	Feishu FeishuChannelConfig `mapstructure:"feishu"`
-
-	// WeCom contains the WeCom channel configuration.
-	WeCom WeComChannelConfig `mapstructure:"wecom"`
-}
-
-// FeishuChannelConfig defines settings for the Feishu/Lark channel.
-type FeishuChannelConfig struct {
-	// Enabled enables the Feishu channel. Default: false.
-	Enabled bool `mapstructure:"enabled"`
-
-	// AppID is the Feishu application ID (cli_xxx).
-	AppID string `mapstructure:"app_id"`
-
-	// AppSecret is the Feishu application secret.
-	// Supports ${ENV_VAR} expansion.
-	AppSecret string `mapstructure:"app_secret"`
-
-	// APIBase is the base URL for the Feishu/Lark Open API.
-	// Default: "https://open.feishu.cn/open-apis".
-	// For Lark (international), use "https://open.larksuite.com/open-apis".
-	APIBase string `mapstructure:"api_base"`
-
-	// EncryptKey is the event encryption key from Feishu app
-	// settings. Supports ${ENV_VAR} expansion.
-	EncryptKey string `mapstructure:"encrypt_key"`
-
-	// VerificationToken is the event subscription verification
-	// token. Supports ${ENV_VAR} expansion.
-	VerificationToken string `mapstructure:"verification_token"`
-
-	// StreamCardEnabled enables streaming card replies for
-	// real-time display. When disabled, a single text reply is
-	// sent after the agent completes.
-	// Default: true.
-	StreamCardEnabled bool `mapstructure:"stream_card_enabled"`
-
-	// StreamCardUpdateInterval controls how often the streaming
-	// card content is updated. Default: "500ms".
-	StreamCardUpdateInterval time.Duration `mapstructure:"stream_card_update_interval"`
-
-	// MaxMessageLength is the maximum characters per message
-	// sent to Feishu. Messages exceeding this are truncated.
-	// Default: 4096.
-	MaxMessageLength int `mapstructure:"max_message_length"`
-
-	// EnableFileReceive controls whether file messages from
-	// users are accepted. Default: false.
-	EnableFileReceive bool `mapstructure:"enable_file_receive"`
-}
-
-// WeComChannelConfig defines settings for the WeCom channel.
-type WeComChannelConfig struct {
-	// Enabled enables the WeCom channel. Default: false.
-	Enabled bool `mapstructure:"enabled"`
-
-	// CorpID is the WeCom enterprise ID (wwxxxx).
-	CorpID string `mapstructure:"corpid"`
-
-	// Secret is the application secret for API calls.
-	// Supports ${ENV_VAR} expansion.
-	Secret string `mapstructure:"secret"`
-
-	// Token is the callback verification token.
-	// Supports ${ENV_VAR} expansion.
-	Token string `mapstructure:"token"`
-
-	// EncodingAESKey is the Base64-encoded AES key for message
-	// encryption. Supports ${ENV_VAR} expansion.
-	EncodingAESKey string `mapstructure:"encoding_aes_key"`
-
-	// StreamEnabled enables streaming message replies.
-	// Default: true.
-	StreamEnabled bool `mapstructure:"stream_enabled"`
-
-	// StreamUpdateInterval controls the streaming update cadence.
-	// Default: "1s".
-	StreamUpdateInterval time.Duration `mapstructure:"stream_update_interval"`
-
-	// MaxMessageLength is the maximum characters per message
-	// sent to WeCom. Default: 2048.
-	MaxMessageLength int `mapstructure:"max_message_length"`
-
-	// EnableCardReply enables template card replies.
-	// Default: true.
-	EnableCardReply bool `mapstructure:"enable_card_reply"`
-}
-
-// ============================================================================
 // Provider & Extension Configuration
 // ============================================================================
 
@@ -175,8 +49,6 @@ type ProviderConfig struct {
 	// MCPPort is the port where the ACP MCP Bridge listens
 	// for incoming MCP tool calls from the ACP agent.
 	MCPPort string `mapstructure:"mcp_port"`
-	// AgentAuth is the authentication method for the ACP agent.
-	AgentAuth string `mapstructure:"agent_auth"`
 }
 
 // ExtensionConfig defines an MCP extension (built-in or external).
@@ -331,12 +203,6 @@ type AgentConfig struct {
 	// JSONRepairEnabled enables automatic repair of non-standard
 	// JSON in tool call arguments.
 	JSONRepairEnabled bool `mapstructure:"json_repair_enabled"`
-	// TodoToolEnabled enables the tRPC-native todo_write tool.
-	// Default: true.
-	TodoToolEnabled bool `mapstructure:"todo_tool_enabled"`
-	// TodoEnforcerEnabled enables the todo enforcer extension.
-	// Default: true.
-	TodoEnforcerEnabled bool `mapstructure:"todo_enforcer_enabled"`
 	// AgentToolsEnabled enables the AgentToolSet that wraps
 	// specialized sub-agents as tools. Default: true.
 	AgentToolsEnabled bool `mapstructure:"agent_tools_enabled"`
@@ -465,20 +331,6 @@ type MemoryConfig struct {
 	// ExtractorPrompt is a custom system prompt for memory
 	// extraction.
 	ExtractorPrompt string `mapstructure:"extractor_prompt"`
-	// EnableSmartCleanup enables capacity-aware memory eviction.
-	// When enabled, memories are evicted based on importance
-	// scoring (recency + content length) when nearing capacity.
-	// Default: true.
-	EnableSmartCleanup bool `mapstructure:"enable_smart_cleanup"`
-	// CleanupTriggerThreshold is the capacity fraction that
-	// triggers eviction (0.0-1.0). Default: 0.8 (80%).
-	CleanupTriggerThreshold float64 `mapstructure:"cleanup_trigger_threshold"`
-	// CleanupTargetThreshold is the target capacity fraction
-	// after eviction (0.0-1.0). Default: 0.6 (60%).
-	CleanupTargetThreshold float64 `mapstructure:"cleanup_target_threshold"`
-	// MemoryTTL is the time-to-live for memories. Memories older
-	// than this are eligible for cleanup. Default: 720h (30 days).
-	MemoryTTL time.Duration `mapstructure:"memory_ttl"`
 }
 
 // TodoConfig defines task tracking storage settings.
@@ -511,9 +363,6 @@ type RecallConfig struct {
 	// SearchMode is the search strategy: "fts5" (default),
 	// "hybrid".
 	SearchMode string `mapstructure:"search_mode"`
-	// EmbeddingProvider is the model provider used for generating
-	// embeddings for semantic search.
-	EmbeddingProvider string `mapstructure:"embedding_provider"`
 	// EmbeddingModel is the specific embedding model name.
 	EmbeddingModel string `mapstructure:"embedding_model"`
 }
@@ -623,7 +472,7 @@ type RevisionConfig struct {
 	// execution output.
 	MaxCommandOutput int `mapstructure:"max_command_output"`
 	// EnableSemanticSearch enables semantic context retrieval
-	// (experimental).
+	// (experimental). Consumed by the context manager.
 	EnableSemanticSearch bool `mapstructure:"enable_semantic_search"`
 	// SearchStrategy is the context retrieval strategy:
 	// include_all | semantic.
@@ -665,19 +514,8 @@ type BrowserConfig struct {
 	Timeout time.Duration `mapstructure:"timeout"`
 	// BrowserPath is the custom Chrome/Chromium executable path.
 	BrowserPath string `mapstructure:"browser_path"`
-	// ViewportWidth sets the browser viewport width in pixels.
-	ViewportWidth int `mapstructure:"viewport_width"`
-	// ViewportHeight sets the browser viewport height in pixels.
-	ViewportHeight int `mapstructure:"viewport_height"`
 	// Stealth enables anti-detection mode.
 	Stealth bool `mapstructure:"stealth"`
-	// SearchBackend is the web search engine: duckduckgo
-	// (default), searxng, tavily.
-	SearchBackend string `mapstructure:"search_backend"`
-	// SearchBackendURL is the URL for SearXNG instances.
-	SearchBackendURL string `mapstructure:"search_backend_url"`
-	// SearchAPIKey is the API key for Tavily.
-	SearchAPIKey string `mapstructure:"search_api_key"`
 }
 
 // VisualiserConfig defines chart and diagram generation settings.
@@ -901,6 +739,7 @@ type A2ARemoteConfig struct {
 	// OAuthClientID is the OAuth2 client identifier.
 	OAuthClientID string `mapstructure:"oauth_client_id"`
 	// OAuthClientSecret is the OAuth2 client secret.
+	// Supports ${ENV_VAR} expansion.
 	OAuthClientSecret string `mapstructure:"oauth_client_secret"`
 }
 
@@ -938,19 +777,12 @@ type ANPConfig struct {
 	// MetaProtocolEnabled enables JSON-RPC 2.0 meta-protocol
 	// for capability negotiation. Default: true.
 	MetaProtocolEnabled bool `mapstructure:"meta_protocol_enabled"`
-	// HTTPSignEnabled enables RFC 9421 HTTP message signing
-	// for outgoing agent requests. Default: true.
-	HTTPSignEnabled bool `mapstructure:"http_sign_enabled"`
 	// E2EEEnabled enables X25519+ChaCha20-Poly1305 end-to-end
 	// encryption for agent-to-agent messages. Default: true.
 	E2EEEnabled bool `mapstructure:"e2ee_enabled"`
 	// A2AEnabled autocreates an A2A Server card for ANP
 	// discovery when the A2A server is enabled. Default: true.
 	A2AEnabled bool `mapstructure:"a2a_enabled"`
-	// MCPEnabled autocreates an MCP Server card for ANP
-	// discovery when the ACP MCP bridge is enabled.
-	// Default: true.
-	MCPEnabled bool `mapstructure:"mcp_enabled"`
 	// AGUIEnabled autocreates an AG-UI Server card for ANP
 	// discovery when the AG-UI server is enabled.
 	// Default: true.
@@ -964,10 +796,6 @@ type SkillConfig struct {
 	Enabled bool `mapstructure:"enabled"`
 	// SkillsDir is the directory containing SKILL.md files.
 	SkillsDir string `mapstructure:"skills_dir"`
-	// AutoLoad automatically loads skills at startup.
-	AutoLoad bool `mapstructure:"auto_load"`
-	// MaxSkills is the maximum number of skills to load.
-	MaxSkills int `mapstructure:"max_skills"`
 }
 
 // EvolutionConfig defines the skill self-evolution system settings.
@@ -1026,8 +854,6 @@ type KnowledgeConfig struct {
 	// EnableSourceSync enables automatic re-indexing when source
 	// files change. Default: false.
 	EnableSourceSync bool `mapstructure:"enable_source_sync"`
-	// ReRankerEnabled enables result re-ranking. Default: false.
-	ReRankerEnabled bool `mapstructure:"reranker_enabled"`
 	// SearchToolName is the tool name registered to the agent.
 	// Default: "knowledge_search".
 	SearchToolName string `mapstructure:"search_tool_name"`
@@ -1061,11 +887,6 @@ type WorkflowConfig struct {
 	// CycleMode selects the cycle strategy: "default"
 	// (planner/executor) or "code_review".
 	CycleMode string `mapstructure:"cycle_mode"`
-	// StreamMode enables inter-node streaming via StreamHub
-	// ("none"/"hub").
-	StreamMode string `mapstructure:"stream_mode"`
-	// CacheEnabled enables node caching for graph workflows.
-	CacheEnabled bool `mapstructure:"cache_enabled"`
 	// Engine is the Graph execution engine: "bsp" (default) or
 	// "dag".
 	Engine string `mapstructure:"engine"`
@@ -1182,16 +1003,6 @@ type EvalConfig struct {
 	// ResultsPath is the output path for evaluation results JSON.
 	// Default: ".wukong/evals/results.json".
 	ResultsPath string `mapstructure:"results_path"`
-	// Metrics lists the evaluation metrics to apply.
-	Metrics []EvalMetricConfig `mapstructure:"metrics"`
-}
-
-// EvalMetricConfig defines a single evaluation metric.
-type EvalMetricConfig struct {
-	// Name is the metric identifier.
-	Name string `mapstructure:"name"`
-	// Threshold is the minimum score (0.0-1.0) to pass.
-	Threshold float64 `mapstructure:"threshold"`
 }
 
 // ArtifactConfig defines artifact storage settings.

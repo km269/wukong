@@ -4,7 +4,53 @@ All changes after v0.1.14 baseline.
 
 ---
 
-## [Unreleased] — 2026-07-01
+## [Unreleased] — 2026-07-02
+
+### Gateway — 重构为飞书 WebSocket 长连接
+
+将 Gateway Channel 从 HTTP Webhook（被动接收）重构为**飞书 WebSocket 长连接**（主动拨号），Wukong 作为 client 拨出连接飞书开放平台，**无需公网回调地址/域名/HTTPS**，本地或内网即可运行飞书机器人。
+
+**架构转变**
+- 旧：飞书 `POST /feishu/callback` → Wukong HTTP Server (:9093)（需要公网回调 + 验签 + 3s ACK 超时处理）。
+- 新：Wukong `wss://` 拨号 → 飞书长连接网关，SDK 自动重连/心跳/合包；事件经 `dispatcher.OnP2MessageReceiveV1` 回调进入处理流水线。
+
+**Channel 接口干净重设计**（`internal/gateway/types.go`）
+- 移除 4 个 HTTP 耦合方法：`VerifyRequest`、`HandlePlatformEvent`、`RoutePath`、`ParseMessage([]byte)`。
+- 新增 `Start(ctx, MessageHandler)` / `Stop(ctx)` 生命周期方法，Channel 自管入站传输。
+- 保留协议无关的 `GatewayMessage` / `BuildUserID` / `BuildSessionID` / `SendReply`。
+
+**GatewayServer 重写为 channel 编排器**（`internal/gateway/gateway.go`）
+- 从 HTTP server 改为驱动所有注册 Channel 的编排器：每个 Channel 在独立 goroutine 中 `Start`，共享 `dispatch`（去重→建 ID→限流→会话→异步 agent→回复）。
+- 移除 `ChannelRouter` / HTTP 中间件 / `handleMetrics` / `parsePlatformEvent`。
+- `processMessage`（原 `processMessageAsync`）逻辑原样保留：agent 运行脱离入站 context，`release()` defer 释放并发槽。
+
+**飞书 Channel 改用 SDK 长连接**（`internal/gateway/feishu/`）
+- `channel.go`：`larkws.NewClient` + `dispatcher.OnP2MessageReceiveV1` 接收消息；`Start` 在 goroutine 跑 `wsClient.Start` 并在 ctx 取消时返回。
+- `message.go`：新增 `parseP2MessageReceiveV1`（从 SDK 强类型 `*larkim.P2MessageReceiveV1` 解析）；同时修复此前 `_@user_N` 提及占位符未清洗的问题。
+- `sender.go`：**完全复用**（流式卡片/文本回复走 tenant_access_token，与接收方式无关），新增 `Close()`。
+- 删除 `crypto.go`（长连接模式无 HTTP 验签；事件解密由 SDK 用 encryptKey 完成）。
+
+**移除 WeCom**：用户无 Go 官方 WS SDK，纯 WebSocket 架构下无法适配，整个 `internal/gateway/wecom/` 目录删除；配置同步移除 `gateway.wecom` 段与 `WeComChannelConfig`。
+
+**配置变更**
+- 移除 `gateway.address`（纯 WS 无监听端口）。
+- `gateway.feishu.verification_token` 标记 deprecated（长连接模式不校验）。
+
+**装配与生命周期**（`internal/cli/session.go`）
+- 修复既有 bug：信号处理 goroutine 与 defer cleanup 链此前漏调 `GatewayServer.Stop()`，现已补上（两处）。
+- 移除 wecom 注册分支；Start 改用可取消的 lifecycle context。
+
+**测试**：新增 `gateway_test.go`（dispatch 编排器、注册校验、channel 查找）、重写 `feishu/message_test.go`（`parseP2MessageReceiveV1` 各消息类型/非用户发送者过滤/空事件）；`sender_test.go` 内联 `makeFeishuConfig` 辅助（原定义在被删的 `crypto_test.go`）。
+
+**依赖**：`go.mod` 新增飞书 SDK `ws` 子包的传递依赖（`gorilla/websocket`、`gogo/protobuf`），已 `go mod tidy`。
+
+### 注意：WeCom 移除是破坏性变更
+
+`gateway.wecom` 配置与 WeCom channel 代码已删除。如需恢复企业微信支持，需在 Channel 接口下重新实现一条入站传输路径。
+
+---
+
+## [0.2.0] — 2026-07-01
 
 ### Gateway — 飞书无响应根因修复
 

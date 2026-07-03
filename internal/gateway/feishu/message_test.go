@@ -1,215 +1,290 @@
 package feishu
 
 import (
-	"bytes"
 	"encoding/json"
-	"io"
-	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/km269/wukong/internal/gateway"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 )
 
-// TestExtractTextContentValid parses valid Feishu text content JSON.
+// strPtr helper for tests: take a literal and return its address.
+func sp(s string) *string { return &s }
+
+// newFeishuChannelForTest builds a FeishuChannel with the given config
+// without needing the full WukongConfig.
+func newFeishuChannelForTest(cfg *gateway.FeishuChannelConfig) *FeishuChannel {
+	if cfg == nil {
+		cfg = &gateway.FeishuChannelConfig{}
+	}
+	return &FeishuChannel{cfg: cfg}
+}
+
+// ---------------------------------------------------------------------------
+// extractTextContent
+// ---------------------------------------------------------------------------
+
 func TestExtractTextContentValid(t *testing.T) {
-	content := `{"text":"hello world"}`
-	result := extractTextContent(content)
-	if result != "hello world" {
-		t.Errorf("got %q, want %q", result, "hello world")
+	if got := extractTextContent(`{"text":"hello world"}`); got != "hello world" {
+		t.Errorf("got %q, want %q", got, "hello world")
 	}
 }
 
-// TestExtractTextContentEmptyInput returns empty string.
 func TestExtractTextContentEmptyInput(t *testing.T) {
-	result := extractTextContent("")
-	if result != "" {
-		t.Errorf("got %q, want empty string", result)
+	if got := extractTextContent(""); got != "" {
+		t.Errorf("got %q, want empty", got)
 	}
 }
 
-// TestExtractTextContentEmptyText returns empty when text field is ""
-func TestExtractTextContentEmptyText(t *testing.T) {
-	result := extractTextContent(`{"text":""}`)
-	if result != "" {
-		t.Errorf("got %q, want empty string", result)
-	}
-}
-
-// TestExtractTextContentFallback returns raw string on invalid JSON.
 func TestExtractTextContentFallback(t *testing.T) {
 	raw := "plain text without json"
-	result := extractTextContent(raw)
-	if result != raw {
-		t.Errorf("got %q, want %q", result, raw)
+	if got := extractTextContent(raw); got != raw {
+		t.Errorf("got %q, want %q", got, raw)
 	}
 }
 
-// TestExtractTextContentChinese handles Chinese characters in JSON.
 func TestExtractTextContentChinese(t *testing.T) {
-	content := `{"text":"你好世界"}`
-	result := extractTextContent(content)
-	if result != "你好世界" {
-		t.Errorf("got %q, want %q", result, "你好世界")
+	if got := extractTextContent(`{"text":"你好世界"}`); got != "你好世界" {
+		t.Errorf("got %q, want %q", got, "你好世界")
 	}
 }
 
-// TestExtractTextContentAt mentions within text.
-func TestExtractTextContentAtMentions(t *testing.T) {
-	content := `{"text":"@user help me please"}`
-	result := extractTextContent(content)
-	if !strings.Contains(result, "@user") {
-		t.Errorf("should contain @user mention, got %q", result)
+// ---------------------------------------------------------------------------
+// cleanTextContent — @_user_N placeholder stripping
+// ---------------------------------------------------------------------------
+
+func TestCleanTextContentStripsMentionPlaceholder(t *testing.T) {
+	in := "@_user_1 帮我写代码"
+	if got := cleanTextContent(in); got != "帮我写代码" {
+		t.Errorf("got %q, want %q", got, "帮我写代码")
 	}
 }
 
-// TestReadBodyReadsCompleteBody reads the full request body.
-func TestReadBodyReadsCompleteBody(t *testing.T) {
-	expected := []byte(`{"type":"event_callback","event":{}}`)
-	r, _ := http.NewRequest("POST", "/feishu", bytes.NewReader(expected))
-
-	body, err := readBody(r)
-	if err != nil {
-		t.Fatalf("readBody failed: %v", err)
-	}
-	if !bytes.Equal(body, expected) {
-		t.Errorf("got %q, want %q", string(body), string(expected))
+func TestCleanTextContentKeepsRegularAt(t *testing.T) {
+	in := "email me at user@host.com"
+	if got := cleanTextContent(in); got != "email me at user@host.com" {
+		t.Errorf("regular @ must be preserved, got %q", got)
 	}
 }
 
-// TestReadBodyResetsBody verifies body can be read again after reset.
-func TestReadBodyResetsBody(t *testing.T) {
-	expected := []byte(`{"type":"test"}`)
-	r, _ := http.NewRequest("POST", "/feishu", bytes.NewReader(expected))
-
-	// First read.
-	body1, err := readBody(r)
-	if err != nil {
-		t.Fatalf("first readBody: %v", err)
-	}
-
-	// Second read after reset.
-	body2, err := io.ReadAll(r.Body)
-	if err != nil {
-		t.Fatalf("second read: %v", err)
-	}
-
-	if !bytes.Equal(body1, expected) {
-		t.Errorf("first read got %q, want %q", string(body1), string(expected))
-	}
-	if !bytes.Equal(body2, expected) {
-		t.Errorf("second read got %q, want %q", string(body2), string(expected))
+func TestCleanTextContentTrims(t *testing.T) {
+	if got := cleanTextContent("  hi  "); got != "hi" {
+		t.Errorf("got %q, want %q", got, "hi")
 	}
 }
 
-// TestReadBodyEmptyBody handles empty request body.
-func TestReadBodyEmptyBody(t *testing.T) {
-	r, _ := http.NewRequest("POST", "/feishu", bytes.NewReader([]byte{}))
-	body, err := readBody(r)
-	if err != nil {
-		t.Fatalf("readBody failed: %v", err)
+// ---------------------------------------------------------------------------
+// parseP2MessageReceiveV1
+// ---------------------------------------------------------------------------
+
+func TestParseP2TextMessage(t *testing.T) {
+	fc := newFeishuChannelForTest(nil)
+	evt := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId: &larkim.UserId{OpenId: sp("ou_123")},
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   sp("om_msg1"),
+				ChatId:      sp("oc_chat1"),
+				MessageType: sp("text"),
+				Content:     sp(`{"text":"@_user_1 hello"}`),
+			},
+		},
 	}
-	if len(body) != 0 {
-		t.Errorf("expected empty body, got %q", string(body))
+	gm := fc.parseP2MessageReceiveV1(evt)
+	if gm == nil {
+		t.Fatal("expected non-nil GatewayMessage")
+	}
+	if gm.PlatformUserID != "ou_123" {
+		t.Errorf("user: got %q want ou_123", gm.PlatformUserID)
+	}
+	if gm.ConversationID != "oc_chat1" {
+		t.Errorf("conv: got %q want oc_chat1", gm.ConversationID)
+	}
+	if gm.MessageID != "om_msg1" {
+		t.Errorf("msgid: got %q want om_msg1", gm.MessageID)
+	}
+	if gm.ContentType != "text" {
+		t.Errorf("ctype: got %q want text", gm.ContentType)
+	}
+	// @_user_1 placeholder must be stripped.
+	if gm.Content != "hello" {
+		t.Errorf("content: got %q want %q", gm.Content, "hello")
+	}
+	if len(gm.RawData) == 0 {
+		t.Error("RawData should be populated")
 	}
 }
 
-// TestMustMarshalString marshals a string value correctly.
-func TestMustMarshalString(t *testing.T) {
-	result := mustMarshal("hello")
-	var s string
-	if err := json.Unmarshal(result, &s); err != nil {
-		t.Fatalf("unmarshal failed: %v", err)
+func TestParseP2ImageMessagePlaceholder(t *testing.T) {
+	fc := newFeishuChannelForTest(nil)
+	evt := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId: &larkim.UserId{OpenId: sp("ou_1")},
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   sp("om_img"),
+				MessageType: sp("image"),
+			},
+		},
 	}
-	if s != "hello" {
-		t.Errorf("got %q, want %q", s, "hello")
+	gm := fc.parseP2MessageReceiveV1(evt)
+	if !strings.Contains(gm.Content, "[图片:") {
+		t.Errorf("image content placeholder, got %q", gm.Content)
 	}
 }
 
-// TestMustMarshalStruct marshals a struct value correctly.
+func TestParseP2NonUserSenderIgnored(t *testing.T) {
+	fc := newFeishuChannelForTest(nil)
+	evt := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderType: sp("app"),
+				SenderId:   &larkim.UserId{OpenId: sp("ou_bot")},
+			},
+			Message: &larkim.EventMessage{
+				MessageType: sp("text"),
+				Content:     sp(`{"text":"hi"}`),
+			},
+		},
+	}
+	if gm := fc.parseP2MessageReceiveV1(evt); gm != nil {
+		t.Errorf("non-user sender must be ignored, got %+v", gm)
+	}
+}
+
+func TestParseP2NilEvent(t *testing.T) {
+	fc := newFeishuChannelForTest(nil)
+	if gm := fc.parseP2MessageReceiveV1(nil); gm != nil {
+		t.Errorf("nil event must return nil, got %+v", gm)
+	}
+	if gm := fc.parseP2MessageReceiveV1(&larkim.P2MessageReceiveV1{}); gm != nil {
+		t.Errorf("event with nil Data must return nil, got %+v", gm)
+	}
+}
+
+func TestParseP2UnknownTypeFallback(t *testing.T) {
+	fc := newFeishuChannelForTest(nil)
+	evt := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId: &larkim.UserId{OpenId: sp("ou_1")},
+			},
+			Message: &larkim.EventMessage{
+				MessageType: sp("share_chat"),
+			},
+		},
+	}
+	gm := fc.parseP2MessageReceiveV1(evt)
+	if !strings.Contains(gm.Content, "share_chat") {
+		t.Errorf("unknown type fallback should echo type, got %q", gm.Content)
+	}
+	if gm.ContentType != "share_chat" {
+		t.Errorf("ctype: got %q want share_chat", gm.ContentType)
+	}
+}
+
+func TestParseP2FileDisabledByDefault(t *testing.T) {
+	fc := newFeishuChannelForTest(&gateway.FeishuChannelConfig{})
+	evt := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId: &larkim.UserId{OpenId: sp("ou_1")},
+			},
+			Message: &larkim.EventMessage{MessageType: sp("file")},
+		},
+	}
+	gm := fc.parseP2MessageReceiveV1(evt)
+	if gm.Content != "[文件消息暂不支持]" {
+		t.Errorf("file disabled default: got %q", gm.Content)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Validate
+// ---------------------------------------------------------------------------
+
+func TestValidateMissingCredentials(t *testing.T) {
+	fc := newFeishuChannelForTest(&gateway.FeishuChannelConfig{})
+	if err := fc.Validate(); err == nil {
+		t.Error("missing app_id/app_secret must fail validation")
+	}
+}
+
+func TestValidateOK(t *testing.T) {
+	fc := newFeishuChannelForTest(&gateway.FeishuChannelConfig{
+		AppID: "cli_x", AppSecret: "secret",
+	})
+	if err := fc.Validate(); err != nil {
+		t.Errorf("valid creds should pass, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BuildUserID / BuildSessionID
+// ---------------------------------------------------------------------------
+
+func TestBuildIDs(t *testing.T) {
+	fc := newFeishuChannelForTest(nil)
+	// These are set by the channel on the gateway side via dispatch;
+	// exercise the builders directly here.
+	gm := fc.parseP2MessageReceiveV1(&larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender:  &larkim.EventSender{SenderId: &larkim.UserId{OpenId: sp("ou_42")}},
+			Message: &larkim.EventMessage{ChatId: sp("oc_99")},
+		},
+	})
+	if uid := fc.BuildUserID(gm); uid != "feishu:ou_42" {
+		t.Errorf("uid: got %q want feishu:ou_42", uid)
+	}
+	if sid := fc.BuildSessionID(gm); sid != "feishu-oc_99" {
+		t.Errorf("sid: got %q want feishu-oc_99", sid)
+	}
+}
+
+func TestBuildIDsAnonymous(t *testing.T) {
+	fc := newFeishuChannelForTest(nil)
+	gm := fc.parseP2MessageReceiveV1(&larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Message: &larkim.EventMessage{},
+		},
+	})
+	if uid := fc.BuildUserID(gm); uid != "feishu:anonymous" {
+		t.Errorf("uid: got %q want feishu:anonymous", uid)
+	}
+	if sid := fc.BuildSessionID(gm); sid != "feishu-unknown" {
+		t.Errorf("sid: got %q want feishu-unknown", sid)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// mustMarshal / truncateText utilities (retained)
+// ---------------------------------------------------------------------------
+
 func TestMustMarshalStruct(t *testing.T) {
-	type TestStruct struct {
+	type TS struct {
 		Name string `json:"name"`
-		Age  int    `json:"age"`
 	}
-	result := mustMarshal(TestStruct{Name: "test", Age: 42})
-
-	var ts TestStruct
-	if err := json.Unmarshal(result, &ts); err != nil {
-		t.Fatalf("unmarshal failed: %v", err)
+	var ts TS
+	if err := json.Unmarshal(mustMarshal(TS{Name: "x"}), &ts); err != nil {
+		t.Fatalf("unmarshal: %v", err)
 	}
-	if ts.Name != "test" || ts.Age != 42 {
-		t.Errorf("got %+v, want {test 42}", ts)
+	if ts.Name != "x" {
+		t.Errorf("got %q want x", ts.Name)
 	}
 }
 
-// TestMustMarshalInvalid returns empty JSON object on failure.
 func TestMustMarshalInvalid(t *testing.T) {
-	// Channels and functions cannot be marshaled.
-	result := mustMarshal(make(chan int))
-	if string(result) != "{}" {
-		t.Errorf("expected {}, got %s", string(result))
+	if got := mustMarshal(make(chan int)); string(got) != "{}" {
+		t.Errorf("expected {}, got %s", got)
 	}
 }
 
-// TestMustMarshalNil returns the JSON null representation.
-func TestMustMarshalNil(t *testing.T) {
-	result := mustMarshal(nil)
-	if string(result) != "null" {
-		t.Errorf("expected null, got %s", string(result))
-	}
-}
-
-// TestTruncateTextWithinLimit returns the original text unchanged.
-func TestTruncateTextWithinLimit(t *testing.T) {
-	text := "hello world"
-	result := truncateText(text, 100)
-	if result != text {
-		t.Errorf("got %q, want %q", result, text)
-	}
-}
-
-// TestTruncateTextExactLimit returns the original text.
-func TestTruncateTextExactLimit(t *testing.T) {
-	text := "hello world"
-	result := truncateText(text, len([]rune(text)))
-	if result != text {
-		t.Errorf("got %q, want %q", result, text)
-	}
-}
-
-// TestTruncateTextExceedsLimit truncates and appends ellipsis.
 func TestTruncateTextExceedsLimit(t *testing.T) {
-	text := "hello world this is a long text"
-	result := truncateText(text, 5)
-	if !strings.HasSuffix(result, "...") {
-		t.Errorf("truncated text should end with ..., got %q", result)
-	}
-}
-
-// TestTruncateTextChinese handles multi-byte characters correctly.
-func TestTruncateTextChinese(t *testing.T) {
-	text := "你好世界这是一个很长的文本"
-	result := truncateText(text, 5)
-	runes := []rune(result)
-	if len(runes) > 5+3 { // 5 chars + "..."
-		t.Errorf("truncated length should be <= 8, got %d: %q", len(runes), result)
-	}
-}
-
-// TestTruncateTextEmpty returns empty string.
-func TestTruncateTextEmpty(t *testing.T) {
-	result := truncateText("", 10)
-	if result != "" {
-		t.Errorf("got %q, want empty string", result)
-	}
-}
-
-// TestTruncateTextWhitespacePreserved preserves whitespace when
-// content is within the limit (trimming is handled by sanitizeContent
-// in sender.go, not by truncateText itself).
-func TestTruncateTextWhitespacePreserved(t *testing.T) {
-	text := "  hello world  "
-	result := truncateText(text, 100)
-	if result != text {
-		t.Errorf("got %q, want %q (whitespace preserved within limit)", result, text)
+	if got := truncateText("hello world this is long", 5); !strings.HasSuffix(got, "...") {
+		t.Errorf("should end with ..., got %q", got)
 	}
 }

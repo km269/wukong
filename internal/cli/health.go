@@ -5,7 +5,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -382,6 +381,3 @@ func printHealthJSON(result health.CheckResult) {
 	fmt.Printf("  ]\n")
 	fmt.Printf("}\n")
 }
-
-// Ensure os import is used (for compile check).
-var _ = os.Getenv

@@ -80,7 +80,7 @@ func TestACPServer_AgentCard(t *testing.T) {
 		t.Errorf("agent card = %d, want 200", w.Code)
 	}
 
-	var card map[string]interface{}
+	var card map[string]any
 	if err := json.NewDecoder(w.Body).Decode(&card); err != nil {
 		t.Fatalf("decode card: %v", err)
 	}

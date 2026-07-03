@@ -33,9 +33,8 @@
 // API keys and secrets support ${ENV_VAR} syntax for runtime expansion
 // via expandSecrets(). This applies to:
 //   - providers[].api_key
-//   - summon.a2a_remotes[].api_key, jwt_secret
+//   - summon.a2a_remotes[].api_key, jwt_secret, oauth_client_secret
 //   - gateway.feishu.app_secret, encrypt_key, verification_token
-//   - gateway.wecom.secret, token, encoding_aes_key
 //   - observability.langfuse_public_key, secret_key
 //   - artifact.cos_secret_id, cos_secret_key
 //   - acp_server.api_key
@@ -49,8 +48,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
+	"github.com/km269/wukong/internal/gateway"
 	"github.com/spf13/viper"
 )
 
@@ -199,9 +198,10 @@ type WukongConfig struct {
 	// Workflow configures multi-mode agent orchestration.
 	Workflow WorkflowConfig `mapstructure:"workflow"`
 
-	// Gateway configures the multi-platform messaging gateway
-	// (Feishu, WeCom, Slack, etc.).
-	Gateway GatewayConfig `mapstructure:"gateway"`
+	// Gateway configures the messaging gateway
+	// (Feishu, etc.). Each channel owns its own inbound transport.
+	// The type lives in internal/gateway; the root config embeds it.
+	Gateway gateway.GatewayConfig `mapstructure:"gateway"`
 
 	// A2AServer configures the local A2A protocol server.
 	A2AServer A2AServerConfig `mapstructure:"a2a_server"`
@@ -320,6 +320,8 @@ func (l *Loader) expandSecrets(cfg *WukongConfig) {
 			os.ExpandEnv(cfg.Summon.A2ARemotes[i].APIKey)
 		cfg.Summon.A2ARemotes[i].JWTSecret =
 			os.ExpandEnv(cfg.Summon.A2ARemotes[i].JWTSecret)
+		cfg.Summon.A2ARemotes[i].OAuthClientSecret =
+			os.ExpandEnv(cfg.Summon.A2ARemotes[i].OAuthClientSecret)
 	}
 
 	// Gateway Feishu channel secrets.
@@ -329,14 +331,6 @@ func (l *Loader) expandSecrets(cfg *WukongConfig) {
 		os.ExpandEnv(cfg.Gateway.Feishu.EncryptKey)
 	cfg.Gateway.Feishu.VerificationToken =
 		os.ExpandEnv(cfg.Gateway.Feishu.VerificationToken)
-
-	// Gateway WeCom channel secrets.
-	cfg.Gateway.WeCom.Secret =
-		os.ExpandEnv(cfg.Gateway.WeCom.Secret)
-	cfg.Gateway.WeCom.Token =
-		os.ExpandEnv(cfg.Gateway.WeCom.Token)
-	cfg.Gateway.WeCom.EncodingAESKey =
-		os.ExpandEnv(cfg.Gateway.WeCom.EncodingAESKey)
 
 	// Observability (Langfuse) secrets.
 	cfg.Observability.LangfusePublicKey =
@@ -467,31 +461,4 @@ func (c *WukongConfig) FindExtension(name string) *ExtensionConfig {
 		}
 	}
 	return nil
-}
-
-// EffectiveMemoryTTL returns the effective memory TTL duration.
-// Falls back to 720h (30 days) if MemoryTTL is zero.
-func (c *WukongConfig) EffectiveMemoryTTL() time.Duration {
-	if c.Memory.MemoryTTL > 0 {
-		return c.Memory.MemoryTTL
-	}
-	return 720 * time.Hour
-}
-
-// EffectiveCleanupTrigger returns the effective capacity fraction
-// that triggers memory cleanup. Falls back to 0.8 (80%).
-func (c *WukongConfig) EffectiveCleanupTrigger() float64 {
-	if c.Memory.CleanupTriggerThreshold > 0 {
-		return c.Memory.CleanupTriggerThreshold
-	}
-	return 0.8
-}
-
-// EffectiveCleanupTarget returns the effective target capacity
-// fraction after cleanup. Falls back to 0.6 (60%).
-func (c *WukongConfig) EffectiveCleanupTarget() float64 {
-	if c.Memory.CleanupTargetThreshold > 0 {
-		return c.Memory.CleanupTargetThreshold
-	}
-	return 0.6
 }

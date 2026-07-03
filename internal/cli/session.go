@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -27,7 +28,6 @@ import (
 	"github.com/km269/wukong/internal/extension/builtin"
 	"github.com/km269/wukong/internal/gateway"
 	"github.com/km269/wukong/internal/gateway/feishu"
-	"github.com/km269/wukong/internal/gateway/wecom"
 	"github.com/km269/wukong/internal/knowledge"
 	"github.com/km269/wukong/internal/memory"
 	"github.com/km269/wukong/internal/observability"
@@ -182,92 +182,23 @@ func runSession(cmd *cobra.Command, args []string) error {
 	go func() {
 		sig := <-sigCh
 		fmt.Printf("\nReceived signal %v, shutting down...\n", sig)
-		// Shutdown A2A server if running
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if bootstrapState.A2AServer != nil {
-			if err := bootstrapState.A2AServer.Stop(shutdownCtx); err != nil {
-				util.Logger.Warn("A2A server stop error",
-					"error", err.Error())
-			}
-		}
-		// Shutdown AG-UI server if running
-		if bootstrapState.AGUIServer != nil {
-			_ = bootstrapState.AGUIServer.Stop(shutdownCtx)
-		}
-		// Shutdown ACP server if running
-		if bootstrapState.ACPServer != nil {
-			_ = bootstrapState.ACPServer.Stop(shutdownCtx)
-		}
-		// Shutdown ACP MCP Bridge if running
-		if bootstrapState.ACPMCPBridge != nil {
-			if err := bootstrapState.ACPMCPBridge.Stop(); err != nil {
-				util.Logger.Warn("acp mcp bridge stop error",
-					"error", err.Error())
-			}
-		}
-		// Shutdown ARD registry server if running
-		if bootstrapState.ARDRegistry != nil {
-			_ = bootstrapState.ARDRegistry.Shutdown(shutdownCtx)
-		}
-		// Shutdown ANP server if running
-		if bootstrapState.ANPServer != nil {
-			_ = bootstrapState.ANPServer.Shutdown(shutdownCtx)
-		}
-		// Shutdown knowledge manager
-		if bootstrapState.KnowledgeMgr != nil {
-			if err := bootstrapState.KnowledgeMgr.Close(); err != nil {
-				util.Logger.Warn("knowledge manager close error",
-					"error", err.Error())
-			}
-		}
-		// Close the agent loop, which triggers the full cleanup
-		// chain: memory workers → runner → session → telemetry
-		// → database pool. This ensures all pending writes are
-		// flushed and the database is properly closed.
-		loop.Close()
+		// shutdownBootstrap is idempotent (sync.Once): the deferred
+		// call below will no-op if this signal handler already ran.
+		_ = shutdownBootstrap(shutdownCtx, bootstrapState, loop)
 		// Do NOT use os.Exit(0) here — let the main goroutine
 		// return naturally so defer cleanup and log flushing
 		// can complete.
 	}()
 
-	// Ensure cleanup on return
+	// Ensure cleanup on return. This is a safety net for the normal
+	// (non-signal) return path; if the signal handler already shut
+	// things down, shutdownBootstrap's sync.Once makes this a no-op.
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if bootstrapState.A2AServer != nil {
-			if err := bootstrapState.A2AServer.Stop(shutdownCtx); err != nil {
-				util.Logger.Warn("A2A server stop error",
-					"error", err.Error())
-			}
-		}
-		if bootstrapState.AGUIServer != nil {
-			_ = bootstrapState.AGUIServer.Stop(shutdownCtx)
-		}
-		if bootstrapState.ACPServer != nil {
-			_ = bootstrapState.ACPServer.Stop(shutdownCtx)
-		}
-		if bootstrapState.ACPMCPBridge != nil {
-			if err := bootstrapState.ACPMCPBridge.Stop(); err != nil {
-				util.Logger.Warn("acp mcp bridge stop error",
-					"error", err.Error())
-			}
-		}
-		// Shutdown ARD registry server if running
-		if bootstrapState.ARDRegistry != nil {
-			_ = bootstrapState.ARDRegistry.Shutdown(shutdownCtx)
-		}
-		// Shutdown ANP server if running
-		if bootstrapState.ANPServer != nil {
-			_ = bootstrapState.ANPServer.Shutdown(shutdownCtx)
-		}
-		if bootstrapState.KnowledgeMgr != nil {
-			if err := bootstrapState.KnowledgeMgr.Close(); err != nil {
-				util.Logger.Warn("knowledge manager close error",
-					"error", err.Error())
-			}
-		}
-		loop.Close()
+		_ = shutdownBootstrap(shutdownCtx, bootstrapState, loop)
 	}()
 
 	// Track the working directory for session recovery.
@@ -287,6 +218,8 @@ func runSession(cmd *cobra.Command, args []string) error {
 // BootstrapState holds resources created during bootstrap that need
 // cleanup beyond the agent loop's scope (e.g., A2A server, AG-UI server).
 type BootstrapState struct {
+	shutdownState // idempotent shutdown guard (see shutdown.go)
+
 	A2AServer     *summon.A2AServer
 	AGUIServer    *server.AGUIServer
 	ACPServer     *server.ACPServer
@@ -298,6 +231,11 @@ type BootstrapState struct {
 	KnowledgeMgr  *knowledge.Manager
 	ProjectMgr    *project.Manager
 	GatewayServer *gateway.GatewayServer
+
+	// DBPing probes the shared database pool for liveness; wired by
+	// bootstrapSession and consumed by health checks. Nil when no DB
+	// pool is in use.
+	DBPing func(ctx context.Context) error
 }
 
 // bootstrapSession initializes all components needed for a session.
@@ -314,9 +252,16 @@ func bootstrapSession(
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("load config: %w", err)
 	}
-	wukongCfg, err := loader.Load()
+	wukongCfg, err := loader.LoadAndValidate()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("parse config: %w", err)
+		return nil, nil, nil, fmt.Errorf("config validation: %w", err)
+	}
+
+	// Surface non-fatal configuration warnings (these do not block
+	// startup but indicate suboptimal or risky configuration). Fatal
+	// issues were already rejected by LoadAndValidate above.
+	for _, w := range wukongCfg.Warnings() {
+		util.Logger.Warn("config: " + w)
 	}
 
 	// Apply log level from config (CLI --debug/--quiet overrides
@@ -1029,7 +974,7 @@ func bootstrapSession(
 			}
 		}
 		if len(errs) > 0 {
-			return fmt.Errorf("shutdown errors: %v", errs)
+			return fmt.Errorf("shutdown errors: %w", errors.Join(errs...))
 		}
 		return nil
 	}
@@ -1076,6 +1021,15 @@ func bootstrapSession(
 		KnowledgeMgr: knowledgeMgr,
 		ProjectMgr:   projectMgr,
 		ARDRegistry:  ardRegistryServer,
+		// Wire a real DB ping so the health DBChecker is no longer a
+		// no-op. dbPool is the shared SQLite pool created above.
+		DBPing: func(ctx context.Context) error {
+			db, err := dbPool.Shared().GetDB()
+			if err != nil {
+				return err
+			}
+			return db.PingContext(ctx)
+		},
 	}
 	if wukongCfg.A2AServer.Enabled {
 		hostAddr := wukongCfg.A2AServer.Address
@@ -1302,17 +1256,19 @@ func bootstrapSession(
 		)
 	}
 
-	// Initialize Gateway server for multi-platform messaging
-	// channels (Feishu, WeCom, Slack, etc.).
+	// Initialize Gateway server for messaging channels.
+	// Each channel owns its own inbound transport (e.g. Feishu's
+	// WebSocket long-connection); the gateway drives the shared
+	// processing pipeline. There is no HTTP listener.
 	if wukongCfg.Gateway.Enabled {
 		gwStore := gateway.NewGatewaySessionStore(dbPool.Shared())
 		state.GatewayServer = gateway.NewGatewayServer(
-			wukongCfg, loop, gwStore,
+			&wukongCfg.Gateway, loop, gwStore,
 		)
 
 		// Register Feishu channel if enabled.
 		if wukongCfg.Gateway.Feishu.Enabled {
-			fc := feishu.NewFeishuChannel(wukongCfg, loop)
+			fc := feishu.NewFeishuChannel(&wukongCfg.Gateway.Feishu)
 			// Fail-fast: refuse to register a misconfigured channel
 			// rather than silently accepting messages it can never
 			// reply to. This surfaces missing env vars (e.g.
@@ -1328,24 +1284,18 @@ func bootstrapSession(
 			}
 		}
 
-		// Register WeCom channel if enabled.
-		if wukongCfg.Gateway.WeCom.Enabled {
-			wc := wecom.NewWeComChannel(wukongCfg, loop)
-			if err := state.GatewayServer.RegisterChannel(wc); err != nil {
-				util.Logger.Warn("gateway: register wecom failed",
-					slog.String("error", err.Error()))
-			} else {
-				util.Logger.Info("gateway: wecom channel registered")
-			}
-		}
-
+		// Start the gateway in the background. Start blocks until the
+		// context is cancelled; Stop() (invoked from the shutdown
+		// chain) cancels the gateway's internal run context, which
+		// propagates to each channel's Start and tears them down.
 		go func() {
-			util.Logger.Info("gateway: server starting",
-				"address", wukongCfg.Gateway.Address)
-			if err := state.GatewayServer.Start(); err != nil &&
-				err.Error() != "http: Server closed" {
+			util.Logger.Info("gateway: starting channels",
+				slog.String("channels",
+					strings.Join(state.GatewayServer.Channels(), ",")))
+			if err := state.GatewayServer.Start(context.Background()); err != nil &&
+				err != context.Canceled {
 				util.Logger.Warn("gateway: server error",
-					"error", err.Error())
+					slog.String("error", err.Error()))
 			}
 		}()
 	}

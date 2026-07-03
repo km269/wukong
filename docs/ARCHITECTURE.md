@@ -43,8 +43,8 @@
 |   Cortex(Enrichment+Injector) · Evolution(log.md) · ARD(Bundle发现)   |
 +----------------------------------------------------------------------+
 | Gateway System:                                                       |
-|   GatewayServer(9-step pipeline) · Feishu Channel · WeCom Channel     |
-|   Dedup · RateLimiter · SessionStore · Router                        |
+|   GatewayServer(9-step pipeline) · Feishu Channel                     |
+|   Dedup · RateLimiter · SessionStore                                  |
 +----------------------------------------------------------------------+
 | Agent Framework: tRPC-Agent-Go v1.10.0                                |
 |   LLMAgent · ChainAgent · ParallelAgent · CycleAgent · GraphAgent      |
@@ -145,11 +145,9 @@ internal/gateway/ (11 文件) — 统一消息入口, 插件式 Channel 架构
 
 ```
 +-----------------------+
-|  Feishu    WeCom      |  Channel 适配器
+|  Feishu               |  Channel 适配器 (各自持有入站传输)
 +-----------+----------+
-|      ChannelRouter     |  路由 + 中间件链
-+-----------+----------+
-|     GatewayServer      |  9步消息流水线
+|     GatewayServer      |  transport-agnostic 消息流水线
 +-----------+----------+
 | Dedup | RateLimiter    |  防护层
 +-----------+----------+

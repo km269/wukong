@@ -25,6 +25,16 @@ import (
 	"golang.org/x/net/html"
 )
 
+// downloadedAsset records a fetched asset (image, CSS, JS, etc.) cached
+// locally during a clone run, keyed by its source URL.
+type downloadedAsset struct {
+	URL         string
+	LocalPath   string
+	ContentType string
+	Size        int64
+	MimeType    string
+}
+
 // TraversalMode defines the crawl traversal strategy.
 type TraversalMode string
 

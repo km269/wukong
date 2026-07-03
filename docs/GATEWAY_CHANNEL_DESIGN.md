@@ -1,5 +1,14 @@
 # Wukong Gateway & Channel 架构设计方案
 
+> ⚠️ **本文档描述的 HTTP Webhook + ChannelRouter 架构已过时。**
+>
+> 自 2026-07-02 起，Gateway 重构为**协议无关的 Channel 编排器**：`Channel`
+> 接口移除了 HTTP 耦合方法（`VerifyRequest`/`HandlePlatformEvent`/
+> `RoutePath`），新增 `Start(ctx, MessageHandler)` / `Stop(ctx)` 生命周期方法；
+> 飞书 channel 改用 SDK WebSocket 长连接接收消息；`ChannelRouter` 与 HTTP
+> 中间件已删除；WeCom channel 已移除。当前架构见
+> `internal/gateway/README.md` 与 `CHANGELOG.md`。下文保留作历史设计记录。
+
 > **版本**: v1.0 | **日期**: 2026-07-01 | **状态**: 设计提案
 
 ---
