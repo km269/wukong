@@ -30,6 +30,13 @@ const (
 
 	// senderHTTPTimeout is the HTTP client timeout for API requests.
 	senderHTTPTimeout = 30 * time.Second
+
+	// maxAPIRetries is the maximum number of retries for API calls
+	// that may fail due to network issues or transient errors.
+	maxAPIRetries = 3
+
+	// apiRetryDelay is the delay between retries.
+	apiRetryDelay = 1 * time.Second
 )
 
 // FeishuSender handles sending replies to Feishu. It uses the Lark
@@ -381,20 +388,53 @@ func (fs *FeishuSender) sendTextViaAPI(
 	util.Logger.Info("feishu: calling Lark SDK Im.V1.Message.Create",
 		slog.String("receive_id", receiveID),
 		slog.String("receive_id_type", receiveIDType))
+	util.Logger.Debug("feishu: request content",
+		slog.String("msg_type", "text"),
+		slog.String("content", textContent))
 
-	resp, err := fs.larkClient.Im.V1.Message.Create(ctx, req)
+	var resp *larkim.CreateMessageResp
+	var err error
+	for attempt := 1; attempt <= maxAPIRetries; attempt++ {
+		resp, err = fs.larkClient.Im.V1.Message.Create(ctx, req)
+		if err == nil && resp.Success() {
+			break
+		}
+
+		if err != nil {
+			util.Logger.Warn("feishu: Lark SDK API call attempt failed",
+				slog.String("receive_id", receiveID),
+				slog.Int("attempt", attempt),
+				slog.Int("max_retries", maxAPIRetries),
+				slog.String("error", err.Error()))
+		} else if !resp.Success() {
+			util.Logger.Warn("feishu: Lark SDK API returned error",
+				slog.String("receive_id", receiveID),
+				slog.Int("attempt", attempt),
+				slog.Int("max_retries", maxAPIRetries),
+				slog.Int("code", resp.Code),
+				slog.String("msg", resp.Msg))
+		}
+
+		if attempt < maxAPIRetries {
+			time.Sleep(apiRetryDelay)
+		}
+	}
+
 	if err != nil {
-		util.Logger.Error("feishu: Lark SDK API call failed",
+		util.Logger.Error("feishu: Lark SDK API call failed after retries",
 			slog.String("receive_id", receiveID),
-			slog.String("error", err.Error()))
+			slog.String("error", err.Error()),
+			slog.String("request_content", textContent),
+			slog.Int("attempts", maxAPIRetries))
 		return fmt.Errorf("feishu: send message: %w", err)
 	}
 
 	if !resp.Success() {
-		util.Logger.Error("feishu: Lark SDK API returned error",
+		util.Logger.Error("feishu: Lark SDK API returned error after retries",
 			slog.String("receive_id", receiveID),
 			slog.Int("code", resp.Code),
-			slog.String("msg", resp.Msg))
+			slog.String("msg", resp.Msg),
+			slog.Int("attempts", maxAPIRetries))
 		return fmt.Errorf(
 			"feishu: send message API error: code=%d, msg=%s",
 			resp.Code, resp.Msg)
@@ -428,6 +468,11 @@ func (fs *FeishuSender) createCardMessage(
 	receiveIDType string,
 	cardJSON string,
 ) (string, error) {
+	util.Logger.Debug("feishu: creating card message",
+		slog.String("receive_id", receiveID),
+		slog.String("receive_id_type", receiveIDType),
+		slog.Int("card_json_length", len(cardJSON)))
+
 	req := larkim.NewCreateMessageReqBuilder().
 		ReceiveIdType(receiveIDType).
 		Body(larkim.NewCreateMessageReqBodyBuilder().
@@ -437,8 +482,39 @@ func (fs *FeishuSender) createCardMessage(
 			Build()).
 		Build()
 
-	resp, err := fs.larkClient.Im.V1.Message.Create(ctx, req)
+	var resp *larkim.CreateMessageResp
+	for attempt := 1; attempt <= maxAPIRetries; attempt++ {
+		resp, err = fs.larkClient.Im.V1.Message.Create(ctx, req)
+		if err == nil && resp.Success() {
+			break
+		}
+
+		if err != nil {
+			util.Logger.Warn("feishu: create card API attempt failed",
+				slog.String("receive_id", receiveID),
+				slog.Int("attempt", attempt),
+				slog.Int("max_retries", maxAPIRetries),
+				slog.String("error", err.Error()))
+		} else if !resp.Success() {
+			util.Logger.Warn("feishu: create card API returned error",
+				slog.String("receive_id", receiveID),
+				slog.Int("attempt", attempt),
+				slog.Int("max_retries", maxAPIRetries),
+				slog.Int("code", resp.Code),
+				slog.String("msg", resp.Msg))
+		}
+
+		if attempt < maxAPIRetries {
+			time.Sleep(apiRetryDelay)
+		}
+	}
+
 	if err != nil {
+		util.Logger.Error("feishu: create card API call failed after retries",
+			slog.String("receive_id", receiveID),
+			slog.String("error", err.Error()),
+			slog.Int("card_json_length", len(cardJSON)),
+			slog.Int("attempts", maxAPIRetries))
 		return "", fmt.Errorf(
 			"feishu: create card: %w", err)
 	}
