@@ -52,6 +52,54 @@ type FeishuSender struct {
 	respURLClient *http.Client
 }
 
+// debugHttpClient wraps an http.Client to log raw response content for debugging.
+// It implements larkcore.HttpClient interface.
+type debugHttpClient struct {
+	client *http.Client
+}
+
+func (d *debugHttpClient) Do(req *http.Request) (*http.Response, error) {
+	util.Logger.Debug("feishu: HTTP request",
+		slog.String("method", req.Method),
+		slog.String("url", req.URL.String()))
+
+	resp, err := d.client.Do(req)
+	if err != nil {
+		util.Logger.Warn("feishu: HTTP request failed",
+			slog.String("url", req.URL.String()),
+			slog.String("error", err.Error()))
+		return resp, err
+	}
+
+	if resp.Body != nil {
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr == nil {
+			contentType := resp.Header.Get("Content-Type")
+			util.Logger.Debug("feishu: HTTP response",
+				slog.String("url", req.URL.String()),
+				slog.Int("status_code", resp.StatusCode),
+				slog.String("content_type", contentType),
+				slog.Int("body_length", len(body)))
+
+			if !strings.Contains(contentType, "application/json") {
+				preview := string(body)
+				if len(preview) > 500 {
+					preview = preview[:500] + "..."
+				}
+				util.Logger.Warn("feishu: non-JSON response received",
+					slog.String("url", req.URL.String()),
+					slog.Int("status_code", resp.StatusCode),
+					slog.String("content_type", contentType),
+					slog.String("body_preview", preview))
+			}
+
+			resp.Body = io.NopCloser(bytes.NewReader(body))
+		}
+	}
+
+	return resp, nil
+}
+
 // NewFeishuSender creates a new FeishuSender with the Lark SDK client
 // for authenticated API calls. The SDK handles token caching and
 // auto-refresh internally.
@@ -60,12 +108,23 @@ func NewFeishuSender(
 ) *FeishuSender {
 	apiBase := cfg.APIBase
 	if apiBase == "" {
-		apiBase = "https://open.feishu.cn/open-apis"
+		apiBase = "https://open.feishu.cn"
+	} else {
+		apiBase = strings.TrimSuffix(apiBase, "/open-apis")
+	}
+
+	util.Logger.Info("feishu: initializing sender",
+		slog.String("api_base", apiBase),
+		slog.String("app_id", cfg.AppID))
+
+	httpClient := &http.Client{
+		Timeout: senderHTTPTimeout,
 	}
 
 	larkClient := lark.NewClient(
 		cfg.AppID, cfg.AppSecret,
 		lark.WithOpenBaseUrl(apiBase),
+		lark.WithHttpClient(&debugHttpClient{client: httpClient}),
 	)
 
 	return &FeishuSender{
@@ -401,11 +460,17 @@ func (fs *FeishuSender) sendTextViaAPI(
 		}
 
 		if err != nil {
+			errorMsg := err.Error()
 			util.Logger.Warn("feishu: Lark SDK API call attempt failed",
 				slog.String("receive_id", receiveID),
 				slog.Int("attempt", attempt),
 				slog.Int("max_retries", maxAPIRetries),
-				slog.String("error", err.Error()))
+				slog.String("error", errorMsg))
+			if strings.Contains(errorMsg, "invalid character") {
+				util.Logger.Warn("feishu: API response may not be valid JSON - check network proxy or API base URL",
+					slog.String("api_base", fs.cfg.APIBase),
+					slog.String("receive_id", receiveID))
+			}
 		} else if !resp.Success() {
 			util.Logger.Warn("feishu: Lark SDK API returned error",
 				slog.String("receive_id", receiveID),
@@ -483,6 +548,7 @@ func (fs *FeishuSender) createCardMessage(
 		Build()
 
 	var resp *larkim.CreateMessageResp
+	var err error
 	for attempt := 1; attempt <= maxAPIRetries; attempt++ {
 		resp, err = fs.larkClient.Im.V1.Message.Create(ctx, req)
 		if err == nil && resp.Success() {
@@ -490,11 +556,17 @@ func (fs *FeishuSender) createCardMessage(
 		}
 
 		if err != nil {
+			errorMsg := err.Error()
 			util.Logger.Warn("feishu: create card API attempt failed",
 				slog.String("receive_id", receiveID),
 				slog.Int("attempt", attempt),
 				slog.Int("max_retries", maxAPIRetries),
-				slog.String("error", err.Error()))
+				slog.String("error", errorMsg))
+			if strings.Contains(errorMsg, "invalid character") {
+				util.Logger.Warn("feishu: create card API response may not be valid JSON - check network proxy or API base URL",
+					slog.String("api_base", fs.cfg.APIBase),
+					slog.String("receive_id", receiveID))
+			}
 		} else if !resp.Success() {
 			util.Logger.Warn("feishu: create card API returned error",
 				slog.String("receive_id", receiveID),
@@ -549,11 +621,53 @@ func (fs *FeishuSender) patchCardMessage(
 			Build()).
 		Build()
 
-	resp, err := fs.larkClient.Im.V1.Message.Patch(ctx, req)
+	var resp *larkim.PatchMessageResp
+	var err error
+	for attempt := 1; attempt <= maxAPIRetries; attempt++ {
+		resp, err = fs.larkClient.Im.V1.Message.Patch(ctx, req)
+		if err == nil && resp.Success() {
+			break
+		}
+
+		if err != nil {
+			errorMsg := err.Error()
+			util.Logger.Warn("feishu: patch card API attempt failed",
+				slog.String("message_id", messageID),
+				slog.Int("attempt", attempt),
+				slog.Int("max_retries", maxAPIRetries),
+				slog.String("error", errorMsg))
+			if strings.Contains(errorMsg, "invalid character") {
+				util.Logger.Warn("feishu: patch card API response may not be valid JSON - check network proxy or API base URL",
+					slog.String("api_base", fs.cfg.APIBase),
+					slog.String("message_id", messageID))
+			}
+		} else if !resp.Success() {
+			util.Logger.Warn("feishu: patch card API returned error",
+				slog.String("message_id", messageID),
+				slog.Int("attempt", attempt),
+				slog.Int("max_retries", maxAPIRetries),
+				slog.Int("code", resp.Code),
+				slog.String("msg", resp.Msg))
+		}
+
+		if attempt < maxAPIRetries {
+			time.Sleep(apiRetryDelay)
+		}
+	}
+
 	if err != nil {
+		util.Logger.Error("feishu: patch card API call failed after retries",
+			slog.String("message_id", messageID),
+			slog.String("error", err.Error()),
+			slog.Int("attempts", maxAPIRetries))
 		return fmt.Errorf("feishu: patch card: %w", err)
 	}
 	if !resp.Success() {
+		util.Logger.Error("feishu: patch card API returned error after retries",
+			slog.String("message_id", messageID),
+			slog.Int("code", resp.Code),
+			slog.String("msg", resp.Msg),
+			slog.Int("attempts", maxAPIRetries))
 		return fmt.Errorf(
 			"feishu: patch card API error: code=%d, msg=%s",
 			resp.Code, resp.Msg)

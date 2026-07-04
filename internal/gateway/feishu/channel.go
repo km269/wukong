@@ -102,9 +102,13 @@ func (fc *FeishuChannel) Validate() error {
 	}
 
 	if fc.cfg.EncryptKey == "" {
-		util.Logger.Warn("feishu: encrypt_key not configured — " +
+		util.Logger.Info("feishu: encrypt_key not configured — " +
 			"event payload decryption is disabled. Set FEISHU_ENCRYPT_KEY " +
 			"if the encryption strategy is enabled on the Feishu app.")
+	}
+	if fc.cfg.VerificationToken == "" {
+		util.Logger.Info("feishu: verification_token not configured — " +
+			"this is a legacy field with no effect in long-connection mode")
 	}
 	return nil
 }
@@ -231,6 +235,7 @@ func (fc *FeishuChannel) SendReply(
 		if evt.Error != nil {
 			util.Logger.Warn("feishu: agent event error",
 				slog.String("error", evt.Error.Message))
+			builder.WriteString(fmt.Sprintf("\n[错误: %s]", evt.Error.Message))
 			continue
 		}
 		if evt.Response != nil &&

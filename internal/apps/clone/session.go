@@ -25,6 +25,7 @@ import (
 type CloneSession struct {
 	jar      *cookiejar.Jar
 	filePath string
+	domains  map[string]bool
 }
 
 // NewCloneSession creates a session with optional cookie persistence.
@@ -40,6 +41,7 @@ func NewCloneSession(filePath string) (*CloneSession, error) {
 	s := &CloneSession{
 		jar:      jar,
 		filePath: filePath,
+		domains:  make(map[string]bool),
 	}
 
 	if filePath != "" {
@@ -72,6 +74,7 @@ func (s *CloneSession) SetCookies(rawURL string, cookies []*http.Cookie) {
 		return
 	}
 	s.jar.SetCookies(u, cookies)
+	s.domains[u.Hostname()] = true
 }
 
 // Save persists cookies to the file in Netscape format.
@@ -97,19 +100,19 @@ func (s *CloneSession) Save() error {
 	fmt.Fprintln(f, "")
 
 	// Write all cookies from all domains.
-	for _, c := range s.jar.Cookies(nil) {
-		// The jar.Cookies(nil) returns cookies from all origins
-		// when called with nil URL. Each cookie's Domain field
-		// identifies its origin.
-		fmt.Fprintf(f, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
-			defaultString(c.Domain, ".local"),
-			"TRUE",
-			defaultString(c.Path, "/"),
-			strings.ToUpper(boolToStr(c.Secure)),
-			c.MaxAge,
-			c.Name,
-			c.Value,
-		)
+	for domain := range s.domains {
+		u, _ := url.Parse("https://" + domain)
+		for _, c := range s.jar.Cookies(u) {
+			fmt.Fprintf(f, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+				defaultString(c.Domain, ".local"),
+				"TRUE",
+				defaultString(c.Path, "/"),
+				strings.ToUpper(boolToStr(c.Secure)),
+				c.MaxAge,
+				c.Name,
+				c.Value,
+			)
+		}
 	}
 
 	return nil
@@ -159,6 +162,7 @@ func (s *CloneSession) load() error {
 			Path:   path,
 			Secure: secure,
 		}})
+		s.domains[u.Hostname()] = true
 	}
 
 	return scanner.Err()

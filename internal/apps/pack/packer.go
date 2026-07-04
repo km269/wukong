@@ -13,6 +13,34 @@ import (
 	"github.com/km269/wukong/pkg/zim"
 )
 
+// PackError represents a detailed packaging error.
+type PackError struct {
+	Phase   string
+	Path    string
+	Message string
+	Err     error
+}
+
+func (e *PackError) Error() string {
+	if e.Path != "" {
+		return fmt.Sprintf("[%s] %s: %s", e.Phase, e.Path, e.Message)
+	}
+	return fmt.Sprintf("[%s] %s", e.Phase, e.Message)
+}
+
+func (e *PackError) Unwrap() error {
+	return e.Err
+}
+
+func newPackError(phase, path string, err error) *PackError {
+	return &PackError{
+		Phase:   phase,
+		Path:    path,
+		Message: err.Error(),
+		Err:     err,
+	}
+}
+
 // Packer performs application packaging operations.
 type Packer struct {
 	opts Options
@@ -27,15 +55,18 @@ func NewPacker(opts Options) *Packer {
 func (p *Packer) Pack(ctx context.Context, sourceDir string) (*Result, error) {
 	startTime := time.Now()
 
-	// 验证源目录存在
 	if _, err := os.Stat(sourceDir); os.IsNotExist(err) {
-		return nil, fmt.Errorf("source directory does not exist: %s", sourceDir)
+		return nil, newPackError("validation", sourceDir,
+			fmt.Errorf("source directory does not exist"))
 	}
 
-	// 确定输出路径
 	outputPath := p.opts.OutputPath
 	if outputPath == "" {
 		outputPath = p.determineOutputPath(sourceDir)
+	}
+
+	if err := p.ensureOutputParentDir(outputPath); err != nil {
+		return nil, newPackError("setup", outputPath, err)
 	}
 
 	var result *Result
@@ -51,7 +82,8 @@ func (p *Packer) Pack(ctx context.Context, sourceDir string) (*Result, error) {
 	case FormatApp:
 		result, err = p.packApp(ctx, sourceDir, outputPath)
 	default:
-		return nil, fmt.Errorf("unsupported format: %s", p.opts.Format)
+		return nil, newPackError("validation", outputPath,
+			fmt.Errorf("unsupported format: %s", p.opts.Format))
 	}
 
 	if err != nil {
@@ -63,6 +95,18 @@ func (p *Packer) Pack(ctx context.Context, sourceDir string) (*Result, error) {
 	result.Duration = result.EndTime.Sub(startTime)
 
 	return result, nil
+}
+
+// ensureOutputParentDir creates the parent directory for the output path.
+func (p *Packer) ensureOutputParentDir(outputPath string) error {
+	parentDir := filepath.Dir(outputPath)
+	if parentDir == "." || parentDir == outputPath {
+		return nil
+	}
+	if err := os.MkdirAll(parentDir, 0755); err != nil {
+		return fmt.Errorf("create output parent directory: %w", err)
+	}
+	return nil
 }
 
 // determineOutputPath generates a default output path based on source and format.
@@ -96,62 +140,64 @@ func (p *Packer) determineOutputPath(sourceDir string) string {
 // packHTML creates a standard HTML directory structure.
 func (p *Packer) packHTML(_ context.Context, sourceDir, outputPath string) (*Result, error) {
 	result := &Result{
-		Format:   FormatHTML,
+		Format:     FormatHTML,
 		OutputPath: outputPath,
 	}
 
-	// 创建输出目录
 	if err := os.MkdirAll(outputPath, 0755); err != nil {
-		return nil, fmt.Errorf("create output directory: %w", err)
+		return nil, newPackError("packHTML", outputPath,
+			fmt.Errorf("create output directory: %w", err))
 	}
 
-	// 复制所有文件
-	filesProcessed, assetsIncluded, totalSize, err := p.copyDirectory(sourceDir, outputPath)
-	if err != nil {
-		return nil, fmt.Errorf("copy directory: %w", err)
-	}
+	filesProcessed, assetsIncluded, totalSize, warnings := p.copyDirectory(sourceDir, outputPath)
 
 	result.FilesProcessed = filesProcessed
 	result.AssetsIncluded = assetsIncluded
 	result.SizeBytes = totalSize
 	result.Success = true
+	result.Errors = warnings
 
 	return result, nil
 }
 
-// copyDirectory recursively copies a directory.
-func (p *Packer) copyDirectory(src, dst string) (int, int, int64, error) {
+// copyDirectory recursively copies a directory with graceful error handling.
+// Failed file copies are logged but don't stop the entire operation.
+func (p *Packer) copyDirectory(src, dst string) (int, int, int64, []string) {
 	filesProcessed := 0
 	assetsIncluded := 0
 	totalSize := int64(0)
+	var warnings []string
 
-	err := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+	err := filepath.Walk(src, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			warnings = append(warnings, fmt.Sprintf("skip file %s: %v", path, walkErr))
+			return nil
 		}
 
-		// 计算相对路径
 		relPath, err := filepath.Rel(src, path)
 		if err != nil {
-			return err
+			warnings = append(warnings, fmt.Sprintf("skip file %s: %v", path, err))
+			return nil
 		}
 
 		dstPath := filepath.Join(dst, relPath)
 
 		if info.IsDir() {
-			// 创建目录
-			return os.MkdirAll(dstPath, info.Mode())
+			if err := os.MkdirAll(dstPath, info.Mode()); err != nil {
+				warnings = append(warnings, fmt.Sprintf("create dir %s: %v", dstPath, err))
+				return filepath.SkipDir
+			}
+			return nil
 		}
 
-		// 复制文件
 		if err := copyFile(path, dstPath); err != nil {
-			return err
+			warnings = append(warnings, fmt.Sprintf("copy file %s: %v", path, err))
+			return nil
 		}
 
 		filesProcessed++
 		totalSize += info.Size()
 
-		// 检查是否是资源文件
 		ext := strings.ToLower(filepath.Ext(path))
 		assetExts := []string{".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".mp4", ".mp3"}
 		for _, assetExt := range assetExts {
@@ -164,32 +210,34 @@ func (p *Packer) copyDirectory(src, dst string) (int, int, int64, error) {
 		return nil
 	})
 
-	return filesProcessed, assetsIncluded, totalSize, err
+	if err != nil {
+		warnings = append(warnings, fmt.Sprintf("walk directory %s: %v", src, err))
+	}
+
+	return filesProcessed, assetsIncluded, totalSize, warnings
 }
 
-// copyFile copies a single file.
+// copyFile copies a single file with error handling.
 func copyFile(src, dst string) error {
 	srcFile, err := os.Open(src)
 	if err != nil {
-		return err
+		return fmt.Errorf("open source: %w", err)
 	}
 	defer srcFile.Close()
 
 	dstFile, err := os.Create(dst)
 	if err != nil {
-		return err
+		return fmt.Errorf("create destination: %w", err)
 	}
 	defer dstFile.Close()
 
-	_, err = io.Copy(dstFile, srcFile)
-	if err != nil {
-		return err
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		return fmt.Errorf("copy content: %w", err)
 	}
 
-	// 复制权限
 	srcInfo, err := os.Stat(src)
 	if err != nil {
-		return err
+		return fmt.Errorf("stat source: %w", err)
 	}
 	return os.Chmod(dst, srcInfo.Mode())
 }
@@ -209,18 +257,19 @@ func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Resu
 	var assetsIncluded int
 	var mainPageURL string
 	var mainPageTitle string
-	var counterStats = make(map[string]int) // mime → count
-	var iconData []byte                     // 48×48 PNG favicon
+	var counterStats = make(map[string]int)
+	var iconData []byte
+	var warnings []string
 
-	err := filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+	err := filepath.Walk(sourceDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			warnings = append(warnings, fmt.Sprintf("skip file %s: %v", path, walkErr))
+			return nil
 		}
 		if info.IsDir() {
 			return nil
 		}
 
-		// Skip state files.
 		relPath, _ := filepath.Rel(sourceDir, path)
 		if filepath.Base(relPath) == "state.json" {
 			return nil
@@ -228,12 +277,12 @@ func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Resu
 
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return fmt.Errorf("read file %s: %w", path, err)
+			warnings = append(warnings, fmt.Sprintf("skip file %s: %v", path, err))
+			return nil
 		}
 
 		url := filepath.ToSlash(relPath)
 
-		// Detect and capture the mirror's main page.
 		if url == "pages/index.html" && mainPageURL == "" {
 			mainPageURL = url
 			if t := htmlTitleOfBytes(data); t != "" {
@@ -241,7 +290,6 @@ func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Resu
 			}
 		}
 
-		// Determine MIME type and title.
 		mimeType := getMimeType(url)
 		title := url
 		if mimeType == "text/html" {
@@ -252,7 +300,6 @@ func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Resu
 			assetsIncluded++
 		}
 
-		// Detect 48×48 favicon for ZIM Illustrator metadata.
 		if mimeType == "image/png" && len(data) > 0 {
 			if isPNG48x48(data) && iconData == nil {
 				iconData = make([]byte, len(data))
@@ -260,21 +307,23 @@ func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Resu
 			}
 		}
 
-		// Collect counter stats (Kiwix convention: "mime=count;...").
 		counterStats[mimeType]++
 
 		if err := packer.AddArticle(url, title, mimeType, data); err != nil {
-			return fmt.Errorf("add article %s: %w", url, err)
+			warnings = append(warnings, fmt.Sprintf("skip article %s: %v", url, err))
+			return nil
 		}
 		filesProcessed++
 		return nil
 	})
 
 	if err != nil {
-		return nil, fmt.Errorf("walk directory: %w", err)
+		return nil, newPackError("packZIM", sourceDir,
+			fmt.Errorf("walk directory: %w", err))
 	}
 	if filesProcessed == 0 {
-		return nil, fmt.Errorf("no files found to pack")
+		return nil, newPackError("packZIM", sourceDir,
+			fmt.Errorf("no files found to pack"))
 	}
 
 	// Main page with W namespace redirect.
@@ -339,7 +388,6 @@ func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Resu
 			"Illustration 48x48", "image/png", iconData)
 	}
 
-	// Build the ZIM archive.
 	buildOpts := zim.BuildOptions{
 		AppName:        p.opts.AppName,
 		AppDescription: p.opts.AppDescription,
@@ -347,21 +395,23 @@ func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Resu
 	}
 	stats, err := packer.BuildWithStats(outputPath, buildOpts, p.opts.CachePath, p.opts.Incremental)
 	if err != nil {
-		return nil, fmt.Errorf("build ZIM archive: %w", err)
+		return nil, newPackError("packZIM", outputPath,
+			fmt.Errorf("build ZIM archive: %w", err))
 	}
 
 	result.Stats = stats
 
-	// Get final file size
 	info, err := os.Stat(outputPath)
 	if err != nil {
-		return nil, fmt.Errorf("stat output file: %w", err)
+		return nil, newPackError("packZIM", outputPath,
+			fmt.Errorf("stat output file: %w", err))
 	}
 
 	result.FilesProcessed = filesProcessed
 	result.AssetsIncluded = assetsIncluded
 	result.SizeBytes = info.Size()
 	result.Success = true
+	result.Errors = warnings
 
 	return result, nil
 }
@@ -375,42 +425,42 @@ func (p *Packer) packBinary(ctx context.Context, sourceDir, outputPath string) (
 		OutputPath: outputPath,
 	}
 
-	// Build a temporary ZIM archive.
 	tmpZIM := outputPath + ".tmp.zim"
 	zimResult, err := p.packZIM(ctx, sourceDir, tmpZIM)
 	if err != nil {
-		return nil, fmt.Errorf("build embedded ZIM: %w", err)
+		return nil, newPackError("packBinary", tmpZIM,
+			fmt.Errorf("build embedded ZIM: %w", err))
 	}
 	defer os.Remove(tmpZIM)
 
-	// Read the ZIM data.
 	zimData, err := os.ReadFile(tmpZIM)
 	if err != nil {
-		return nil, fmt.Errorf("read ZIM data: %w", err)
+		return nil, newPackError("packBinary", tmpZIM,
+			fmt.Errorf("read ZIM data: %w", err))
 	}
 
-	// Copy base binary to output path.
 	baseBinary := p.opts.BaseBinary
 	if baseBinary == "" {
 		baseBinary, _ = os.Executable()
 	}
 
 	if _, err := os.Stat(baseBinary); os.IsNotExist(err) {
-		return nil, fmt.Errorf("base binary not found: %s", baseBinary)
+		return nil, newPackError("packBinary", baseBinary,
+			fmt.Errorf("base binary not found"))
 	}
 
 	if err := copyFile(baseBinary, outputPath); err != nil {
-		return nil, fmt.Errorf("copy base binary: %w", err)
+		return nil, newPackError("packBinary", outputPath,
+			fmt.Errorf("copy base binary: %w", err))
 	}
 
-	// Append ZIM marker and data.
 	outFile, err := os.OpenFile(outputPath, os.O_WRONLY|os.O_APPEND, 0755)
 	if err != nil {
-		return nil, fmt.Errorf("open output file: %w", err)
+		return nil, newPackError("packBinary", outputPath,
+			fmt.Errorf("open output file: %w", err))
 	}
 	defer outFile.Close()
 
-	// Write ZIM payload marker and size (allows extraction without scanning).
 	marker := fmt.Sprintf(
 		"\n---WUKONG_ZIM_BEGIN:%d:%s:%s:%d---\n",
 		len(zimData),
@@ -419,21 +469,21 @@ func (p *Packer) packBinary(ctx context.Context, sourceDir, outputPath string) (
 		zimResult.FilesProcessed,
 	)
 	if _, err := outFile.WriteString(marker); err != nil {
-		return nil, fmt.Errorf("write ZIM marker: %w", err)
+		return nil, newPackError("packBinary", outputPath,
+			fmt.Errorf("write ZIM marker: %w", err))
 	}
 
-	// Write ZIM data.
 	if _, err := outFile.Write(zimData); err != nil {
-		return nil, fmt.Errorf("write ZIM data: %w", err)
+		return nil, newPackError("packBinary", outputPath,
+			fmt.Errorf("write ZIM data: %w", err))
 	}
 
-	// Write end marker.
 	endMarker := "\n---WUKONG_ZIM_END---\n"
 	if _, err := outFile.WriteString(endMarker); err != nil {
-		return nil, fmt.Errorf("write end marker: %w", err)
+		return nil, newPackError("packBinary", outputPath,
+			fmt.Errorf("write end marker: %w", err))
 	}
 
-	// Get final file size.
 	outInfo, _ := os.Stat(outputPath)
 	if outInfo != nil {
 		result.SizeBytes = outInfo.Size()
@@ -443,6 +493,7 @@ func (p *Packer) packBinary(ctx context.Context, sourceDir, outputPath string) (
 	result.AssetsIncluded = zimResult.AssetsIncluded
 	result.Stats = zimResult.Stats
 	result.Success = true
+	result.Errors = zimResult.Errors
 
 	return result, nil
 }
@@ -470,19 +521,19 @@ func (p *Packer) packMacApp(_ context.Context, sourceDir, outputPath string) (*R
 		OutputPath: outputPath,
 	}
 
-	// 创建 .app 目录结构
 	contentsDir := filepath.Join(outputPath, "Contents")
 	macosDir := filepath.Join(contentsDir, "MacOS")
 	resourcesDir := filepath.Join(contentsDir, "Resources")
 
 	if err := os.MkdirAll(macosDir, 0755); err != nil {
-		return nil, fmt.Errorf("create MacOS directory: %w", err)
+		return nil, newPackError("packMacApp", macosDir,
+			fmt.Errorf("create MacOS directory: %w", err))
 	}
 	if err := os.MkdirAll(resourcesDir, 0755); err != nil {
-		return nil, fmt.Errorf("create Resources directory: %w", err)
+		return nil, newPackError("packMacApp", resourcesDir,
+			fmt.Errorf("create Resources directory: %w", err))
 	}
 
-	// 复制可执行文件
 	baseBinary := p.opts.BaseBinary
 	if baseBinary == "" {
 		baseBinary, _ = os.Executable()
@@ -490,21 +541,20 @@ func (p *Packer) packMacApp(_ context.Context, sourceDir, outputPath string) (*R
 
 	execPath := filepath.Join(macosDir, "wukong_app")
 	if err := copyFile(baseBinary, execPath); err != nil {
-		return nil, fmt.Errorf("copy executable: %w", err)
+		return nil, newPackError("packMacApp", execPath,
+			fmt.Errorf("copy executable: %w", err))
 	}
-	// 设置可执行权限
 	os.Chmod(execPath, 0755)
 
-	// 复制应用内容到 Resources
 	appContentDir := filepath.Join(resourcesDir, "app")
 	if err := os.MkdirAll(appContentDir, 0755); err != nil {
-		return nil, fmt.Errorf("create app content directory: %w", err)
+		return nil, newPackError("packMacApp", appContentDir,
+			fmt.Errorf("create app content directory: %w", err))
 	}
 
-	filesProcessed, assetsIncluded, _, err := p.copyDirectory(sourceDir, appContentDir)
-	if err != nil {
-		return nil, fmt.Errorf("copy app content: %w", err)
-	}
+	var warnings []string
+	filesProcessed, assetsIncluded, _, warnings := p.copyDirectory(sourceDir, appContentDir)
+	result.Errors = warnings
 
 	// 创建 Info.plist
 	plistPath := filepath.Join(contentsDir, "Info.plist")
@@ -560,23 +610,24 @@ func (p *Packer) packLinuxApp(_ context.Context, sourceDir, outputPath string) (
 		OutputPath: outputPath,
 	}
 
-	// 创建 AppDir 结构
 	appDir := outputPath
 	usrBinDir := filepath.Join(appDir, "usr", "bin")
 	usrShareDir := filepath.Join(appDir, "usr", "share", "applications")
 	usrIconDir := filepath.Join(appDir, "usr", "share", "icons", "hicolor", "256x256", "apps")
 
 	if err := os.MkdirAll(usrBinDir, 0755); err != nil {
-		return nil, fmt.Errorf("create usr/bin directory: %w", err)
+		return nil, newPackError("packLinuxApp", usrBinDir,
+			fmt.Errorf("create usr/bin directory: %w", err))
 	}
 	if err := os.MkdirAll(usrShareDir, 0755); err != nil {
-		return nil, fmt.Errorf("create usr/share/applications directory: %w", err)
+		return nil, newPackError("packLinuxApp", usrShareDir,
+			fmt.Errorf("create usr/share/applications directory: %w", err))
 	}
 	if err := os.MkdirAll(usrIconDir, 0755); err != nil {
-		return nil, fmt.Errorf("create usr/share/icons directory: %w", err)
+		return nil, newPackError("packLinuxApp", usrIconDir,
+			fmt.Errorf("create usr/share/icons directory: %w", err))
 	}
 
-	// 复制可执行文件
 	baseBinary := p.opts.BaseBinary
 	if baseBinary == "" {
 		baseBinary, _ = os.Executable()
@@ -584,22 +635,20 @@ func (p *Packer) packLinuxApp(_ context.Context, sourceDir, outputPath string) (
 
 	execPath := filepath.Join(usrBinDir, p.opts.AppName)
 	if err := copyFile(baseBinary, execPath); err != nil {
-		return nil, fmt.Errorf("copy executable: %w", err)
+		return nil, newPackError("packLinuxApp", execPath,
+			fmt.Errorf("copy executable: %w", err))
 	}
 	os.Chmod(execPath, 0755)
 
-	// 复制应用内容
 	appContentDir := filepath.Join(appDir, "usr", "share", p.opts.AppName)
 	if err := os.MkdirAll(appContentDir, 0755); err != nil {
-		return nil, fmt.Errorf("create app content directory: %w", err)
+		return nil, newPackError("packLinuxApp", appContentDir,
+			fmt.Errorf("create app content directory: %w", err))
 	}
 
-	filesProcessed, assetsIncluded, _, err := p.copyDirectory(sourceDir, appContentDir)
-	if err != nil {
-		return nil, fmt.Errorf("copy app content: %w", err)
-	}
+	var warnings []string
+	filesProcessed, assetsIncluded, _, warnings := p.copyDirectory(sourceDir, appContentDir)
 
-	// 创建 .desktop 文件
 	desktopPath := filepath.Join(usrShareDir, p.opts.AppName+".desktop")
 	desktopContent := fmt.Sprintf(`[Desktop Entry]
 Name=%s
@@ -611,14 +660,14 @@ Terminal=false
 `, p.opts.AppName, filepath.Join("usr", "bin", p.opts.AppName), p.opts.AppName)
 
 	if err := os.WriteFile(desktopPath, []byte(desktopContent), 0644); err != nil {
-		return nil, fmt.Errorf("write desktop file: %w", err)
+		return nil, newPackError("packLinuxApp", desktopPath,
+			fmt.Errorf("write desktop file: %w", err))
 	}
 
-	// 复制图标
 	if p.opts.IconPath != "" {
 		iconDst := filepath.Join(usrIconDir, p.opts.AppName+".png")
 		if err := copyFile(p.opts.IconPath, iconDst); err != nil {
-			fmt.Printf("Warning: failed to copy icon: %v\n", err)
+			warnings = append(warnings, fmt.Sprintf("warning: failed to copy icon: %v", err))
 		}
 	}
 
@@ -626,6 +675,7 @@ Terminal=false
 	result.AssetsIncluded = assetsIncluded
 	result.SizeBytes = calculateDirSize(outputPath)
 	result.Success = true
+	result.Errors = warnings
 
 	return result, nil
 }

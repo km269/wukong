@@ -232,6 +232,7 @@ func newAppsCreateCmd() *cobra.Command {
 		description string
 		template    string
 		htmlFile    string
+		force       bool
 	)
 
 	cmd := &cobra.Command{
@@ -245,7 +246,8 @@ Templates: blank, calculator, dashboard, form, notes
 Examples:
   wukong apps create --name my-app --desc "My app"
   wukong apps create --name calc --template calculator
-  wukong apps create --name page --html-file ./index.html`,
+  wukong apps create --name page --html-file ./index.html
+  wukong apps create --name my-app --force  # Overwrite existing app`,
 		RunE: runAppsCreate,
 	}
 
@@ -264,6 +266,9 @@ Examples:
 	cmd.Flags().StringVarP(
 		&htmlFile, "html-file", "f", "",
 		"Path to HTML file to import")
+	cmd.Flags().BoolVarP(
+		&force, "force", "F", false,
+		"Overwrite existing app if it exists")
 
 	return cmd
 }
@@ -274,6 +279,7 @@ func runAppsCreate(cmd *cobra.Command, args []string) error {
 	desc, _ := cmd.Flags().GetString("description")
 	tmpl, _ := cmd.Flags().GetString("template")
 	htmlFile, _ := cmd.Flags().GetString("html-file")
+	force, _ := cmd.Flags().GetBool("force")
 
 	if name == "" {
 		return fmt.Errorf("--name is required")
@@ -285,9 +291,14 @@ func runAppsCreate(cmd *cobra.Command, args []string) error {
 	}
 	defer cleanup()
 
-	// Check for duplicate
 	if _, ok := mgr.GetApp(name); ok {
-		return fmt.Errorf("app %q already exists", name)
+		if !force {
+			return fmt.Errorf("app %q already exists. Use --force to overwrite", name)
+		}
+		if err := mgr.DeleteApp(name); err != nil {
+			return fmt.Errorf("delete existing app: %w", err)
+		}
+		fmt.Printf("Deleted existing app %q\n", name)
 	}
 
 	var app apps.AppInfo
@@ -735,30 +746,30 @@ Examples:
 
 func newAppsCloneCmd() *cobra.Command {
 	var (
-		configPath          string
-		maxPages            int
-		maxDepth            int
-		traversal           string
-		subdomains          bool
-		scroll              bool
-		timeout             int
-		renderTimeout       int
-		settle              int
-		workers             int
-		assetWorkers        int
-		force               bool
-		refresh             bool
-		incremental         bool
-		chromePath          string
-		assetSameDomain     bool
-		noSitemap           bool
-		noAntibot           bool
-		noAntibotAutoEsc    bool
-		cookieFile          string
-		chromeProfile       string
-		noHeadless          bool
-		noChromeProfile     bool
-		noStealth           bool
+		configPath       string
+		maxPages         int
+		maxDepth         int
+		traversal        string
+		subdomains       bool
+		scroll           bool
+		timeout          int
+		renderTimeout    int
+		settle           int
+		workers          int
+		assetWorkers     int
+		force            bool
+		refresh          bool
+		incremental      bool
+		chromePath       string
+		assetSameDomain  bool
+		noSitemap        bool
+		noAntibot        bool
+		noAntibotAutoEsc bool
+		cookieFile       string
+		chromeProfile    string
+		noHeadless       bool
+		noChromeProfile  bool
+		noStealth        bool
 	)
 
 	cmd := &cobra.Command{
@@ -789,19 +800,19 @@ Examples:
 			fmt.Printf("Cloning %s ...\n", seedURL)
 
 			opts := apps.CloneOptions{
-				MaxPages:     maxPages,
-				MaxDepth:     maxDepth,
-				Traversal:    traversal,
-				Subdomains:   subdomains,
-				Scroll:       scroll,
-				Timeout:       timeout,
-				RenderTimeout: renderTimeout,
-				Settle:        settle,
-				Workers:      workers,
-				AssetWorkers: assetWorkers,
-				Force:        force,
-				Refresh:      refresh,
-				ChromePath:   chromePath,
+				MaxPages:        maxPages,
+				MaxDepth:        maxDepth,
+				Traversal:       traversal,
+				Subdomains:      subdomains,
+				Scroll:          scroll,
+				Timeout:         timeout,
+				RenderTimeout:   renderTimeout,
+				Settle:          settle,
+				Workers:         workers,
+				AssetWorkers:    assetWorkers,
+				Force:           force,
+				Refresh:         refresh,
+				ChromePath:      chromePath,
 				CookieFile:      cookieFile,
 				ChromeProfile:   chromeProfile,
 				NoChromeProfile: noChromeProfile,
@@ -915,5 +926,3 @@ func previewApp(ctx context.Context, serveDir string, port int, name string) err
 	<-ctx.Done()
 	return srv.Stop()
 }
-
-

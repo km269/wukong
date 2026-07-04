@@ -107,7 +107,7 @@ type FeishuChannelConfig struct {
 func SetDefaults(v *viper.Viper) {
 	// Gateway
 	v.SetDefault("gateway.enabled", false)
-	v.SetDefault("gateway.default_timeout", "120s")
+	v.SetDefault("gateway.default_timeout", "900s")
 	v.SetDefault("gateway.max_concurrent_sessions", 100)
 	v.SetDefault("gateway.message_dedup_ttl", "5m")
 	v.SetDefault("gateway.rate_limit_per_user", 20)

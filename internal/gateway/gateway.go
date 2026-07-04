@@ -162,6 +162,22 @@ func (gs *GatewayServer) Start(ctx context.Context) error {
 		slog.Int("channels", len(channels)),
 		slog.Duration("default_timeout", gs.cfg.DefaultTimeout))
 
+	// Validate all channels before starting. A failed validation
+	// prevents startup and returns an error. Only channels that
+	// implement the optional Validate interface are checked.
+	for _, ch := range channels {
+		if validator, ok := ch.(interface{ Validate() error }); ok {
+			if err := validator.Validate(); err != nil {
+				cancel()
+				gs.mu.Lock()
+				gs.running = false
+				gs.runCancel = nil
+				gs.mu.Unlock()
+				return fmt.Errorf("gateway: channel validation failed: %w", err)
+			}
+		}
+	}
+
 	// errCh collects the first fatal error from any channel; a nil
 	// result just means that channel exited cleanly (rare before ctx
 	// cancellation, but tolerated).

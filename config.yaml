@@ -192,7 +192,7 @@ memory:
   db_path: "wukong.db"
   max_memories: 100
   auto_extract: true
-  extract_timeout: "60s"
+  extract_timeout: "300s"
   # extractor_provider: "lmstudio"   # dedicated provider for extraction
   # extractor_model: "gemma-4-e4b-it" # dedicated model for extraction
   # extractor_prompt: |              # custom extraction prompt
@@ -475,7 +475,7 @@ gateway:
   # long-connection that dials out to the platform), so no public
   # callback URL / domain / HTTPS ingress is required — it runs from
   # a local or intranet host.
-  default_timeout: "120s"             # agent single-run timeout
+  default_timeout: "900s"             # agent single-run timeout (matches agent.max_run_duration)
   max_concurrent_sessions: 100        # max concurrent agent sessions
   message_dedup_ttl: "5m"            # message dedup window
   rate_limit_per_user: 20             # max requests per user per window

@@ -2,6 +2,7 @@
 package clone
 
 import (
+	"context"
 	"crypto/md5"
 	"encoding/json"
 	"fmt"
@@ -10,23 +11,26 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"golang.org/x/time/rate"
 )
 
 // CloneCache provides caching for cloned websites to support incremental updates.
 type CloneCache struct {
-	mu       sync.RWMutex
-	manifest *CacheManifest
-	cacheDir string
-	httpClient *http.Client
+	mu          sync.RWMutex
+	manifest    *CacheManifest
+	cacheDir    string
+	httpClient  *http.Client
+	rateLimiter *rate.Limiter
 }
 
 // CacheManifest stores metadata about cached pages.
 type CacheManifest struct {
-	SeedURL    string           `json:"seedURL"`
-	Host       string           `json:"host"`
-	LastSync   time.Time        `json:"lastSync"`
-	ETag       string           `json:"etag,omitempty"`
-	Entries    map[string]*CacheEntry `json:"entries"`
+	SeedURL  string                 `json:"seedURL"`
+	Host     string                 `json:"host"`
+	LastSync time.Time              `json:"lastSync"`
+	ETag     string                 `json:"etag,omitempty"`
+	Entries  map[string]*CacheEntry `json:"entries"`
 }
 
 // CacheEntry represents a cached page or resource.
@@ -62,13 +66,12 @@ func NewCloneCache(cacheDir, host string) (*CloneCache, error) {
 			Host:    host,
 			Entries: make(map[string]*CacheEntry),
 		},
+		rateLimiter: rate.NewLimiter(rate.Limit(5), 10),
 	}
 
-	// Load existing manifest
 	manifestPath := filepath.Join(cacheDir, "manifest.json")
 	if data, err := os.ReadFile(manifestPath); err == nil {
 		if err := json.Unmarshal(data, cache.manifest); err != nil {
-			// Invalid manifest, start fresh
 			cache.manifest = &CacheManifest{
 				Host:    host,
 				Entries: make(map[string]*CacheEntry),
@@ -156,13 +159,13 @@ func (c *CloneCache) CheckNeedsUpdate(url string) (bool, string, error) {
 // UpdateEntry updates a cache entry after fetching.
 func (c *CloneCache) UpdateEntry(url string, resp *http.Response, content []byte, localPath string) {
 	entry := &CacheEntry{
-		URL:          url,
-		LocalPath:    localPath,
-		LastFetched:  time.Now(),
-		StatusCode:   resp.StatusCode,
-		ContentType:  resp.Header.Get("Content-Type"),
-		Size:         int64(len(content)),
-		ContentHash:  hashContent(content),
+		URL:         url,
+		LocalPath:   localPath,
+		LastFetched: time.Now(),
+		StatusCode:  resp.StatusCode,
+		ContentType: resp.Header.Get("Content-Type"),
+		Size:        int64(len(content)),
+		ContentHash: hashContent(content),
 	}
 
 	// Store cache headers
@@ -208,11 +211,11 @@ func (c *CloneCache) GetManifest() *CacheManifest {
 
 	// Return a copy
 	manifest := &CacheManifest{
-		SeedURL:   c.manifest.SeedURL,
-		Host:      c.manifest.Host,
-		LastSync:  c.manifest.LastSync,
-		ETag:      c.manifest.ETag,
-		Entries:   make(map[string]*CacheEntry),
+		SeedURL:  c.manifest.SeedURL,
+		Host:     c.manifest.Host,
+		LastSync: c.manifest.LastSync,
+		ETag:     c.manifest.ETag,
+		Entries:  make(map[string]*CacheEntry),
 	}
 
 	for k, v := range c.manifest.Entries {
@@ -224,20 +227,72 @@ func (c *CloneCache) GetManifest() *CacheManifest {
 }
 
 // GetChangedURLs returns URLs that have changed since last sync.
+// Uses concurrent HEAD requests for better performance with large URL lists.
 func (c *CloneCache) GetChangedURLs(urls []string) ([]string, error) {
-	var changed []string
+	results := make(chan string, len(urls))
+	errs := make(chan error, len(urls))
+	var wg sync.WaitGroup
 
-	for _, url := range urls {
-		needsUpdate, _, err := c.CheckNeedsUpdate(url)
-		if err != nil {
-			continue
-		}
-		if needsUpdate {
-			changed = append(changed, url)
+	sem := make(chan struct{}, 10)
+
+	for _, u := range urls {
+		wg.Add(1)
+		go func(url string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			if c.rateLimiter != nil {
+				if err := c.rateLimiter.Wait(context.Background()); err != nil {
+					errs <- err
+					return
+				}
+			}
+
+			needsUpdate, _, err := c.CheckNeedsUpdateWithRetry(url, 2)
+			if err != nil {
+				errs <- err
+				return
+			}
+			if needsUpdate {
+				results <- url
+			}
+		}(u)
+	}
+
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	var changed []string
+	for url := range results {
+		changed = append(changed, url)
+	}
+
+	var err error
+	for e := range errs {
+		if err == nil {
+			err = e
 		}
 	}
 
-	return changed, nil
+	return changed, err
+}
+
+// CheckNeedsUpdateWithRetry checks if a URL needs updating with retry logic.
+func (c *CloneCache) CheckNeedsUpdateWithRetry(url string, maxRetries int) (bool, string, error) {
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt*attempt) * 500 * time.Millisecond)
+		}
+		needsUpdate, reason, err := c.CheckNeedsUpdate(url)
+		if err == nil {
+			return needsUpdate, reason, nil
+		}
+		lastErr = err
+	}
+	return true, "retry exhausted", lastErr
 }
 
 // Clear removes all cached entries.
