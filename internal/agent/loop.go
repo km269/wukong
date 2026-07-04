@@ -1032,14 +1032,10 @@ func createSingleAgent(
 		llmagent.WithTimeFormat(time.RFC3339),
 	}
 
-	// Preload user memories into system prompt so the agent
-	// automatically knows about stored preferences and facts
-	// at the start of each conversation turn. With a budget of 10,
-	// small memory sets are loaded in full; larger sets use
-	// search-based retrieval. This is critical for memory to work.
-	agentOpts = append(agentOpts,
-		llmagent.WithPreloadMemory(10),
-	)
+	// Note: framework's built-in memory preload is disabled.
+	// Memory injection is handled by our own logic in CoreLoop.Run()
+	// (MemoryFlow WakeUp + tRPC Memory ReadMemories), which provides
+	// more control over deduplication, error handling, and logging.
 
 	// Warn agent when memory is near capacity so it can clean up.
 	if cfg.Config.Memory.MaxMemories > 0 {

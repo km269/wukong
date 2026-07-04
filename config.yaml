@@ -84,7 +84,7 @@ agent:
   # --- LLM call limits ---
   max_llm_calls: 50                  # 0 = unlimited
   max_tool_iterations: 30
-  max_run_duration: "300s"           # wall-clock time limit
+  max_run_duration: "900s"           # wall-clock time limit (15 min for large/remote models)
 
   # --- Generation parameters ---
   parallel_tools: true               # concurrent independent tool calls

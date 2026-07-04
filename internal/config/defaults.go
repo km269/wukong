@@ -38,7 +38,7 @@ func (l *Loader) setAgentDefaults() {
 	// LLM call limits
 	l.v.SetDefault("agent.max_llm_calls", 50)
 	l.v.SetDefault("agent.max_tool_iterations", 30)
-	l.v.SetDefault("agent.max_run_duration", "300s")
+	l.v.SetDefault("agent.max_run_duration", "900s")
 
 	// Generation parameters
 	l.v.SetDefault("agent.parallel_tools", true)

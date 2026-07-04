@@ -137,8 +137,10 @@ func (b *WorkflowBuilder) buildSingleAgent() (agent.Agent, error) {
 			llmagent.WithEnableContextCompaction(true),
 		)
 	}
-	// Preload memory for cross-session awareness
-	opts = append(opts, llmagent.WithPreloadMemory(10))
+	// Note: framework's built-in memory preload is disabled.
+	// Memory injection is handled by CoreLoop.Run()'s own logic
+	// (MemoryFlow WakeUp + tRPC Memory ReadMemories), which provides
+	// more control over deduplication, error handling, and logging.
 
 	return llmagent.New("wukong-single", opts...), nil
 }
