@@ -1,20 +1,21 @@
 # Wukong 配置参考
 
 > 配置文件: config.yaml | 加载器: Viper + Cobra
-> 配置结构: A-O 共 15 组 (34 结构体) | 配置代码: 5 文件 (config.go + types.go + defaults.go + validate.go + config_test.go)
+> 配置结构: A-O 共 15 组 (34 结构体) | 配置代码: 9 文件 (config.go + types_*.go x6 + defaults.go + validate.go)
 
 ---
 
-## 加载优先级 (4 级)
+## 加载优先级 (7 级)
 
 ```
 1. CLI 参数 (--provider, --model, --temperature, --max-tokens, --config)
-2. 环境变量 (WUKONG_ 前缀, 如 WUKONG_DEFAULT_PROVIDER)
-3. YAML 配置文件 (--config 指定或默认搜索路径)
-4. 内置默认值 (internal/config/defaults.go)
+2. 环境变量 (WUKONG_ 前缀, e.g. WUKONG_DEFAULT_PROVIDER)
+3. --config CLI 指定文件
+4. ./config.yaml (当前目录)
+5. ~/.config/wukong/config.yaml
+6. /etc/wukong/config.yaml (非 Windows)
+7. 内置默认值 (internal/config/defaults.go)
 ```
-
-配置文件搜索路径: `./config.yaml` -> `~/.config/wukong/config.yaml` -> `/etc/wukong/config.yaml` (非Windows)
 
 ---
 
@@ -51,6 +52,7 @@
 | telemetry.sample_rate 在 [0.0, 1.0] 范围 | 致命 |
 | anp.port 在 [0, 65535] 范围 | 致命 |
 | anp.meta_protocol_enabled 但 port <= 0 | 致命 |
+| browser.backend 为有效值 (chromedp/rod/空) | 致命 |
 
 `Warnings()` 非致命警告:
 - 无 providers 配置
@@ -65,6 +67,24 @@
 - anp.e2ee_enabled 但 meta_protocol 未启用
 - gateway.feishu.enabled 但 app_id 为空
 - gateway.enabled 但无任何 channel 激活
+
+---
+
+## 配置代码结构
+
+配置代码按职责拆分为 9 个文件:
+
+| 文件 | 职责 |
+|------|------|
+| config.go | 根结构体 WukongConfig + Loader + 查询方法 |
+| types_agent.go | AgentConfig、SecurityConfig 结构体定义 |
+| types_provider.go | ProviderConfig、ExtensionConfig、ToolPermission 结构体定义 |
+| types_storage.go | SessionConfig、MemoryConfig、TodoConfig、RecallConfig 结构体定义 |
+| types_cortex.go | CortexConfig、MemoryFlowConfig、GraphFlowConfig、ImportFlowConfig 结构体定义 |
+| types_browser.go | BrowserConfig、BrowserSearchConfig 结构体定义，含 BrowserBackendType 类型 |
+| types_orchestration.go | ARDConfig、SummonConfig、ANPConfig、SkillConfig、EvolutionConfig、KnowledgeConfig、OKFConfig、DifyConfig、WorkflowConfig、SubAgentConfig、TeamMemberConfig 结构体定义 |
+| defaults.go | 内置默认值 (按子系统分组, 13 个方法) |
+| validate.go | 配置验证 (致命错误) + Warnings() (非致命警告) |
 
 ---
 
@@ -96,7 +116,7 @@
 log_level: "info"                    # debug | info | warn | error
 default_provider: "lmstudio"         # 必须匹配 providers[].name
 lightweight_provider: "lmstudio"     # 后台任务 (空 = default_provider)
-lightweight_model: "gemma-4-e4b-it"  # 后台轻量模型
+lightweight_model: "gemma-4-e2b-it"  # 后台轻量模型
 ```
 
 ---
@@ -128,7 +148,7 @@ providers:
   - name: "lmstudio"
     type: "lmstudio"
     api_key: "lmstudio"
-    base_url: "http://localhost:1234/v1"
+    base_url: "http://192.168.50.97:1234/v1"
     model: "google/gemma-4-26b-a4b"
   - name: "acp-coder"
     type: "acp"
@@ -145,7 +165,7 @@ agent:
   # LLM 调用限制
   max_llm_calls: 50                  # 0 = 无限
   max_tool_iterations: 30
-  max_run_duration: "300s"
+  max_run_duration: "900s"           # 墙钟时间限制
 
   # 生成参数
   parallel_tools: true
@@ -179,10 +199,6 @@ agent:
 
   # JSON 修复
   json_repair_enabled: false
-
-  # Todo 系统
-  todo_tool_enabled: true
-  todo_enforcer_enabled: true
 
   # Agent 工具
   agent_tools_enabled: false
@@ -238,10 +254,7 @@ memory:
   db_path: "wukong.db"
   max_memories: 100
   auto_extract: true
-  extract_timeout: "60s"
-  # extractor_provider: ""           # 专用提取 Provider
-  # extractor_model: ""              # 专用提取模型
-  # extractor_prompt: ""             # 自定义提取 Prompt
+  extract_timeout: "300s"
 
   # Smart cleanup
   enable_smart_cleanup: true
@@ -284,7 +297,7 @@ cortex:
   db_path: "wukong.db"
   max_results: 10
   max_messages_per_session: 200
-  embedding_base_url: "http://localhost:1234"
+  embedding_base_url: "http://192.168.50.97:1234"
   embedding_api_key: "lmstudio"
   embedding_model: "qwen3-embedding-0.6b"
 ```
@@ -324,8 +337,6 @@ importflow:
 ```yaml
 revision:
   enabled: true
-  # revision_provider: ""           # 专用修订 Provider
-  # revision_model: ""              # 专用修订模型
   enable_llm_summarize: true
   summary_cooldown: "120s"
   summary_timeout: "30s"
@@ -346,15 +357,32 @@ revision:
 browser:
   enabled: true
   browser_type: "chromium"
+  backend: "rod"                     # chromedp | rod — 浏览器自动化后端
   headless: true
+  browser_path: ""
   stealth: true
   cache_dir: ".wukong/cache"
   max_download_size: 104857600       # 100 MB
   timeout: "60s"
   viewport_width: 1280
   viewport_height: 720
-  search_backend: "duckduckgo"       # duckduckgo | searxng | tavily
+  search:
+    backends:
+      - duckduckgo
+    duckduckgo:
+      enabled: true
+      url: "https://api.duckduckgo.com/"
+    searxng:
+      enabled: true
+      url: "http://43.167.226.121:8080/"
+    tavily:
+      enabled: true
+      api_key: "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"
 ```
+
+**浏览器后端说明:**
+- `chromedp`: 基于 Chrome DevTools Protocol，轻量级但功能有限
+- `rod`: 基于 CDP 的高级封装，提供更好的页面交互、反检测能力和并发控制
 
 ### H2. Visualiser
 
@@ -400,21 +428,44 @@ apps:
   app_dir: ".wukong/apps"
 
   clone:
+    max_pages: 0
+    max_depth: 0
+    traversal: "bfs"
+    subdomains: false
+    scope_prefix: ""
     workers: 4
     asset_workers: 8
+    browser_pages: 4
+    timeout: 60
+    render_timeout: 30
+    settle: 1500
+    scroll: false
+    user_agent: ""
+    asset_same_domain: true
+    max_asset_bytes: 52428800
+    respect_robots: true
+    crawl_delay: 0
+    no_sitemap: false
+    dedup_content: true
+    mobile_readable: true
+    enable_resume: true
+    persist: true
+    incremental: true
+    cache_max_age: 86400
+    headless: true
     stealth: true
+    chrome_profile: ".wukong/chrome/profile"
+    chrome_path: ""
     antibot_enabled: true
     antibot_auto_escalate: true
-    dedup_content: true
-    enable_resume: true
-    mobile_readable: true
-    # 完整 30 字段见 config.yaml 组 H6
+    cookie_file: ""
 
   pack:
     compress: true
-    format: "html"                   # html | zim | binary | app
+    incremental: false
     language: "eng"
     creator: "Wukong"
+    format: "html"
 ```
 
 ---
@@ -444,30 +495,69 @@ extensions: []
 | AG-UI SSE | :8080 | /agui | Web UI 实时对话 |
 | ACP Server | :9091 | /acp | Agent Client Protocol |
 | ACP MCP | :3400 | /mcp | MCP 工具桥接 |
-| Gateway | :9093 | / | 多平台消息通道 |
+| Gateway | -- | -- | 多平台消息通道 (WebSocket) |
 
-### Gateway 详细配置
+### J1. Gateway (飞书 WebSocket)
 
 ```yaml
 gateway:
-  enabled: false
-  address: ":9093"
-  default_timeout: "120s"
+  enabled: true
+  default_timeout: "900s"
   max_concurrent_sessions: 100
   message_dedup_ttl: "5m"            # 消息去重窗口
-  rate_limit_per_user: 10            # 每用户限流
-  rate_limit_window: "10s"           # 限流滑动窗口
+  rate_limit_per_user: 20            # 每用户限流
+  rate_limit_window: "60s"           # 限流滑动窗口
 
   feishu:
-    enabled: false
-    app_id: ""
+    enabled: true
+    app_id: "cli_aa98378746f8dcd7"
     app_secret: "${FEISHU_APP_SECRET}"
+    api_base: "https://open.feishu.cn/open-apis"
     encrypt_key: "${FEISHU_ENCRYPT_KEY}"
     verification_token: "${FEISHU_VERIFICATION_TOKEN}"
     stream_card_enabled: true
     stream_card_update_interval: "500ms"
     max_message_length: 4096
-    enable_file_receive: false
+    enable_file_receive: true
+```
+
+### J2. A2A Server
+
+```yaml
+a2a_server:
+  enabled: true
+  address: ":9090"
+  agent_name: "wukong"
+  agent_description: "Wukong AI Agent — A2A endpoint"
+```
+
+### J3. AG-UI
+
+```yaml
+agui:
+  enabled: true
+  address: ":8080"
+  path: "/agui"
+```
+
+### J4. ACP Server
+
+```yaml
+acp_server:
+  enabled: true
+  address: ":9091"
+  path: "/acp"
+  enable_streaming: true
+  auth_type: ""
+```
+
+### J5. ACP MCP
+
+```yaml
+acp_mcp:
+  enabled: true
+  address: ":3400"
+  path: "/mcp"
 ```
 
 ---
@@ -518,8 +608,8 @@ ard:
 ```yaml
 dify:
   enabled: false
-  # base_url: "https://api.dify.ai/v1"
-  # api_secret: "${DIFY_API_SECRET}"
+  base_url: "https://api.dify.ai/v1"
+  api_secret: "${DIFY_API_SECRET}"
   agent_name: "dify"
   enable_streaming: false
   timeout: "120s"
@@ -597,6 +687,34 @@ workflow:
   cache_enabled: false
   engine: "bsp"
   sub_agents: []
+  # team_members: []
+  # claude_code_bin: ""
+  # codex_bin: ""
+```
+
+**SubAgent 配置:**
+
+```yaml
+sub_agents:
+  - name: "researcher"
+    provider: "deepseek"
+    model: "deepseek-chat"
+    role: "研究专家"
+    instruction: "你是一名专业的研究分析师..."
+    all_tools: true
+    # allowed_tools: ["search", "browser"]
+```
+
+**TeamMember 配置:**
+
+```yaml
+team_members:
+  - name: "coder"
+    provider: "deepseek"
+    model: "deepseek-chat"
+    instruction: "你是一名资深软件开发工程师..."
+    all_tools: false
+    allowed_tools: ["code", "terminal"]
 ```
 
 ---
@@ -703,25 +821,25 @@ gateway: { enabled: true }
 | 组 | 配置段 | 结构体 | 字段数 |
 |----|--------|--------|--------|
 | A | global | -- | 4 |
-| B | providers | ProviderConfig | 8 |
-| C | agent | AgentConfig | 32 |
+| B | providers | ProviderConfig | 7 |
+| C | agent | AgentConfig | 28 |
 | D | security | SecurityConfig | 13 |
 | E1 | session | SessionConfig | 8 |
 | E2 | memory | MemoryConfig | 14 |
-| E3 | todo | TodoConfig | 4 |
+| E3 | todo | TodoConfig | 5 |
 | E4 | recall | RecallConfig | 8 |
 | F1 | cortex | CortexConfig | 6 |
 | F2 | memoryflow | MemoryFlowConfig | 6 |
 | F3 | graphflow | GraphFlowConfig | 5 |
 | F4 | importflow | ImportFlowConfig | 2 |
 | G | revision | RevisionConfig | 11 |
-| H1 | browser | BrowserConfig | 14 |
+| H1 | browser | BrowserConfig + BrowserSearchConfig | 18 |
 | H2 | visualiser | VisualiserConfig | 4 |
 | H3 | tutorial | TutorialConfig | 2 |
 | H4 | top_of_mind | TopOfMindConfig | 3 |
 | H5 | code_mode | CodeModeConfig | 3 |
 | H6 | apps | AppsConfig + CloneDefaults(31) + PackDefaults(5) | 39 |
-| I | extensions | ExtensionConfig | 18 |
+| I | extensions | ExtensionConfig + ToolPermission(2) | 20 |
 | J1 | gateway | GatewayConfig + FeishuChannel(8) | 17 |
 | J2 | a2a_server | A2AServerConfig | 4 |
 | J3 | agui | AGUIConfig | 3 |
@@ -735,9 +853,22 @@ gateway: { enabled: true }
 | L2 | okf | OKFConfig | 7 |
 | L3 | skill | SkillConfig | 4 |
 | L4 | evolution | EvolutionConfig | 10 |
-| M | workflow | WorkflowConfig + SubAgent(4) + TeamMember(4) | 14 |
+| M | workflow | WorkflowConfig + SubAgentConfig(7) + TeamMemberConfig(6) | 18 |
 | N1 | telemetry | TelemetryConfig | 8 |
 | N2 | observability | ObservabilityConfig | 4 |
 | N3 | eval | EvalConfig + EvalMetricConfig(2) | 5 |
 | N4 | artifact | ArtifactConfig | 4 |
 | O | project_dir | -- | 1 |
+
+---
+
+## 配置代码文件索引
+
+| 文件 | 包含结构体 |
+|------|------------|
+| types_agent.go | AgentConfig, SecurityConfig |
+| types_provider.go | ProviderConfig, ExtensionConfig, ToolPermission |
+| types_storage.go | SessionConfig, MemoryConfig, TodoConfig, RecallConfig |
+| types_cortex.go | CortexConfig, MemoryFlowConfig, GraphFlowConfig, ImportFlowConfig |
+| types_browser.go | BrowserConfig, BrowserSearchConfig, BrowserBackendType |
+| types_orchestration.go | ARDConfig, SummonConfig, A2ARemoteConfig, ANPConfig, SkillConfig, EvolutionConfig, KnowledgeConfig, OKFConfig, DifyConfig, WorkflowConfig, SubAgentConfig, TeamMemberConfig |

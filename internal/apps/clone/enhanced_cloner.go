@@ -229,7 +229,7 @@ func DefaultEnhancedOptions() EnhancedClonerOptions {
 		MaxAssetBytes:       50 * 1024 * 1024, // 50 MB.
 		AntibotEnabled:      true,
 		AntibotAutoEscalate: true,
-		Incremental:         false,
+		Incremental:         true,
 		CacheMaxAge:         24 * time.Hour,
 		Headless:            true,   // Default: headless Chrome.
 		Stealth:             true,   // Default: anti-detection active.

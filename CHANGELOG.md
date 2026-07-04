@@ -6,6 +6,48 @@ All changes after v0.1.14 baseline.
 
 ## [Unreleased] — 2026-07-02
 
+### Configuration Code Refactor — Types Split & Browser Backend Switch
+
+将配置代码从单一的 `types.go` 拆分为 6 个按功能模块组织的文件，优化类型定义和配置验证，并切换浏览器后端为 go-rod。
+
+**types.go 拆分**（`internal/config/`）
+- `types_agent.go` — AgentConfig、SecurityConfig 结构体定义
+- `types_provider.go` — ProviderConfig、ExtensionConfig、ToolPermission 结构体定义
+- `types_storage.go` — SessionConfig、MemoryConfig、TodoConfig、RecallConfig 结构体定义
+- `types_cortex.go` — CortexConfig、MemoryFlowConfig、GraphFlowConfig、ImportFlowConfig 结构体定义
+- `types_browser.go` — BrowserConfig、BrowserSearchConfig 结构体定义，新增 `BrowserBackendType` 类型（chromedp/rod）
+- `types_orchestration.go` — ARDConfig、SummonConfig、ANPConfig、SkillConfig、EvolutionConfig、KnowledgeConfig、OKFConfig、DifyConfig、WorkflowConfig、SubAgentConfig、TeamMemberConfig 结构体定义
+
+**类型优化**
+- `BrowserBackendType` 统一定义为 `type BrowserBackendType string`，替代之前的字符串常量
+- `WorkflowSubAgentConfig` 改为 `SubAgentConfig` 的类型别名，消除重复定义
+- `TeamMemberConfig` 新增 `AllTools`、`AllowedTools`、`Instruction` 字段，支持工具权限控制
+- 时间相关配置字段从 `string` 改为 `time.Duration`，利用 Viper 自动解析能力
+
+**配置验证增强**（`internal/config/validate.go`）
+- 新增浏览器后端类型验证：仅允许 `chromedp`、`rod` 或空值
+
+**默认值更新**（`internal/config/defaults.go`）
+- `browser.backend` 默认值设为 `rod`
+
+**浏览器后端统一**（`internal/browser/backend.go`）
+- 使用 `config.BrowserBackendType` 作为类型定义，移除重复的本地类型
+- 常量 `BackendChromedp`、`BackendRod` 直接引用 config 包定义
+
+**配置文件优化**（`config.yaml`）
+- 更新 `browser.backend: "rod"`，默认启用 go-rod 后端
+- 完整的 15 节逻辑分组结构（A-O），包含清晰的注释说明
+
+**编译错误修复**
+- 修复 `TodoConfig.Backend` 类型错误（bool → string）
+- 修复 `TeamMemberConfig` 缺失字段错误
+- 修复 `WorkflowSubAgentConfig` 缺失字段错误
+- 修复 `ExtensionConfig.Timeout` 类型错误（string → time.Duration）
+
+---
+
+## [Unreleased] — 2026-07-02
+
 ### Gateway — 重构为飞书 WebSocket 长连接
 
 将 Gateway Channel 从 HTTP Webhook（被动接收）重构为**飞书 WebSocket 长连接**（主动拨号），Wukong 作为 client 拨出连接飞书开放平台，**无需公网回调地址/域名/HTTPS**，本地或内网即可运行飞书机器人。

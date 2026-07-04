@@ -120,23 +120,51 @@ wukong config validate
 
 ## 配置系统
 
-配置采用 4 级加载优先级:
+配置采用 7 级加载优先级:
 
 ```
 1. CLI 参数 (--provider, --model, --temperature, --max-tokens, --config)
-2. 环境变量 (WUKONG_ 前缀)
-3. YAML 配置文件 (--config 指定或默认搜索路径)
-4. 内置默认值 (internal/config/defaults.go)
+2. 环境变量 (WUKONG_ 前缀, e.g. WUKONG_DEFAULT_PROVIDER)
+3. --config CLI 指定文件
+4. ./config.yaml (当前目录)
+5. ~/.config/wukong/config.yaml
+6. /etc/wukong/config.yaml (非 Windows)
+7. 内置默认值 (internal/config/defaults.go)
 ```
 
-配置代码按职责拆分为 4 个文件:
+配置代码按职责拆分为 6 个文件:
 
 | 文件 | 职责 |
 |------|------|
 | config.go | 根结构体 WukongConfig + Loader + 查询方法 |
-| types.go | 34 个子配置结构体定义 |
+| types_agent.go | Agent/Security 配置结构体 |
+| types_provider.go | Provider/Extension/ToolPermission 配置结构体 |
+| types_storage.go | Session/Memory/Todo/Recall 存储配置结构体 |
+| types_cortex.go | CortexDB/MemoryFlow/GraphFlow/ImportFlow 配置结构体 |
+| types_browser.go | Browser/BrowserSearch 配置结构体 (含 BrowserBackendType 类型定义) |
+| types_orchestration.go | ARD/Summon/ANP/Skill/Evolution/Knowledge/OKF/Dify/Workflow 配置结构体 |
 | defaults.go | 内置默认值 (按子系统分组, 13 个方法) |
 | validate.go | 配置验证 (致命错误) + Warnings() (非致命警告) |
+
+配置文件按逻辑分组为 15 节 (A-O):
+
+| 分组 | 内容 |
+|------|------|
+| A | 全局设置 |
+| B | Providers — LLM 后端 |
+| C | Agent — 核心行为 & 生成参数 |
+| D | Security — 工具执行安全 & 访问控制 |
+| E | Storage — SQLite 持久化层 |
+| F | CortexDB Memory Stack — Vector + FTS5 + Knowledge Graph |
+| G | Context Management — Token 优化 & Revision |
+| H | Feature Tools — Browser/Visualiser/Tutorial/TopOfMind/CodeMode/Apps |
+| I | Extensions — MCP 外部服务器 |
+| J | Service Endpoints — 多协议服务端口 |
+| K | Agent-to-Agent Communication — Summon/ANP/ARD/Dify |
+| L | Knowledge & Skill Management — Knowledge/OKF/Skill/Evolution |
+| M | Agent Orchestration — Workflow |
+| N | Observability & Evaluation — Telemetry/Observability/Eval/Artifact |
+| O | Project Directory |
 
 env var 展开覆盖 9 类敏感字段: providers API key, A2A remotes, Gateway 飞书/企微, observability Langfuse, artifact COS, ACPServer, CortexDB, Dify。
 

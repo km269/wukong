@@ -31,7 +31,7 @@ func CreateBuiltinToolSet(
 	case "tutorial":
 		return builtin.NewTutorialToolSet(cfg), nil
 	case "web":
-		return builtin.NewWebToolSet(), nil
+		return builtin.NewWebToolSet(cfg), nil
 	case "agent_tools", "apps", "code_mode", "top_of_mind":
 		// These are created in bootstrapSession with their
 		// runtime dependencies. The manager will hold a nil

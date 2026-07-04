@@ -235,7 +235,7 @@ func TestController_IsChromedpMode(t *testing.T) {
 		BrowserType: "http",
 		Enabled:     true,
 	})
-	if httpCtrl.isChromedpMode() {
+	if httpCtrl.isChromedpBackend() {
 		t.Error("expected non-chromedp mode for HTTP config")
 	}
 
@@ -244,7 +244,7 @@ func TestController_IsChromedpMode(t *testing.T) {
 		BrowserType: "chromium",
 		Enabled:     false,
 	})
-	if chromiumCtrl.isChromedpMode() {
+	if chromiumCtrl.isChromedpBackend() {
 		t.Error("expected non-chromedp mode when browser disabled")
 	}
 }

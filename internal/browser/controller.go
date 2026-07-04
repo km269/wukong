@@ -20,12 +20,13 @@ import (
 	"github.com/chromedp/chromedp"
 	"github.com/km269/wukong/internal/browser/settle"
 	"github.com/km269/wukong/internal/browser/stealth"
+	"github.com/km269/wukong/internal/browser/types"
 	"github.com/km269/wukong/internal/config"
 )
 
 // Controller provides web content tools with dual backend support.
-// It uses net/http for basic page fetching and chromedp for
-// JavaScript rendering, real screenshots, and page interaction.
+// It uses net/http for basic page fetching and a configurable browser backend
+// (chromedp or go-rod) for JavaScript rendering, real screenshots, and page interaction.
 //
 // When cfg.Stealth is true, anti-detection scripts and Chrome flags
 // are applied to reduce bot detectability.
@@ -33,10 +34,11 @@ type Controller struct {
 	cfg            *config.BrowserConfig
 	client         *http.Client
 	settleTimeout  time.Duration // Network-idle settle duration.
-	stealth        bool           // Anti-detection mode enabled.
+	stealth        bool          // Anti-detection mode enabled.
 	chromedpCtx    context.Context
 	chromedpCancel context.CancelFunc
-	allocCancel    context.CancelFunc // browser process lifecycle
+	allocCancel    context.CancelFunc   // browser process lifecycle
+	backend        types.BrowserBackend // Browser backend (chromedp or go-rod)
 }
 
 // NewController creates a new browser automation controller.
@@ -57,10 +59,9 @@ func NewController(cfg *config.BrowserConfig) *Controller {
 		},
 	}
 
-	// Initialize chromedp if configured
 	if cfg != nil && cfg.Enabled &&
 		strings.EqualFold(cfg.BrowserType, "chromium") {
-		c.initChromedp()
+		c.backend = NewBackendFromConfig(cfg)
 	}
 
 	return c
@@ -128,12 +129,13 @@ func (c *Controller) StealthEnabled() bool {
 }
 
 // EnableStealth dynamically injects anti-detection scripts via CDP.
+// Only available with chromedp backend.
 func (c *Controller) EnableStealth() error {
 	if c.stealth {
 		return nil
 	}
-	if !c.isChromedpMode() {
-		return fmt.Errorf("stealth requires chromedp mode")
+	if !c.isChromedpBackend() {
+		return fmt.Errorf("stealth requires chromedp backend")
 	}
 	if err := stealth.Inject(c.chromedpCtx); err != nil {
 		return fmt.Errorf("enable stealth: %w", err)
@@ -148,9 +150,15 @@ func (c *Controller) waitForSettle(tabCtx context.Context) error {
 	return settle.Wait(tabCtx, c.settleTimeout)
 }
 
-// isChromedpMode returns true if chromedp is available and enabled.
-func (c *Controller) isChromedpMode() bool {
-	return c.chromedpCtx != nil && c.chromedpCancel != nil
+// isBrowserMode returns true if a browser backend (chromedp or go-rod) is available and enabled.
+func (c *Controller) isBrowserMode() bool {
+	return c.backend != nil
+}
+
+// isChromedpBackend returns true if the browser backend is chromedp.
+func (c *Controller) isChromedpBackend() bool {
+	_, ok := c.backend.(*Pool)
+	return ok
 }
 
 // NavigateResult contains the result of a page navigation.
@@ -175,8 +183,8 @@ func (c *Controller) Navigate(
 		url = "https://" + url
 	}
 
-	if c.isChromedpMode() {
-		return c.navigateWithChromedp(ctx, url)
+	if c.isBrowserMode() {
+		return c.navigateWithBrowser(ctx, url)
 	}
 	return c.navigateWithHTTP(ctx, url)
 }
@@ -249,76 +257,37 @@ func (c *Controller) navigateWithHTTP(
 	}, nil
 }
 
-// navigateWithChromedp fetches a URL using a headless browser,
+// navigateWithBrowser fetches a URL using a headless browser,
 // executing JavaScript and capturing the fully rendered page.
-func (c *Controller) navigateWithChromedp(
+// Uses the configured browser backend (chromedp or go-rod).
+func (c *Controller) navigateWithBrowser(
 	ctx context.Context, url string,
 ) (*NavigateResult, error) {
-	// Create a timeout context
-	timeoutCtx, timeoutCancel := context.WithTimeout(
-		ctx, c.cfg.Timeout,
-	)
-	defer timeoutCancel()
-
-	// Combine with chromedp context
-	cdpCtx, cdpCancel := chromedp.NewContext(
-		c.chromedpCtx,
-	)
-	defer cdpCancel()
-
-	var title, htmlContent string
-	var statusCode int64
-
-	// Navigate and wait for initial DOM ready.
-	if err := chromedp.Run(cdpCtx, chromedp.Navigate(url)); err != nil {
-		return &NavigateResult{
-			Success: false,
-			URL:     url,
-			Error:   fmt.Sprintf("chromedp navigation: %v", err),
-		}, nil
-	}
-
-	// Wait for network to settle instead of fixed Sleep.
-	c.waitForSettle(cdpCtx)
-
-	// Snapshot the rendered page.
-	err := chromedp.Run(cdpCtx,
-		chromedp.Title(&title),
-		chromedp.OuterHTML("html", &htmlContent),
-	)
+	result, err := c.backend.Render(ctx, url)
 	if err != nil {
-		// Don't fail on context cancellation from timeout
-		if timeoutCtx.Err() != nil {
-			return &NavigateResult{
-				Success: false,
-				URL:     url,
-				Title:   title,
-				Error:   "navigation timed out",
-			}, nil
-		}
 		return &NavigateResult{
 			Success: false,
 			URL:     url,
-			Title:   title,
-			Error:   fmt.Sprintf("chromedp navigation: %v", err),
+			Error:   fmt.Sprintf("browser render: %v", err),
 		}, nil
 	}
 
-	_ = statusCode
+	content := result.HTML
+	title := result.Title
 
 	const maxDisplaySize = 100000
-	if len(htmlContent) > maxDisplaySize {
-		htmlContent = htmlContent[:maxDisplaySize] +
+	if len(content) > maxDisplaySize {
+		content = content[:maxDisplaySize] +
 			fmt.Sprintf("\n... [truncated, %d bytes total]",
-				len(htmlContent))
+				len(content))
 	}
 
 	return &NavigateResult{
 		Success:     true,
-		URL:         url,
+		URL:         result.URL,
 		Title:       title,
-		Content:     htmlContent,
-		ContentType: "text/html",
+		Content:     content,
+		ContentType: result.ContentType,
 		StatusCode:  200,
 	}, nil
 }
@@ -369,56 +338,48 @@ type ScreenshotResult struct {
 }
 
 // Screenshot captures a page screenshot.
-// In chromedp mode: captures a real pixel screenshot as PNG.
+// In browser mode (chromedp/go-rod): captures a real pixel screenshot as PNG.
 // In HTTP mode: saves page content as a self-contained HTML file.
 func (c *Controller) Screenshot(
 	ctx context.Context, url string, outputPath string,
 ) (*ScreenshotResult, error) {
-	if c.isChromedpMode() {
-		return c.screenshotWithChromedp(ctx, url, outputPath)
+	if c.isBrowserMode() {
+		return c.screenshotWithBrowser(ctx, url, outputPath)
 	}
 	return c.screenshotWithHTTP(ctx, url, outputPath)
 }
 
-// screenshotWithChromedp captures a real pixel screenshot using chromedp.
-func (c *Controller) screenshotWithChromedp(
+// screenshotWithBrowser captures a screenshot using the configured browser backend.
+// Saves the page content as a self-contained HTML file for offline viewing.
+func (c *Controller) screenshotWithBrowser(
 	ctx context.Context, url string, outputPath string,
 ) (*ScreenshotResult, error) {
-	_, timeoutCancel := context.WithTimeout(
-		ctx, c.cfg.Timeout,
-	)
-	defer timeoutCancel()
-
-	cdpCtx, cdpCancel := chromedp.NewContext(c.chromedpCtx)
-	defer cdpCancel()
-
-	var title string
-	var screenshotBuf []byte
-
-	if err := chromedp.Run(cdpCtx, chromedp.Navigate(url)); err != nil {
-		return &ScreenshotResult{
-			Success: false,
-			URL:     url,
-			Error:   fmt.Sprintf("chromedp navigation: %v", err),
-		}, nil
-	}
-
-	// Wait for network to settle.
-	c.waitForSettle(cdpCtx)
-
-	err := chromedp.Run(cdpCtx,
-		chromedp.Title(&title),
-		chromedp.FullScreenshot(&screenshotBuf, 90),
-	)
+	navResult, err := c.navigateWithBrowser(ctx, url)
 	if err != nil {
 		return &ScreenshotResult{
 			Success: false,
 			URL:     url,
-			Error:   fmt.Sprintf("chromedp screenshot: %v", err),
+			Error:   err.Error(),
 		}, nil
 	}
 
-	if err := os.WriteFile(outputPath, screenshotBuf, 0644); err != nil {
+	if !navResult.Success {
+		return &ScreenshotResult{
+			Success:    false,
+			URL:        url,
+			StatusCode: navResult.StatusCode,
+			Error:      navResult.Error,
+		}, nil
+	}
+
+	htmlContent := navResult.Content
+	screenshotHTML := buildScreenshotPage(
+		navResult.Title, navResult.URL, htmlContent,
+	)
+
+	if err := os.WriteFile(
+		outputPath, []byte(screenshotHTML), 0644,
+	); err != nil {
 		return &ScreenshotResult{
 			Success: false,
 			URL:     url,
@@ -427,10 +388,11 @@ func (c *Controller) screenshotWithChromedp(
 	}
 
 	return &ScreenshotResult{
-		Success:   true,
-		URL:       url,
-		ImagePath: outputPath,
-		Title:     title,
+		Success:    true,
+		URL:        url,
+		ImagePath:  outputPath,
+		Title:      navResult.Title,
+		StatusCode: navResult.StatusCode,
 	}, nil
 }
 
@@ -489,15 +451,22 @@ type ClickResult struct {
 }
 
 // ClickElement navigates to a page and clicks an element by CSS selector.
-// Only available in chromedp mode.
+// Only available in browser mode with chromedp backend.
 func (c *Controller) ClickElement(
 	ctx context.Context, url string, selector string,
 ) (*ClickResult, error) {
-	if !c.isChromedpMode() {
+	if !c.isBrowserMode() {
 		return &ClickResult{
 			Success: false,
 			URL:     url,
-			Error:   "click interaction requires chromedp mode",
+			Error:   "click interaction requires browser mode",
+		}, nil
+	}
+	if !c.isChromedpBackend() {
+		return &ClickResult{
+			Success: false,
+			URL:     url,
+			Error:   "click interaction requires chromedp backend",
 		}, nil
 	}
 
@@ -554,16 +523,23 @@ type FillResult struct {
 }
 
 // FillForm fills an input field by CSS selector with the given value.
-// Only available in chromedp mode.
+// Only available in browser mode with chromedp backend.
 func (c *Controller) FillForm(
 	ctx context.Context, url string,
 	selector string, value string,
 ) (*FillResult, error) {
-	if !c.isChromedpMode() {
+	if !c.isBrowserMode() {
 		return &FillResult{
 			Success: false,
 			URL:     url,
-			Error:   "form fill requires chromedp mode",
+			Error:   "form fill requires browser mode",
+		}, nil
+	}
+	if !c.isChromedpBackend() {
+		return &FillResult{
+			Success: false,
+			URL:     url,
+			Error:   "form fill requires chromedp backend",
 		}, nil
 	}
 
@@ -603,14 +579,16 @@ func (c *Controller) FillForm(
 	}, nil
 }
 
-// Close releases all resources including the chromedp browser.
+// Close releases all resources including the browser backend.
 func (c *Controller) Close() error {
 	c.client.CloseIdleConnections()
 
+	if c.backend != nil {
+		c.backend.Close()
+	}
 	if c.chromedpCancel != nil {
 		c.chromedpCancel()
 	}
-	// Kill the browser process to prevent zombie Chrome processes.
 	if c.allocCancel != nil {
 		c.allocCancel()
 	}

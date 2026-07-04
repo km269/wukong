@@ -148,7 +148,7 @@ func (p *Pool) initBrowser() {
 
 		// Persistent Chrome profile: cookies, localStorage survive runs.
 		// Combined with non-headless mode, this allows Cloudflare
-		// Turnstile to be solved once manually and reused.
+		// Turnstile to be solved once manually and reused across sessions.
 		if p.opts.ProfileDir != "" {
 			absProfile, err := filepath.Abs(p.opts.ProfileDir)
 			if err != nil {
@@ -158,6 +158,12 @@ func (p *Pool) initBrowser() {
 				chromedp.UserDataDir(absProfile))
 			fmt.Fprintf(os.Stderr,
 				"[wukong/browser] Chrome profile: %s\n", absProfile)
+			fmt.Fprintf(os.Stderr,
+				"[wukong/browser] Tip: If you encounter Cloudflare Turnstile,\n")
+			fmt.Fprintf(os.Stderr,
+				"[wukong/browser]       run with --headless=false to solve it manually.\n")
+			fmt.Fprintf(os.Stderr,
+				"[wukong/browser]       Your solved session will be saved in the profile.\n")
 		}
 
 		// Non-headless indicator.

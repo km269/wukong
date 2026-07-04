@@ -232,7 +232,7 @@ func WukongBuiltInEntries() []CatalogEntry {
 			URL:          "http://localhost:3400/mcp",
 			Description:  "Headless browser automation via Chrome DevTools Protocol.",
 			Tags:         []string{"browser", "automation", "chromedp"},
-			Capabilities: []string{"browser_navigate", "browser_screenshot", "browser_click"},
+			Capabilities: []string{"computer_controller_browser_navigate", "computer_controller_browser_screenshot", "computer_controller_browser_click"},
 			RepresentativeQueries: []string{
 				"take a screenshot of a webpage",
 				"automate browser interactions",

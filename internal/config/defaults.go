@@ -127,6 +127,12 @@ func (l *Loader) setStorageDefaults() {
 	// Dynamic TTL
 	l.v.SetDefault("memory.dynamic_ttl", true)
 
+	// Smart cleanup
+	l.v.SetDefault("memory.enable_smart_cleanup", true)
+	l.v.SetDefault("memory.cleanup_trigger_threshold", 0.8)
+	l.v.SetDefault("memory.cleanup_target_threshold", 0.6)
+	l.v.SetDefault("memory.memory_ttl", "720h")
+
 	// Todo
 	l.v.SetDefault("todo.backend", "sqlite")
 	l.v.SetDefault("todo.db_path", "wukong.db")
@@ -189,11 +195,24 @@ func (l *Loader) setFeatureDefaults() {
 	// Browser
 	l.v.SetDefault("browser.enabled", true)
 	l.v.SetDefault("browser.browser_type", "chromium")
+	l.v.SetDefault("browser.backend", "rod")
 	l.v.SetDefault("browser.headless", true)
 	l.v.SetDefault("browser.stealth", false)
 	l.v.SetDefault("browser.cache_dir", ".wukong/cache")
 	l.v.SetDefault("browser.max_download_size", 104857600)
 	l.v.SetDefault("browser.timeout", "60s")
+	l.v.SetDefault("browser.viewport_width", 1280)
+	l.v.SetDefault("browser.viewport_height", 720)
+
+	// Browser Search
+	l.v.SetDefault("browser.search.backends", []string{"duckduckgo"})
+	l.v.SetDefault("browser.search.duckduckgo.enabled", true)
+	l.v.SetDefault("browser.search.duckduckgo.url", "https://api.duckduckgo.com/")
+	l.v.SetDefault("browser.search.searxng.enabled", false)
+	l.v.SetDefault("browser.search.searxng.url", "http://localhost:8080/")
+	l.v.SetDefault("browser.search.searxng.api_key", "")
+	l.v.SetDefault("browser.search.tavily.enabled", false)
+	l.v.SetDefault("browser.search.tavily.api_key", "")
 
 	// Visualiser
 	l.v.SetDefault("visualiser.enabled", true)

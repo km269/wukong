@@ -83,6 +83,18 @@ func (c *WukongConfig) Validate() error {
 		)
 	}
 
+	// Validate browser backend.
+	switch c.Browser.Backend {
+	case BackendChromedp, BackendRod, "":
+		// Valid. Empty defaults to rod.
+	default:
+		return fmt.Errorf(
+			"browser.backend %q is invalid; "+
+				"use chromedp or rod",
+			c.Browser.Backend,
+		)
+	}
+
 	// Validate max_tokens.
 	if c.Agent.MaxTokens < 0 {
 		return fmt.Errorf(
