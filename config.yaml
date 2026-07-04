@@ -31,8 +31,10 @@ default_provider: "lmstudio"
 
 # Background task model (memory extraction, summarisation, KG).
 # Falls back to default_provider when empty.
+# NOTE: Use a smaller model to avoid memory issues during extraction.
+# gemma-4-e4b-it requires ~12.69GB RAM and may fail on resource-constrained systems.
 lightweight_provider: "lmstudio"
-lightweight_model: "gemma-4-e4b-it"
+lightweight_model: "gemma-4-e2b-it"
 
 # ===========================================================================
 # B. Providers — LLM backends

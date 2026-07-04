@@ -331,6 +331,24 @@ type MemoryConfig struct {
 	// ExtractorPrompt is a custom system prompt for memory
 	// extraction.
 	ExtractorPrompt string `mapstructure:"extractor_prompt"`
+
+	// Scoring weights for SmartCleanup.
+	// RecencyWeight is the weight of recency (freshness) in the
+	// importance score. Default: 0.4.
+	RecencyWeight float64 `mapstructure:"recency_weight"`
+	// ReferenceWeight is the weight of reference frequency in the
+	// importance score. Default: 0.3.
+	ReferenceWeight float64 `mapstructure:"reference_weight"`
+	// ImportanceWeight is the weight of importance marking in the
+	// importance score. Default: 0.2.
+	ImportanceWeight float64 `mapstructure:"importance_weight"`
+	// LengthWeight is the weight of content length in the
+	// importance score. Default: 0.1.
+	LengthWeight float64 `mapstructure:"length_weight"`
+
+	// DynamicTTL enables dynamic TTL adjustment based on reference
+	// frequency. Default: true.
+	DynamicTTL bool `mapstructure:"dynamic_ttl"`
 }
 
 // TodoConfig defines task tracking storage settings.

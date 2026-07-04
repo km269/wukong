@@ -11,8 +11,8 @@ import (
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/recall"
 
-	cortexdb "github.com/liliang-cn/cortexdb/v2/pkg/cortexdb"
 	"github.com/liliang-cn/cortexdb/v2/pkg/core"
+	cortexdb "github.com/liliang-cn/cortexdb/v2/pkg/cortexdb"
 )
 
 // CortexStore is a CortexDB-backed drop-in replacement for recall.Store.
@@ -21,10 +21,11 @@ import (
 // The lexical store shares the same *sql.DB as session/memory/todo/recall
 // to avoid SQLite transaction conflicts.
 type CortexStore struct {
-	cfg      *config.CortexConfig
-	embedder *Embedder
-	db       *cortexdb.DB // real CortexDB (HNSW + FTS5)
-	lexical  *lexicalStore
+	cfg         *config.CortexConfig
+	embedder    *Embedder
+	db          *cortexdb.DB // real CortexDB (HNSW + FTS5)
+	lexical     *lexicalStore
+	vectorCache *VectorCache
 }
 
 // NewStore creates a CortexStore. If embedding is configured, opens
@@ -51,6 +52,9 @@ func NewStore(
 		return nil, fmt.Errorf("cortex: init lexical: %w", err)
 	}
 	cs.lexical = lex
+
+	// Initialize vector cache for incremental updates.
+	cs.vectorCache = NewVectorCache()
 
 	// Open real CortexDB when embedding is configured for HNSW search.
 	if embedder != nil {
@@ -94,21 +98,44 @@ func (s *CortexStore) storeCortexVector(msg recall.ChatMessage) error {
 	)
 	defer cancel()
 
-	vecs, err := s.embedder.Embed(
-		bgCtx, []string{embedText})
-	if err != nil {
-		return nil // non-fatal
+	var vector []float32
+	var err error
+
+	// Use vector cache to avoid redundant embedding calls.
+	cacheKey := fmt.Sprintf("msg_%d", msg.ID)
+	if s.vectorCache != nil {
+		vector, err = s.vectorCache.GetOrComputeMessageVector(
+			bgCtx,
+			cacheKey,
+			embedText,
+			func(ctx context.Context, texts []string) ([][]float64, error) {
+				return s.embedder.Embed(ctx, texts)
+			},
+		)
+		if err != nil {
+			return nil
+		}
+	} else {
+		vecs, err := s.embedder.Embed(bgCtx, []string{embedText})
+		if err != nil {
+			return nil
+		}
+		if len(vecs) == 0 || len(vecs[0]) == 0 {
+			return nil
+		}
+		vector = vecToFloat32(vecs[0])
 	}
-	if len(vecs) == 0 || len(vecs[0]) == 0 {
+
+	if vector == nil {
 		return nil
 	}
 
 	// Store in CortexDB with HNSW vector index.
 	return s.db.InsertTextWithVector(
 		bgCtx,
-		fmt.Sprintf("msg_%d", msg.ID),
+		cacheKey,
 		embedText,
-		vecToFloat32(vecs[0]),
+		vector,
 		map[string]string{
 			"session_id": msg.SessionID,
 			"user_id":    msg.UserID,
@@ -142,19 +169,40 @@ func (s *CortexStore) searchCortex(
 	)
 	defer cancel()
 
-	vecs, err := s.embedder.Embed(
-		bgCtx, []string{query})
-	if err != nil {
-		return s.lexical.search(query, userID, limit)
+	var queryVec []float32
+	var err error
+
+	// Use vector cache for query embeddings.
+	if s.vectorCache != nil {
+		queryVec, err = s.vectorCache.GetOrComputeQueryVector(
+			bgCtx,
+			query,
+			func(ctx context.Context, texts []string) ([][]float64, error) {
+				return s.embedder.Embed(ctx, texts)
+			},
+		)
+		if err != nil {
+			return s.lexical.search(query, userID, limit)
+		}
+	} else {
+		vecs, err := s.embedder.Embed(bgCtx, []string{query})
+		if err != nil {
+			return s.lexical.search(query, userID, limit)
+		}
+		if len(vecs) == 0 {
+			return s.lexical.search(query, userID, limit)
+		}
+		queryVec = vecToFloat32(vecs[0])
 	}
-	if len(vecs) == 0 {
+
+	if queryVec == nil {
 		return s.lexical.search(query, userID, limit)
 	}
 
 	// Use CortexDB's HNSW vector search.
 	results, err := s.db.Vector().Search(
 		bgCtx,
-		vecToFloat32(vecs[0]),
+		queryVec,
 		core.SearchOptions{TopK: limit},
 	)
 	if err != nil {
@@ -199,6 +247,9 @@ func (s *CortexStore) DeleteSession(sessionID string) error {
 // When markOwned is false (shared mode), the CortexDB instance is
 // NOT closed — the owner (e.g., MemoryFlowService) manages it.
 func (s *CortexStore) Close() error {
+	if s.vectorCache != nil {
+		s.vectorCache.Stop()
+	}
 	if s.db != nil {
 		s.db.Close()
 	}

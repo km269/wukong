@@ -455,7 +455,7 @@ func (l *CoreLoop) Run(
 		if wErr != nil {
 			util.Logger.Warn("memoryflow: wakeup failed",
 				"sess", sessionID[:min(8, len(sessionID))],
-				"slog.String", "error", wErr.Error())
+				slog.String("error", wErr.Error()))
 		} else if wc == "" {
 			util.Logger.Info("memoryflow: wakeup returned empty",
 				"sess", sessionID[:min(8, len(sessionID))],
@@ -588,6 +588,33 @@ func (l *CoreLoop) Run(
 					}
 					util.Logger.Debug("memory: message updated with persistent memories",
 						"total_chars", len(message.Content))
+				}
+			}
+
+			// [Optimization] Record memory references after injection to track usage frequency.
+			// This helps the SmartCleanup algorithm prioritize frequently-used memories.
+			if len(memories) > 0 {
+				var injectedIDs []string
+				for _, m := range memories {
+					if m.Memory != nil && m.Memory.Memory != "" {
+						if wakeCtx == "" || !isMemoryDuplicated(m.Memory.Memory, wakeCtx) {
+							injectedIDs = append(injectedIDs, m.ID)
+						}
+					}
+				}
+				if len(injectedIDs) > 0 {
+					go func(uk memory.UserKey, ids []string) {
+						bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+						defer cancel()
+						if mm, ok := l.memoryService.(interface {
+							BatchRecordMemoryReferences(context.Context, memory.UserKey, []string) error
+						}); ok {
+							if err := mm.BatchRecordMemoryReferences(bgCtx, uk, ids); err != nil {
+								util.Logger.Debug("memory: record references failed",
+									slog.String("error", err.Error()))
+							}
+						}
+					}(userKey, injectedIDs)
 				}
 			}
 		}

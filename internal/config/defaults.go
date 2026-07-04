@@ -118,6 +118,15 @@ func (l *Loader) setStorageDefaults() {
 	l.v.SetDefault("memory.auto_extract", true)
 	l.v.SetDefault("memory.extract_timeout", "60s")
 
+	// Memory scoring weights
+	l.v.SetDefault("memory.recency_weight", 0.4)
+	l.v.SetDefault("memory.reference_weight", 0.3)
+	l.v.SetDefault("memory.importance_weight", 0.2)
+	l.v.SetDefault("memory.length_weight", 0.1)
+
+	// Dynamic TTL
+	l.v.SetDefault("memory.dynamic_ttl", true)
+
 	// Todo
 	l.v.SetDefault("todo.backend", "sqlite")
 	l.v.SetDefault("todo.db_path", "wukong.db")
