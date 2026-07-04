@@ -38,8 +38,8 @@ Built with tRPC-Agent-Go, tRPC-MCP-Go and tRPC-A2A-Go.`,
 		},
 	}
 
-	cmd.PersistentFlags().BoolVar(
-		&debugEnabled, "debug", false,
+	cmd.PersistentFlags().BoolVarP(
+		&debugEnabled, "debug", "D", false,
 		"Enable debug-level logging",
 	)
 	cmd.PersistentFlags().BoolVar(

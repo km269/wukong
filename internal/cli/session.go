@@ -264,10 +264,11 @@ func bootstrapSession(
 		util.Logger.Warn("config: " + w)
 	}
 
-	// Apply log level from config (CLI --debug/--quiet overrides
-	// are handled in PersistantPreRunE, so if neither is set,
-	// the config value takes effect).
-	if wukongCfg.LogLevel != "" {
+	// Apply log level from config. CLI --debug/--quiet flags take
+	// precedence over config value and are already applied in
+	// PersistentPreRunE. Only apply config value if neither flag
+	// was set.
+	if wukongCfg.LogLevel != "" && !debugEnabled && !quietEnabled {
 		util.SetLogLevel(wukongCfg.LogLevel)
 	}
 

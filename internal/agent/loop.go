@@ -523,7 +523,7 @@ func (l *CoreLoop) Run(
 					util.Logger.Debug("memory: memory entry",
 						"index", i+1,
 						"content", memPreview,
-						"topics", m.Topics)
+						"id", m.ID)
 				}
 			}
 
@@ -863,7 +863,7 @@ func (l *CoreLoop) RunStream(
 					continue
 				}
 				if l.memoryService == nil {
-					util.Logger.Debug("memoryflow: promoted fact",
+					util.Logger.Debug("memoryflow: promoted fact (not stored)",
 						"kind", c.Kind,
 						"content", c.Content[:min(80, len(c.Content))],
 					)
@@ -886,7 +886,7 @@ func (l *CoreLoop) RunStream(
 					continue
 				}
 				stored++
-				util.Logger.Debug("memoryflow: promoted fact",
+				util.Logger.Debug("memoryflow: promoted fact stored",
 					"kind", c.Kind,
 					"content", c.Content[:min(80, len(c.Content))],
 				)
