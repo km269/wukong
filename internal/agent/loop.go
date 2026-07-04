@@ -31,9 +31,9 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/memory"
 	"trpc.group/trpc-go/trpc-agent-go/model"
-	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/planner/builtin"
 	"trpc.group/trpc-go/trpc-agent-go/planner/react"
+	"trpc.group/trpc-go/trpc-agent-go/plugin"
 	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail"
 	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/promptinjection"
 	"trpc.group/trpc-go/trpc-agent-go/plugin/guardrail/promptinjection/review"
@@ -430,11 +430,20 @@ func (l *CoreLoop) Run(
 	var wakeCtx string
 	if l.memoryFlow != nil {
 		content := extractMessageContent(message)
+		util.Logger.Info("memoryflow: starting ingest and wakeup",
+			"sess", sessionID[:min(8, len(sessionID))],
+			"user", userID,
+			"input_chars", len(content))
+
 		if err := l.memoryFlow.IngestTurn(
 			ctx, sessionID, userID, "user", content,
 		); err != nil {
 			util.Logger.Warn("memoryflow: ingest user turn failed",
 				slog.String("error", err.Error()))
+		} else {
+			util.Logger.Debug("memoryflow: ingest user turn succeeded",
+				"sess", sessionID[:min(8, len(sessionID))],
+				"user", userID)
 		}
 
 		// [Fix 1] Build wake-up context from past conversations
@@ -445,14 +454,22 @@ func (l *CoreLoop) Run(
 		)
 		if wErr != nil {
 			util.Logger.Warn("memoryflow: wakeup failed",
-				slog.String("error", wErr.Error()))
+				"sess", sessionID[:min(8, len(sessionID))],
+				"slog.String", "error", wErr.Error())
 		} else if wc == "" {
-			util.Logger.Debug("memoryflow: wakeup empty " +
-				"(no prior conversation history yet)")
+			util.Logger.Info("memoryflow: wakeup returned empty",
+				"sess", sessionID[:min(8, len(sessionID))],
+				"reason", "no prior conversation history yet")
 		} else {
 			wakeCtx = wc
-			util.Logger.Info("memoryflow: wakeup injected",
-				"chars", len(wakeCtx))
+			preview := wc
+			if len(wakeCtx) > 200 {
+				preview = wakeCtx[:200] + "..."
+			}
+			util.Logger.Info("memoryflow: wakeup injected successfully",
+				"sess", sessionID[:min(8, len(sessionID))],
+				"chars", len(wakeCtx),
+				"preview", preview)
 			if message.Role == model.RoleUser {
 				message = model.Message{
 					Role: "user",
@@ -462,6 +479,8 @@ func (l *CoreLoop) Run(
 						wakeCtx, extractMessageContent(message),
 					),
 				}
+				util.Logger.Debug("memoryflow: message updated with wakeup context",
+					"total_chars", len(message.Content))
 			}
 		}
 	}
@@ -475,20 +494,44 @@ func (l *CoreLoop) Run(
 			AppName: "wukong-app",
 			UserID:  userID,
 		}
+		util.Logger.Info("memory: reading persistent memories",
+			"sess", sessionID[:min(8, len(sessionID))],
+			"user", userID,
+			"limit", 5)
+
 		memories, mErr := l.memoryService.ReadMemories(
 			ctx, userKey, 5,
 		)
 		if mErr != nil {
 			util.Logger.Warn("memory: read failed",
+				"sess", sessionID[:min(8, len(sessionID))],
 				slog.String("error", mErr.Error()))
 		} else if len(memories) == 0 {
-			util.Logger.Debug("memory: no memories found " +
-				"(cold start — auto_extract not yet triggered)")
+			util.Logger.Info("memory: no persistent memories found",
+				"sess", sessionID[:min(8, len(sessionID))],
+				"reason", "cold start — auto_extract not yet triggered")
 		} else {
+			util.Logger.Debug("memory: found persistent memories",
+				"sess", sessionID[:min(8, len(sessionID))],
+				"count", len(memories))
+			for i, m := range memories {
+				if m.Memory != nil && m.Memory.Memory != "" {
+					memPreview := m.Memory.Memory
+					if len(memPreview) > 100 {
+						memPreview = memPreview[:100] + "..."
+					}
+					util.Logger.Debug("memory: memory entry",
+						"index", i+1,
+						"content", memPreview,
+						"topics", m.Topics)
+				}
+			}
+
 			var memCtx strings.Builder
 			memCtx.WriteString(
 				"[Remembered facts from previous conversations]\n")
 			var deduped int
+			var dedupedMemories []string
 			idx := 1
 			for _, m := range memories {
 				if m.Memory == nil || m.Memory.Memory == "" {
@@ -499,23 +542,41 @@ func (l *CoreLoop) Run(
 				if wakeCtx != "" &&
 					isMemoryDuplicated(m.Memory.Memory, wakeCtx) {
 					deduped++
+					dedupedMemories = append(dedupedMemories, m.Memory.Memory)
 					continue
 				}
 				fmt.Fprintf(&memCtx, "%d. %s\n",
 					idx, m.Memory.Memory)
 				idx++
 			}
+
+			if deduped > 0 {
+				for i, dm := range dedupedMemories {
+					dmPreview := dm
+					if len(dmPreview) > 100 {
+						dmPreview = dmPreview[:100] + "..."
+					}
+					util.Logger.Info("memory: deduplicated (already in wakeup)",
+						"sess", sessionID[:min(8, len(sessionID))],
+						"index", i+1,
+						"content", dmPreview)
+				}
+			}
+
 			injected := idx - 1
 			if injected == 0 {
 				util.Logger.Info("memory: all memories already "+
 					"covered by wake-up context",
+					"sess", sessionID[:min(8, len(sessionID))],
 					"total", len(memories),
 					"deduped", deduped)
 			} else {
-				util.Logger.Info("memory: memories injected",
-					"count", injected,
+				util.Logger.Info("memory: persistent memories injected",
+					"sess", sessionID[:min(8, len(sessionID))],
+					"injected", injected,
 					"total", len(memories),
-					"deduped", deduped)
+					"deduped", deduped,
+					"memctx_chars", memCtx.Len())
 				// Prepend persistent memories to the user message.
 				if message.Role == model.RoleUser {
 					origContent := extractMessageContent(message)
@@ -525,10 +586,29 @@ func (l *CoreLoop) Run(
 							memCtx.String(), origContent,
 						),
 					}
+					util.Logger.Debug("memory: message updated with persistent memories",
+						"total_chars", len(message.Content))
 				}
 			}
 		}
 	}
+
+	// Log final message structure for debugging
+	finalContent := extractMessageContent(message)
+	var contextTags []string
+	if strings.Contains(finalContent, "[Context from past conversations]") {
+		contextTags = append(contextTags, "wakeup")
+	}
+	if strings.Contains(finalContent, "[Remembered facts from previous conversations]") {
+		contextTags = append(contextTags, "persistent")
+	}
+	if strings.Contains(finalContent, "[User message]") {
+		contextTags = append(contextTags, "user_input")
+	}
+	util.Logger.Info("memory: final message context structure",
+		"sess", sessionID[:min(8, len(sessionID))],
+		"context_types", contextTags,
+		"total_chars", len(finalContent))
 
 	runOpts := []agent.RunOption{}
 	if l.cfg.Agent.JSONRepairEnabled {
