@@ -11,6 +11,7 @@ type RenderResult struct {
 	Title               string
 	ContentType         string
 	CloudflareClearance string
+	Referer             string
 }
 
 type ErrNotHTML struct {
@@ -24,8 +25,11 @@ func (e *ErrNotHTML) Error() string {
 
 type BrowserBackend interface {
 	Render(ctx context.Context, url string) (*RenderResult, error)
+	RenderWithReferer(ctx context.Context, url, referer string) (*RenderResult, error)
 	SetSettle(d time.Duration)
 	StealthEnabled() bool
 	EnableStealth() error
+	// SetBehaviorSimulation enables or disables human-like behavior simulation
+	SetBehaviorSimulation(enabled bool)
 	Close()
 }

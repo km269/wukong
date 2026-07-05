@@ -10,30 +10,36 @@ import (
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
+	"github.com/km269/wukong/internal/browser/behavior"
 	"github.com/km269/wukong/internal/browser/stealth"
 	"github.com/km269/wukong/internal/browser/types"
+	"github.com/ysmood/gson"
 )
 
 type Options struct {
-	Headless      bool
-	Workers       int
-	Settle        time.Duration
-	RenderTimeout time.Duration
-	Scroll        bool
-	ChromeBin     string
-	ControlURL    string
-	Stealth       bool
-	ProfileDir    string
+	Headless         bool
+	Workers          int
+	Settle           time.Duration
+	RenderTimeout    time.Duration
+	Scroll           bool
+	ChromeBin        string
+	ControlURL       string
+	Stealth          bool
+	ProfileDir       string
+	DisableDownloads bool
+	Proxy            string // Proxy URL (http://user:pass@host:port or socks5://...)
 }
 
 type Pool struct {
-	opts    Options
-	browser *rod.Browser
-	workers []*worker
-	queue   chan *renderJob
-	wg      sync.WaitGroup
-	closed  bool
-	mu      sync.Mutex
+	opts               Options
+	browser            *rod.Browser
+	workers            []*worker
+	queue              chan *renderJob
+	wg                 sync.WaitGroup
+	closed             bool
+	mu                 sync.Mutex
+	behaviorSimEnabled bool
+	behaviorSimulator  *behavior.Simulator
 }
 
 type worker struct {
@@ -43,6 +49,7 @@ type worker struct {
 
 type renderJob struct {
 	url      string
+	referer  string
 	resultCh chan<- renderResultOrErr
 	ctx      context.Context
 }
@@ -77,17 +84,26 @@ func New(opts Options) *Pool {
 		if opts.ProfileDir != "" {
 			l = l.UserDataDir(opts.ProfileDir)
 		}
-		l = l.NoSandbox(true).
-			Devtools(false)
+		if needNoSandbox() {
+			l = l.NoSandbox(true)
+		}
+		l = l.Devtools(false)
+		if opts.DisableDownloads {
+			l = l.Set("download_restrictions", "3")
+		}
+		if opts.Proxy != "" {
+			l = l.Proxy(opts.Proxy)
+		}
 		controlURL = l.MustLaunch()
 	}
 
 	browserInstance := rod.New().ControlURL(controlURL).MustConnect()
 
 	p := &Pool{
-		opts:    opts,
-		browser: browserInstance,
-		queue:   make(chan *renderJob, opts.Workers*4),
+		opts:              opts,
+		browser:           browserInstance,
+		queue:             make(chan *renderJob, opts.Workers*4),
+		behaviorSimulator: behavior.New(behavior.DefaultConfig()),
 	}
 
 	for i := 0; i < opts.Workers; i++ {
@@ -118,7 +134,18 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 	if page == nil {
 		page = p.browser.MustPage("")
 		if p.opts.Stealth {
-			page.MustEvalOnNewDocument(stealth.Script)
+			// 注入我们增强的 stealth 脚本
+			_, err := proto.PageAddScriptToEvaluateOnNewDocument{
+				Source: stealth.Script,
+			}.Call(page)
+			if err != nil {
+				fmt.Fprintf(nil, "[wukong/rod] stealth script injection warning: %v\n", err)
+			}
+		}
+		if p.opts.DisableDownloads {
+			proto.BrowserSetDownloadBehavior{
+				Behavior: proto.BrowserSetDownloadBehaviorBehaviorDeny,
+			}.Call(page)
 		}
 		w.page = page
 	}
@@ -132,6 +159,13 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 		page.StopLoading()
 	}()
 
+	if job.referer != "" {
+		proto.NetworkSetExtraHTTPHeaders{
+			Headers: proto.NetworkHeaders{
+				"Referer": gson.New(job.referer),
+			},
+		}.Call(page)
+	}
 	if err := page.Navigate(job.url); err != nil {
 		job.resultCh <- renderResultOrErr{Err: fmt.Errorf("navigate: %w", err)}
 		return
@@ -143,12 +177,46 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 		page.WaitRequestIdle(p.opts.Settle, nil, nil, nil)
 	}
 
+	// 如果启用了行为模拟
+	if p.behaviorSimEnabled {
+		// 模拟自然的滚动和鼠标移动
+		page.MustEval(`
+			(async () => {
+				// 随机滚动一小段距离
+				const randomScroll = () => {
+					const delta = Math.floor(Math.random() * 200) - 100;
+					window.scrollBy(0, delta);
+					return new Promise(r => setTimeout(r, 200 + Math.random() * 300));
+				};
+				await randomScroll();
+			})()
+		`)
+
+		// 鼠标移动到随机位置
+		page.MustEval(`
+			(async () => {
+				// 模拟鼠标移动到随机位置
+				const randomX = Math.random() * window.innerWidth;
+				const randomY = Math.random() * window.innerHeight;
+				// 触发鼠标移动事件
+				const mouseEvent = new MouseEvent('mousemove', {
+					clientX: randomX,
+					clientY: randomY,
+					bubbles: true
+				});
+				document.dispatchEvent(mouseEvent);
+				// 模拟鼠标停留一会儿
+				await new Promise(r => setTimeout(r, 150 + Math.random() * 350));
+			})()
+		`)
+	}
+
 	if p.opts.Scroll {
 		page.MustEval(`
 			(async () => {
 				for (let i = 0; i < 5; i++) {
 					window.scrollBy(0, window.innerHeight);
-					await new Promise(r => setTimeout(r, 500));
+					await new Promise(r => setTimeout(r, 500 + Math.random() * 300));
 				}
 			})()
 		`)
@@ -201,10 +269,15 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 		Title:               title,
 		ContentType:         contentType,
 		CloudflareClearance: cfClearance,
+		Referer:             job.referer,
 	}}
 }
 
 func (p *Pool) Render(ctx context.Context, url string) (*types.RenderResult, error) {
+	return p.RenderWithReferer(ctx, url, "")
+}
+
+func (p *Pool) RenderWithReferer(ctx context.Context, url, referer string) (*types.RenderResult, error) {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -214,7 +287,7 @@ func (p *Pool) Render(ctx context.Context, url string) (*types.RenderResult, err
 
 	resultCh := make(chan renderResultOrErr, 1)
 	select {
-	case p.queue <- &renderJob{url: url, resultCh: resultCh, ctx: ctx}:
+	case p.queue <- &renderJob{url: url, referer: referer, resultCh: resultCh, ctx: ctx}:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -242,10 +315,23 @@ func (p *Pool) EnableStealth() error {
 	p.opts.Stealth = true
 	for _, w := range p.workers {
 		if w.page != nil {
-			w.page.MustEvalOnNewDocument(stealth.Script)
+			w.page.Close()
+			page := p.browser.MustPage("")
+			// 注入我们增强的 stealth 脚本
+			_, err := proto.PageAddScriptToEvaluateOnNewDocument{
+				Source: stealth.Script,
+			}.Call(page)
+			if err != nil {
+				fmt.Fprintf(nil, "[wukong/rod] stealth script injection warning: %v\n", err)
+			}
+			w.page = page
 		}
 	}
 	return nil
+}
+
+func (p *Pool) SetBehaviorSimulation(enabled bool) {
+	p.behaviorSimEnabled = enabled
 }
 
 func (p *Pool) Close() {

@@ -21,6 +21,7 @@ import (
 	"github.com/km269/wukong/internal/apps/clone"
 	"github.com/km269/wukong/internal/apps/pack"
 	"github.com/km269/wukong/internal/apps/server"
+	"github.com/km269/wukong/internal/browser"
 	"github.com/km269/wukong/internal/config"
 )
 
@@ -262,35 +263,41 @@ func (m *Manager) CloneApp(ctx context.Context, seedURL string, opts CloneOption
 
 // CloneOptions defines options for website cloning.
 type CloneOptions struct {
-	MaxPages            int    // 最大页面数量（0 = 无限制）
-	MaxDepth            int    // 最大链接深度（0 = 无限制）
-	Traversal           string // 遍历策略：bfs / dfs（空 = 默认bfs）
-	Subdomains          bool   // 是否包含子域名
-	Scroll              bool   // 是否滚动加载懒加载内容
-	Timeout             int    // HTTP 请求超时（秒）
-	RenderTimeout       int    // 页面渲染硬超时（秒，默认30）
-	Settle              int    // 网络空闲等待时间（毫秒，1500 = 默认）
-	Workers             int    // 并发页面渲染线程数
-	AssetWorkers        int    // 并发资源下载线程数（0 = 与Workers相同）
-	ScopePrefix         string // 路径前缀限制
-	RespectRobots       *bool  // 是否遵守robots.txt（nil = 默认true）
-	EnableResume        *bool  // 是否启用断点续抓（nil = 默认true）
-	DedupContent        *bool  // 是否启用内容去重（nil = 默认true）
-	MobileReadable      *bool  // 是否注入移动端CSS（nil = 默认true）
-	AssetSameDomain     *bool  // 仅下载同域资源（nil = 默认true）
-	CrawlDelay          int    // 爬取延迟（毫秒，0 = 使用robots.txt设定）
-	Incremental         *bool  // 是否启用增量缓存（nil = 默认false）
-	CacheMaxAge         int    // 缓存最长有效时间（秒，默认86400）
-	ChromePath          string // Chrome 浏览器路径（空=自动检测）
-	ChromeProfile       string // Chrome 用户数据目录（覆盖默认 ./wukong_chrome_profile）
-	NoHeadless          bool   // 禁用 headless 模式（显示可见窗口）
-	NoChromeProfile     bool   // 禁用 Chrome Profile（默认启用）
-	NoStealth           bool   // 禁用 Stealth 反检测（默认启用）
-	AntibotEnabled      *bool  // 自动反爬检测（nil=默认true）
-	AntibotAutoEscalate *bool  // 自动升级隐身级别（nil=默认true）
-	CookieFile          string // Cookie文件路径 (Netscape格式, 用于登录态克隆)
-	Force               bool   // 是否强制删除已有克隆
-	Refresh             bool   // 是否刷新已有页面
+	OutputDir           string   // 输出根目录（空 = 默认 $HOME/.wukong/apps/cloned）
+	MaxPages            int      // 最大页面数量（0 = 无限制）
+	MaxDepth            int      // 最大链接深度（0 = 无限制）
+	Traversal           string   // 遍历策略：bfs / dfs（空 = 默认bfs）
+	ScopePrefix         string   // 路径前缀限制
+	Exclude             []string // 排除的路径前缀（可重复）
+	Subdomains          bool     // 是否包含子域名
+	Scroll              bool     // 是否滚动加载懒加载内容
+	Timeout             int      // HTTP 请求超时（秒）
+	RenderTimeout       int      // 页面渲染硬超时（秒，默认30）
+	Settle              int      // 网络空闲等待时间（毫秒，1500 = 默认）
+	Workers             int      // 并发页面渲染线程数
+	AssetWorkers        int      // 并发资源下载线程数（0 = 与Workers相同）
+	RespectRobots       *bool    // 是否遵守robots.txt（nil = 默认true）
+	EnableResume        *bool    // 是否启用断点续抓（nil = 默认true）
+	DedupContent        *bool    // 是否启用内容去重（nil = 默认true）
+	MobileReadable      *bool    // 是否注入移动端CSS（nil = 默认true）
+	AssetSameDomain     *bool    // 仅下载同域资源（nil = 默认true）
+	CrawlDelay          int      // 爬取延迟（毫秒，0 = 使用robots.txt设定）
+	Incremental         *bool    // 是否启用增量缓存（nil = 默认false）
+	CacheMaxAge         int      // 缓存最长有效时间（秒，默认86400）
+	ChromePath          string   // Chrome 浏览器路径（空=自动检测）
+	ChromeProfile       string   // Chrome 用户数据目录（覆盖默认 ./wukong_chrome_profile）
+	NoHeadless          bool     // 禁用 headless 模式（显示可见窗口）
+	NoChromeProfile     bool     // 禁用 Chrome Profile（默认启用）
+	NoStealth           bool     // 禁用 Stealth 反检测（默认启用）
+	AntibotEnabled      *bool    // 自动反爬检测（nil=默认true）
+	AntibotAutoEscalate *bool    // 自动升级隐身级别（nil=默认true）
+	CookieFile          string   // Cookie文件路径 (Netscape格式, 用于登录态克隆)
+	Force               bool     // 是否强制删除已有克隆
+	Refresh             bool     // 是否刷新已有页面
+	BrowserBackend      string   // 浏览器后端：chromedp / rod（空 = 使用配置）
+	KeepMedia           bool     // 下载媒体文件（视频、音频、PDF、压缩包等）
+	SkipExt             []string // 额外跳过的文件扩展名
+	AllowDownloads      bool     // 允许浏览器自动下载文件（默认禁止, 由 cloner 统一管理资源）
 }
 
 // mergeCloneOptions merges config defaults and CLI options into EnhancedClonerOptions.
@@ -396,10 +403,19 @@ func applyConfigDefaults(eco *clone.EnhancedClonerOptions, dc config.CloneDefaul
 	if dc.UserAgent != "" {
 		eco.UserAgent = dc.UserAgent
 	}
+	if dc.BrowserBackend != "" {
+		eco.BrowserBackend = dc.BrowserBackend
+	}
 }
 
 // applyCLIOptions applies CLI options to EnhancedClonerOptions.
 func applyCLIOptions(eco *clone.EnhancedClonerOptions, opts CloneOptions) {
+	if opts.OutputDir != "" {
+		eco.OutputDir = opts.OutputDir
+	}
+	if opts.Exclude != nil && len(opts.Exclude) > 0 {
+		eco.Exclude = opts.Exclude
+	}
 	if opts.MaxPages > 0 {
 		eco.MaxPages = opts.MaxPages
 	}
@@ -484,6 +500,25 @@ func applyCLIOptions(eco *clone.EnhancedClonerOptions, opts CloneOptions) {
 	if opts.CookieFile != "" {
 		eco.CookieFile = opts.CookieFile
 	}
+	if opts.BrowserBackend != "" {
+		eco.BrowserBackend = browser.BackendType(opts.BrowserBackend)
+	}
+	if opts.KeepMedia {
+		eco.SkipAssetExts = make(map[string]bool)
+	}
+	if opts.SkipExt != nil && len(opts.SkipExt) > 0 {
+		if eco.SkipAssetExts == nil {
+			eco.SkipAssetExts = clone.DefaultSkipAssetExts()
+		}
+		for _, ext := range opts.SkipExt {
+			if !strings.HasPrefix(ext, ".") {
+				ext = "." + ext
+			}
+			eco.SkipAssetExts[strings.ToLower(ext)] = true
+		}
+	}
+	// 默认禁止浏览器自动下载文件; 仅当用户显式指定 --allow-downloads 时开启.
+	eco.DisableDownloads = !opts.AllowDownloads
 }
 
 // CloneResult wraps the clone package result for external use.

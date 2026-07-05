@@ -32,6 +32,18 @@ type BrowserConfig struct {
 	ViewportWidth   int               `mapstructure:"viewport_width"`
 	ViewportHeight  int               `mapstructure:"viewport_height"`
 	Search          SearchConfig      `mapstructure:"search"`
+	Proxy           ProxyConfig       `mapstructure:"proxy"`
+}
+
+// ProxyConfig defines proxy settings for browser automation.
+type ProxyConfig struct {
+	Enabled bool     `mapstructure:"enabled"`
+	// Pool is a list of proxy URLs (http://user:pass@host:port or socks5://...)
+	Pool []string `mapstructure:"pool"`
+	// RotateEvery specifies how many requests to make before rotating proxy (0 = never rotate)
+	RotateEvery int `mapstructure:"rotate_every"`
+	// Current is the index of the current proxy in use
+	Current int `mapstructure:"-"`
 }
 
 // SearchConfig defines search engine configurations.

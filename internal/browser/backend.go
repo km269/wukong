@@ -16,41 +16,48 @@ const (
 )
 
 type BackendOptions struct {
-	Headless      bool
-	Workers       int
-	Settle        time.Duration
-	RenderTimeout time.Duration
-	Scroll        bool
-	ChromeBin     string
-	ControlURL    string
-	Stealth       bool
-	ProfileDir    string
+	Headless         bool
+	Workers          int
+	Settle           time.Duration
+	RenderTimeout    time.Duration
+	Scroll           bool
+	ChromeBin        string
+	ControlURL       string
+	Stealth          bool
+	ProfileDir       string
+	DisableDownloads bool
+	Proxy            string // Proxy URL (http://user:pass@host:port or socks5://...)
 }
 
 func NewBackend(backendType BackendType, opts BackendOptions) types.BrowserBackend {
 	switch backendType {
 	case BackendRod:
-		return rodbackend.New(rodbackend.Options{
-			Headless:      opts.Headless,
-			Workers:       opts.Workers,
-			Settle:        opts.Settle,
-			RenderTimeout: opts.RenderTimeout,
-			Scroll:        opts.Scroll,
-			ChromeBin:     opts.ChromeBin,
-			ControlURL:    opts.ControlURL,
-			Stealth:       opts.Stealth,
-			ProfileDir:    opts.ProfileDir,
+		rodBackend := rodbackend.New(rodbackend.Options{
+			Headless:         opts.Headless,
+			Workers:          opts.Workers,
+			Settle:           opts.Settle,
+			RenderTimeout:    opts.RenderTimeout,
+			Scroll:           opts.Scroll,
+			ChromeBin:        opts.ChromeBin,
+			ControlURL:       opts.ControlURL,
+			Stealth:          opts.Stealth,
+			ProfileDir:       opts.ProfileDir,
+			DisableDownloads: opts.DisableDownloads,
+			Proxy:            opts.Proxy,
 		})
+		return rodBackend
 	default:
 		return New(Options{
-			Headless:      opts.Headless,
-			Workers:       opts.Workers,
-			Settle:        opts.Settle,
-			RenderTimeout: opts.RenderTimeout,
-			Scroll:        opts.Scroll,
-			ChromeBin:     opts.ChromeBin,
-			ControlURL:    opts.ControlURL,
-			Stealth:       opts.Stealth,
+			Headless:         opts.Headless,
+			Workers:          opts.Workers,
+			Settle:           opts.Settle,
+			RenderTimeout:    opts.RenderTimeout,
+			Scroll:           opts.Scroll,
+			ChromeBin:        opts.ChromeBin,
+			ControlURL:       opts.ControlURL,
+			Stealth:          opts.Stealth,
+			DisableDownloads: opts.DisableDownloads,
+			Proxy:            opts.Proxy,
 		})
 	}
 }
@@ -78,15 +85,26 @@ func NewBackendFromConfig(cfg *config.BrowserConfig) types.BrowserBackend {
 		backendType = BackendRod
 	}
 
+	// 获取代理配置
+	var proxy string
+	if cfg.Proxy.Enabled && len(cfg.Proxy.Pool) > 0 {
+		// 简单使用第一个代理，后续可以添加轮换逻辑
+		proxy = cfg.Proxy.Pool[cfg.Proxy.Current]
+		// 更新下一次循环
+		cfg.Proxy.Current = (cfg.Proxy.Current + 1) % len(cfg.Proxy.Pool)
+	}
+
 	return NewBackend(backendType, BackendOptions{
-		Headless:      cfg.Headless,
-		Workers:       workers,
-		Settle:        settleTimeout,
-		RenderTimeout: cfg.Timeout,
-		Scroll:        cfg.Scroll,
-		ChromeBin:     cfg.BrowserPath,
-		ControlURL:    cfg.ControlURL,
-		Stealth:       cfg.Stealth,
-		ProfileDir:    cfg.ProfileDir,
+		Headless:         cfg.Headless,
+		Workers:          workers,
+		Settle:           settleTimeout,
+		RenderTimeout:    cfg.Timeout,
+		Scroll:           cfg.Scroll,
+		ChromeBin:        cfg.BrowserPath,
+		ControlURL:       cfg.ControlURL,
+		Stealth:          cfg.Stealth,
+		ProfileDir:       cfg.ProfileDir,
+		DisableDownloads: true, // 默认禁止浏览器自动下载,由 cloner 统一管理资源.
+		Proxy:            proxy,
 	})
 }

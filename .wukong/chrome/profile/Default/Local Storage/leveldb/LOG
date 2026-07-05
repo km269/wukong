@@ -1,2 +1,3 @@
-2026/07/04-11:45:39.043 5e68 Creating DB E:\myVibeCoding\km269\wukong\.wukong\chrome\profile\Default\Local Storage\leveldb since it was missing.
-2026/07/04-11:45:39.066 5e68 Reusing MANIFEST E:\myVibeCoding\km269\wukong\.wukong\chrome\profile\Default\Local Storage\leveldb/MANIFEST-000001
+2026/07/05-15:10:56.549 11e0 Reusing MANIFEST E:\myVibeCoding\km269\wukong\.wukong\chrome\profile\Default\Local Storage\leveldb/MANIFEST-000001
+2026/07/05-15:10:56.556 11e0 Recovering log #3
+2026/07/05-15:10:56.562 11e0 Reusing old log E:\myVibeCoding\km269\wukong\.wukong\chrome\profile\Default\Local Storage\leveldb/000003.log 

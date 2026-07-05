@@ -203,6 +203,9 @@ func (l *Loader) setFeatureDefaults() {
 	l.v.SetDefault("browser.timeout", "60s")
 	l.v.SetDefault("browser.viewport_width", 1280)
 	l.v.SetDefault("browser.viewport_height", 720)
+	l.v.SetDefault("browser.proxy.enabled", false)
+	l.v.SetDefault("browser.proxy.pool", []string{})
+	l.v.SetDefault("browser.proxy.rotate_every", 10)
 
 	// Browser Search
 	l.v.SetDefault("browser.search.backends", []string{"duckduckgo"})
@@ -250,8 +253,8 @@ func (l *Loader) setAppsDefaults() {
 	l.v.SetDefault("apps.clone.workers", 4)
 	l.v.SetDefault("apps.clone.asset_workers", 8)
 	l.v.SetDefault("apps.clone.browser_pages", 4)
-	l.v.SetDefault("apps.clone.timeout", 60)
-	l.v.SetDefault("apps.clone.render_timeout", 30)
+	l.v.SetDefault("apps.clone.timeout", 300)
+	l.v.SetDefault("apps.clone.render_timeout", 120)
 	l.v.SetDefault("apps.clone.settle", 1500)
 	l.v.SetDefault("apps.clone.scroll", false)
 	l.v.SetDefault("apps.clone.respect_robots", true)
@@ -274,6 +277,9 @@ func (l *Loader) setAppsDefaults() {
 	l.v.SetDefault("apps.clone.max_asset_bytes", 52428800)
 	l.v.SetDefault("apps.clone.cookie_file", "")
 	l.v.SetDefault("apps.clone.user_agent", "")
+	l.v.SetDefault("apps.clone.proxy_enabled", false)
+	l.v.SetDefault("apps.clone.proxy_pool", []string{})
+	l.v.SetDefault("apps.clone.proxy_rotate_every", 10)
 
 	// Pack defaults
 	l.v.SetDefault("apps.pack.compress", true)

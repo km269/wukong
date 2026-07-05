@@ -9,11 +9,13 @@ import (
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/km269/wukong/internal/apps"
 	"github.com/km269/wukong/internal/apps/server"
+	"github.com/km269/wukong/internal/browser/antibot/prober"
 	"github.com/km269/wukong/internal/config"
 )
 
@@ -42,6 +44,7 @@ Subcommands:
 	cmd.AddCommand(newAppsShowCmd())
 	cmd.AddCommand(newAppsCreateCmd())
 	cmd.AddCommand(newAppsCloneCmd())
+	cmd.AddCommand(newAppsProbeCmd())
 	cmd.AddCommand(newAppsPackCmd())
 	cmd.AddCommand(newAppsViewCmd())
 	cmd.AddCommand(newAppsDeleteCmd())
@@ -747,10 +750,13 @@ Examples:
 func newAppsCloneCmd() *cobra.Command {
 	var (
 		configPath       string
+		outputDir        string
 		maxPages         int
 		maxDepth         int
 		traversal        string
+		scopePrefix      string
 		subdomains       bool
+		exclude          []string
 		scroll           bool
 		timeout          int
 		renderTimeout    int
@@ -763,6 +769,8 @@ func newAppsCloneCmd() *cobra.Command {
 		chromePath       string
 		assetSameDomain  bool
 		noSitemap        bool
+		noRobots         bool
+		crawlDelay       int
 		noAntibot        bool
 		noAntibotAutoEsc bool
 		cookieFile       string
@@ -770,6 +778,10 @@ func newAppsCloneCmd() *cobra.Command {
 		noHeadless       bool
 		noChromeProfile  bool
 		noStealth        bool
+		browserBackend   string
+		keepMedia        bool
+		skipExt          []string
+		allowDownloads   bool
 	)
 
 	cmd := &cobra.Command{
@@ -800,9 +812,12 @@ Examples:
 			fmt.Printf("Cloning %s ...\n", seedURL)
 
 			opts := apps.CloneOptions{
+				OutputDir:       outputDir,
 				MaxPages:        maxPages,
 				MaxDepth:        maxDepth,
 				Traversal:       traversal,
+				ScopePrefix:     scopePrefix,
+				Exclude:         exclude,
 				Subdomains:      subdomains,
 				Scroll:          scroll,
 				Timeout:         timeout,
@@ -817,6 +832,10 @@ Examples:
 				ChromeProfile:   chromeProfile,
 				NoChromeProfile: noChromeProfile,
 				NoStealth:       noStealth,
+				BrowserBackend:  browserBackend,
+				KeepMedia:       keepMedia,
+				SkipExt:         skipExt,
+				AllowDownloads:  allowDownloads,
 			}
 			if incremental {
 				v := true
@@ -829,6 +848,10 @@ Examples:
 			if noAntibotAutoEsc {
 				v := false
 				opts.AntibotAutoEscalate = &v
+			}
+			if noRobots {
+				v := false
+				opts.RespectRobots = &v
 			}
 
 			// Respect flags default (non-flag bools are false by default, meaning
@@ -877,22 +900,27 @@ Examples:
 	}
 
 	cmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to config file")
+	cmd.Flags().StringVarP(&outputDir, "out", "o", "", "Output root; the mirror lands in <out>/<host>/")
 	cmd.Flags().IntVarP(&maxPages, "max-pages", "p", 0, "Maximum pages to clone (0 = unlimited)")
 	cmd.Flags().IntVarP(&maxDepth, "max-depth", "d", 0, "Maximum link depth (0 = unlimited)")
-	cmd.Flags().StringVar(&traversal, "traversal", "", "Traversal strategy: bfs (default) or dfs")
+	cmd.Flags().StringVar(&scopePrefix, "scope-prefix", "", "Only crawl paths starting with this prefix")
+	cmd.Flags().StringArrayVar(&exclude, "exclude", nil, "Path prefixes to skip (repeatable)")
 	cmd.Flags().BoolVar(&subdomains, "subdomains", false, "Include subdomains")
-	cmd.Flags().BoolVar(&scroll, "scroll", false, "Auto-scroll to trigger lazy loading")
+	cmd.Flags().BoolVar(&scroll, "scroll", false, "Auto-scroll each page to trigger lazy loading")
+	cmd.Flags().IntVarP(&workers, "workers", "w", 0, "Concurrent page renderers (default 4)")
+	cmd.Flags().BoolVar(&noRobots, "no-robots", true, "Ignore robots.txt (be nice)")
+	cmd.Flags().IntVar(&crawlDelay, "crawl-delay", 0, "Override robots.txt Crawl-delay in milliseconds")
 	cmd.Flags().IntVar(&timeout, "timeout", 0, "HTTP request timeout in seconds (default 60)")
 	cmd.Flags().IntVar(&renderTimeout, "render-timeout", 0, "Page render hard timeout in seconds (default 30)")
 	cmd.Flags().IntVar(&settle, "settle", 0, "Network idle settle time in ms (default 1500)")
-	cmd.Flags().IntVarP(&workers, "workers", "w", 0, "Concurrent page renderers (default 4)")
 	cmd.Flags().IntVar(&assetWorkers, "asset-workers", 0, "Concurrent asset downloaders (default same as workers)")
-	cmd.Flags().BoolVar(&force, "force", false, "Delete existing clone and start fresh")
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "Delete any existing mirror for the host first")
 	cmd.Flags().BoolVar(&refresh, "refresh", false, "Re-render all pages")
 	cmd.Flags().BoolVar(&incremental, "incremental", false, "Use ETag/Last-Modified for incremental updates")
 	cmd.Flags().BoolVar(&assetSameDomain, "asset-same-domain", false, "Only download assets from same domain")
 	cmd.Flags().BoolVar(&noSitemap, "no-sitemap", false, "Disable sitemap URL discovery")
-	cmd.Flags().StringVar(&chromePath, "chrome-path", "", "Path to Chrome/Chromium executable")
+	cmd.Flags().StringVar(&chromePath, "chrome", "", "Path to the Chrome/Chromium executable")
+	cmd.Flags().StringVar(&chromePath, "chrome-path", "", "Path to Chrome/Chromium executable (alias for --chrome)")
 	cmd.Flags().BoolVar(&noAntibot, "no-antibot", false, "Disable auto anti-bot detection and escalation")
 	cmd.Flags().BoolVar(&noAntibotAutoEsc, "no-antibot-auto", false, "Detect blocks but skip auto-escalation")
 	cmd.Flags().StringVar(&cookieFile, "cookies", "", "Netscape-format cookie file for authenticated cloning")
@@ -900,6 +928,10 @@ Examples:
 	cmd.Flags().BoolVar(&noHeadless, "no-headless", false, "Show visible Chrome window (for manual Turnstile solving)")
 	cmd.Flags().BoolVar(&noChromeProfile, "no-chrome-profile", false, "Disable Chrome profile persistence")
 	cmd.Flags().BoolVar(&noStealth, "no-stealth", false, "Disable stealth anti-detection (on by default)")
+	cmd.Flags().StringVar(&browserBackend, "browser-backend", "", "Browser backend: chromedp or rod (default from config)")
+	cmd.Flags().BoolVar(&keepMedia, "keep-media", false, "Download media files (video, audio, PDF, archives) that are normally skipped")
+	cmd.Flags().StringArrayVar(&skipExt, "skip-ext", nil, "Additional file extensions to skip (repeatable, e.g. --skip-ext .mp3 --skip-ext .pdf)")
+	cmd.Flags().BoolVar(&allowDownloads, "allow-downloads", false, "Allow the browser to auto-download files (default: disabled — cloner manages assets)")
 
 	return cmd
 }
@@ -925,4 +957,103 @@ func previewApp(ctx context.Context, serveDir string, port int, name string) err
 
 	<-ctx.Done()
 	return srv.Stop()
+}
+
+// ==========================================================================
+// apps probe
+// ==========================================================================
+
+func newAppsProbeCmd() *cobra.Command {
+	var (
+		timeout int
+	)
+
+	cmd := &cobra.Command{
+		Use:   "probe <url>",
+		Short: "Probe a website for anti-bot measures",
+		Long: `Probe a website to detect anti-bot measures including WAF,
+JavaScript challenges, rate limiting, and security headers.
+Returns a threat assessment with recommendations for successful cloning.
+
+Examples:
+  wukong apps probe https://example.com
+  wukong apps probe https://example.com --timeout 60`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			targetURL := args[0]
+
+			ctx, cancel := context.WithTimeout(context.Background(),
+				time.Duration(timeout)*time.Second)
+			defer cancel()
+
+			fmt.Printf("Probing %s ...\n", targetURL)
+			fmt.Println()
+
+			p := prober.NewProber()
+			profile := p.Probe(ctx, targetURL)
+
+			fmt.Println("=" + strings.Repeat("-", 60))
+			fmt.Printf("ANTIBOT PROFILE for %s\n", targetURL)
+			fmt.Println("=" + strings.Repeat("-", 60))
+
+			levelColors := map[prober.AntibotLevel]string{
+				prober.LevelNone:     "\033[92m",
+				prober.LevelLow:      "\033[94m",
+				prober.LevelMedium:   "\033[93m",
+				prober.LevelHigh:     "\033[91m",
+				prober.LevelCritical: "\033[41m",
+			}
+			levelNames := map[prober.AntibotLevel]string{
+				prober.LevelNone:     "NONE",
+				prober.LevelLow:      "LOW",
+				prober.LevelMedium:   "MEDIUM",
+				prober.LevelHigh:     "HIGH",
+				prober.LevelCritical: "CRITICAL",
+			}
+
+			color := levelColors[profile.Level]
+			name := levelNames[profile.Level]
+			fmt.Printf("\nRisk Level: %s%s\033[0m\n", color, name)
+			fmt.Printf("Reason: %s\n", profile.LevelReason)
+
+			if profile.WAF != "" {
+				fmt.Printf("\nDetected WAF: %s\n", profile.WAF)
+			}
+
+			if profile.HasJSChallenge {
+				fmt.Println("Has JS Challenge: Yes")
+			}
+
+			if profile.HasRateLimit {
+				fmt.Println("Has Rate Limit: Yes")
+			}
+
+			fmt.Println("\n--- Individual Probe Results ---")
+			for _, r := range profile.ProbeResults {
+				status := "OK"
+				if r.Detected {
+					status = fmt.Sprintf("DETECTED (%.1f)", r.Confidence)
+				}
+				fmt.Printf("\n[%s] %s\n", r.Dimension, status)
+				if r.Message != "" {
+					fmt.Printf("     Message: %s\n", r.Message)
+				}
+				if r.Error != nil {
+					fmt.Printf("     Error: %v\n", r.Error)
+				}
+				fmt.Printf("     Duration: %v\n", r.Duration)
+			}
+
+			fmt.Println("\n--- Recommendations ---")
+			for i, rec := range profile.Recommendations {
+				fmt.Printf("%d. %s\n", i+1, rec)
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().IntVar(&timeout, "timeout", 60, "Total timeout in seconds")
+
+	return cmd
 }

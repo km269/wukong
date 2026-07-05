@@ -19,9 +19,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/km269/wukong/internal/apps/browser"
 	"github.com/km269/wukong/internal/apps/sanitize"
+	"github.com/km269/wukong/internal/browser"
 	"github.com/km269/wukong/internal/browser/antibot"
+	"github.com/km269/wukong/internal/browser/antibot/prober"
+	"github.com/km269/wukong/internal/browser/types"
 	"golang.org/x/net/html"
 )
 
@@ -143,6 +145,10 @@ type EnhancedClonerOptions struct {
 	// are saved between runs. Combine with Headless=false for Turnstile.
 	ChromeProfile string
 
+	// BrowserBackend selects the browser backend: "chromedp" or "rod".
+	// Default is "rod".
+	BrowserBackend browser.BackendType
+
 	// Headless controls headless mode (default true). Set to false to
 	// show a visible Chrome window — essential for solving interactive
 	// challenges like Cloudflare Turnstile once, then reusing the
@@ -182,6 +188,23 @@ type EnhancedClonerOptions struct {
 	// on completion, enabling repeat cloning of login-protected sites.
 	// Empty string = no cookie persistence.
 	CookieFile string
+
+	// DisableDownloads prevents the browser from auto-downloading files
+	// triggered by page navigation or JavaScript. This avoids polluting
+	// the working directory with unwanted files (PDFs, installers, etc.)
+	// when cloning pages that contain download links or auto-download
+	// scripts. The cloner's asset downloader still fetches needed assets
+	// via HTTP. Default is true.
+	DisableDownloads bool
+
+	// BehaviorSimulation enables human-like behavior simulation (random mouse move, scroll, etc.).
+	// This makes automation less detectable by anti-bot systems. Default is false.
+	BehaviorSimulation bool
+
+	// ProxyConfig configures proxy settings for browser automation.
+	ProxyEnabled     bool
+	ProxyPool        []string
+	ProxyRotateEvery int
 }
 
 // DefaultSkipAssetExts returns the default set of file extensions that should
@@ -211,29 +234,37 @@ func DefaultSkipAssetExts() map[string]bool {
 
 // DefaultEnhancedOptions returns sensible defaults.
 func DefaultEnhancedOptions() EnhancedClonerOptions {
+	home, _ := os.UserHomeDir()
+	outputDir := filepath.Join(home, ".wukong", "apps", "cloned")
+
 	return EnhancedClonerOptions{
-		Workers:         4,
-		AssetWorkers:    8,
-		BrowserPages:    4,
-		Timeout:         60 * time.Second,
-		RenderTimeout:   60 * time.Second,
-		Settle:          1500 * time.Millisecond,
-		Traversal:       TraversalBFS,
-		RespectRobots:   true,
-		EnableResume:    true,
-		Persist:         true,
-		DedupContent:    true,
-		MobileReadable:  true,
-		AssetSameDomain: true,
+		OutputDir:           outputDir,
+		Workers:             4,
+		AssetWorkers:        8,
+		BrowserPages:        4,
+		Timeout:             60 * time.Second,
+		RenderTimeout:       60 * time.Second,
+		Settle:              1500 * time.Millisecond,
+		Traversal:           TraversalBFS,
+		RespectRobots:       false,
+		EnableResume:        true,
+		Persist:             true,
+		DedupContent:        true,
+		MobileReadable:      true,
+		AssetSameDomain:     true,
 		SkipAssetExts:       DefaultSkipAssetExts(),
 		MaxAssetBytes:       50 * 1024 * 1024, // 50 MB.
 		AntibotEnabled:      true,
 		AntibotAutoEscalate: true,
 		Incremental:         true,
 		CacheMaxAge:         24 * time.Hour,
-		Headless:            true,   // Default: headless Chrome.
-		Stealth:             true,   // Default: anti-detection active.
+		Headless:            true, // Default: headless Chrome.
+		Stealth:             true, // Default: anti-detection active.
 		ChromeProfile:       "./wukong_chrome_profile",
+		DisableDownloads:    true,  // Default: 禁止浏览器自动下载.
+		BehaviorSimulation:  false, // Default: 不启用人类行为模拟.
+		ProxyEnabled:        false,
+		ProxyRotateEvery:    10,
 		UserAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
 			"AppleWebKit/537.36 (KHTML, like Gecko) " +
 			"Chrome/124.0.0.0 Safari/537.36",
@@ -242,13 +273,14 @@ func DefaultEnhancedOptions() EnhancedClonerOptions {
 
 // EnhancedCloner is the improved website cloning engine.
 type EnhancedCloner struct {
-	opts    EnhancedClonerOptions
-	seedURL string
-	host    string
-	scheme  string
+	opts       EnhancedClonerOptions
+	seedURL    string
+	host       string
+	scheme     string
+	proxyIndex int
 
 	// Browser pool for rendering pages.
-	browserPool *browser.Pool
+	browserPool types.BrowserBackend
 
 	// Frontier for URL deduplication and resume.
 	front *frontier
@@ -289,7 +321,7 @@ type EnhancedCloner struct {
 	assetJobs chan assetJob
 
 	// DFS traversal support: page stack + dispatcher.
-	pageStack      []pageJob    // DFS LIFO stack.
+	pageStack      []pageJob // DFS LIFO stack.
 	pageMu         sync.Mutex
 	pageReady      chan struct{} // Signal when new pages are available.
 	dispatcherStop chan struct{} // Signal to stop the dispatcher.
@@ -299,9 +331,9 @@ type EnhancedCloner struct {
 	assetMu          sync.RWMutex
 
 	// Stats and results.
-	stats    Stats
-	statsMu  sync.RWMutex
-	results  []PageResult
+	stats     Stats
+	statsMu   sync.RWMutex
+	results   []PageResult
 	resultsMu sync.Mutex
 
 	// Directories.
@@ -318,8 +350,9 @@ type EnhancedCloner struct {
 
 // pageJob represents a pending page rendering job.
 type pageJob struct {
-	url   string
-	depth int
+	url     string
+	depth   int
+	referer string
 }
 
 // assetJob represents a pending asset download job.
@@ -384,6 +417,13 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	// anti-bot protection. If so, enable Stealth pre-emptively so the
 	// first page load is already stealth-protected.
 	ec.preflightCloudflareCheck()
+
+	// Multi-dimensional anti-bot probing.
+	// Probes HTTP headers, robots.txt, WAF fingerprint, JS challenges,
+	// and rate limits to build an anti-bot profile and adjust strategy.
+	if ec.opts.AntibotEnabled && !ec.opts.Stealth {
+		ec.runAntibotProbe(ctx)
+	}
 
 	// Set up output directory.
 	outputDir := ec.opts.OutputDir
@@ -484,20 +524,30 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 		}
 	}
 
-	// Create browser pool.
-	pool := browser.NewPool(browser.PoolOptions{
-		Headless:      ec.opts.Headless,
-		Workers:       ec.opts.Workers,
-		BrowserPages:  ec.opts.BrowserPages,
-		RenderTimeout: ec.opts.RenderTimeout,
-		Settle:        ec.opts.Settle,
-		Scroll:        ec.opts.Scroll,
-		Stealth:       ec.opts.Stealth,
-		ChromePath:    ec.opts.ChromePath,
-		ProfileDir:    ec.opts.ChromeProfile,
+	// Create browser backend.
+	var proxy string
+	if ec.opts.ProxyEnabled && len(ec.opts.ProxyPool) > 0 {
+		proxy = ec.opts.ProxyPool[0]
+	}
+	browserBackend := browser.NewBackend(ec.opts.BrowserBackend, browser.BackendOptions{
+		Headless:         ec.opts.Headless,
+		Workers:          ec.opts.Workers,
+		Settle:           ec.opts.Settle,
+		RenderTimeout:    ec.opts.RenderTimeout,
+		Scroll:           ec.opts.Scroll,
+		ChromeBin:        ec.opts.ChromePath,
+		Stealth:          ec.opts.Stealth,
+		ProfileDir:       ec.opts.ChromeProfile,
+		DisableDownloads: ec.opts.DisableDownloads,
+		Proxy:            proxy,
 	})
-	ec.browserPool = pool
-	defer pool.Close()
+	ec.browserPool = browserBackend
+	defer browserBackend.Close()
+
+	// Enable human-like behavior simulation if configured
+	if ec.opts.BehaviorSimulation {
+		browserBackend.SetBehaviorSimulation(true)
+	}
 
 	// Initialize anti-bot detection and auto-escalation engine.
 	abCfg := antibot.Config{
@@ -505,13 +555,13 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 		AutoEscalate: ec.opts.AntibotAutoEscalate,
 		InitialLevel: antibot.LevelNone,
 		MaxLevel:     antibot.LevelAggressive,
-		MaxRetries:   3,
-		Cooldown:     30 * time.Second,
+		MaxRetries:   5,
+		Cooldown:     45 * time.Second,
 	}
 	if ec.opts.Stealth {
-		// If stealth is already enabled, start from LevelStealth
-		// to raise the baseline immediately.
 		abCfg.InitialLevel = antibot.LevelStealth
+	} else {
+		abCfg.InitialLevel = antibot.LevelFlags
 	}
 	ec.antibot = antibot.New(abCfg)
 
@@ -598,20 +648,20 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	ec.resultsMu.Lock()
 	dedupFiles, dedupSaved := ec.deduper.Savings()
 	result := &Result{
-		Success:            ec.stats.PagesFailed == 0,
-		SeedURL:            ec.seedURL,
-		Host:               ec.host,
-		OutputDir:          outputDir,
-		Pages:              ec.stats.PagesCloned,
-		Assets:             ec.stats.AssetsDownloaded,
-		SizeBytes:          ec.stats.TotalBytes,
-		Duration:           endTime.Sub(startTime),
-		DedupFiles:         dedupFiles,
-		DedupBytesSaved:    dedupSaved,
-		AntibotDetections:  len(ec.antibot.Escalator.History),
-		AntibotStats:       ec.antibot.Stats(),
-		StartTime:          startTime,
-		EndTime:            endTime,
+		Success:           ec.stats.PagesFailed == 0,
+		SeedURL:           ec.seedURL,
+		Host:              ec.host,
+		OutputDir:         outputDir,
+		Pages:             ec.stats.PagesCloned,
+		Assets:            ec.stats.AssetsDownloaded,
+		SizeBytes:         ec.stats.TotalBytes,
+		Duration:          endTime.Sub(startTime),
+		DedupFiles:        dedupFiles,
+		DedupBytesSaved:   dedupSaved,
+		AntibotDetections: len(ec.antibot.Escalator.History),
+		AntibotStats:      ec.antibot.Stats(),
+		StartTime:         startTime,
+		EndTime:           endTime,
 	}
 
 	for _, pr := range ec.results {
@@ -641,7 +691,7 @@ func (ec *EnhancedCloner) pageWorker(ctx context.Context, id int) {
 		default:
 		}
 
-		result := ec.processPage(ctx, job.url, job.depth)
+		result := ec.processPage(ctx, job.url, job.depth, job.referer)
 
 		// Update stats.
 		ec.statsMu.Lock()
@@ -690,7 +740,7 @@ func (ec *EnhancedCloner) assetWorker(ctx context.Context, id int) {
 // Uses a single-pass DOM walk (sink callback) to simultaneously rewrite links
 // and discover new pages/assets — eliminating the separate extract+rewrite
 // two-pass approach.
-func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth int) PageResult {
+func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth int, referer string) PageResult {
 	result := PageResult{
 		URL:   pageURL,
 		Depth: depth,
@@ -729,10 +779,11 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 	ec.antibot.Wait()
 
 	// Render page in headless Chrome.
-	renderResult, err := ec.browserPool.Render(ctx, pageURL)
+	fmt.Fprintf(os.Stderr, "[wukong/clone] rendering %s ...\n", pageURL)
+	renderResult, err := ec.browserPool.RenderWithReferer(ctx, pageURL, referer)
 	if err != nil {
 		// Non-HTML resource? Route to asset downloader instead of failing.
-		if _, ok := errors.AsType[*browser.ErrNotHTML](err); ok {
+		if _, ok := errors.AsType[*types.ErrNotHTML](err); ok {
 			ec.wg.Add(1)
 			ec.assetJobs <- assetJob{url: pageURL}
 			ec.front.markVisited(PageKey(ec.host, pageURL))
@@ -790,7 +841,7 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 						"attempting auto-solve (non-headless+"+
 						"stealth, extended settle)...\n")
 				ec.browserPool.SetSettle(10 * time.Second)
-				rr2, rErr := ec.browserPool.Render(ctx, pageURL)
+				rr2, rErr := ec.browserPool.RenderWithReferer(ctx, pageURL, referer)
 				ec.browserPool.SetSettle(ec.opts.Settle)
 				if rErr == nil {
 					ab2, _ := ec.antibot.CheckResponse(
@@ -819,6 +870,7 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 		retry, delay, _, msg := ec.antibot.Escalate(
 			pageURL, abReason, 200)
 		ec.applyAntiBotLevel()
+
 		if retry {
 			fmt.Fprintf(os.Stderr, "[wukong/antibot] %s\n", msg)
 			select {
@@ -843,7 +895,7 @@ processContent:
 		KeepNoscript:    false,
 		KeepMetaRefresh: false,
 		MobileReadable:  ec.opts.MobileReadable,
-		Banner:          fmt.Sprintf("Cloned by Wukong from %s on %s",
+		Banner: fmt.Sprintf("Cloned by Wukong from %s on %s",
 			pageURL, time.Now().Format(time.RFC3339)),
 	}
 	cleanHTML, _ := sanitize.CleanHTMLWithOptions(renderResult.HTML, cleanOpts)
@@ -859,7 +911,7 @@ processContent:
 
 		// Temporarily increase settle and re-render.
 		ec.browserPool.SetSettle(5 * time.Second)
-		renderResult2, rErr := ec.browserPool.Render(ctx, pageURL)
+		renderResult2, rErr := ec.browserPool.RenderWithReferer(ctx, pageURL, referer)
 		ec.browserPool.SetSettle(ec.opts.Settle) // Restore original.
 		if rErr == nil {
 			cleanHTML2, _ := sanitize.CleanHTMLWithOptions(
@@ -920,6 +972,8 @@ processContent:
 	result.FilePath = fullPath
 	result.Title = renderResult.Title
 	result.Size = int64(len(rewrittenHTML))
+
+	fmt.Fprintf(os.Stderr, "[wukong/clone] saved %s (%d bytes)\n", pageURL, result.Size)
 
 	// Save to incremental cache for future runs.
 	ec.updateCacheEntry(pageURL, fullPath, contentBytes)
@@ -1054,9 +1108,9 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 // ---------------------------------------------------------------------------
 
 // rewriteAndDiscover performs a single-pass DOM walk that simultaneously:
-//   1. Rewrites all resource URLs to local relative paths.
-//   2. Discovers new pages (enqueues them if in scope and under limits).
-//   3. Discovers new assets (enqueues them if the policy allows download).
+//  1. Rewrites all resource URLs to local relative paths.
+//  2. Discovers new pages (enqueues them if in scope and under limits).
+//  3. Discovers new assets (enqueues them if the policy allows download).
 //
 // This merges the former three-pass approach (extractLinks + extractAssets
 // + rewritePageLinks) into one efficient traversal.
@@ -1093,7 +1147,8 @@ func (ec *EnhancedCloner) rewriteAndDiscover(htmlStr, pageURL, pageMirrorPath st
 					}
 					seed, _ := url.Parse(ec.seedURL)
 					if seed != nil && InScope(seed, u, scopeCfg) {
-						ec.enqueuePage(absURL, depth+1)
+						// 用当前页面 URL 作为新页面的 referer,模拟用户点击行为.
+						ec.enqueuePageWithReferer(absURL, depth+1, pageURL)
 					}
 				}
 			}
@@ -1184,6 +1239,12 @@ func (ec *EnhancedCloner) drainStack(ctx context.Context) {
 
 // enqueuePage adds a page URL to the crawl queue.
 func (ec *EnhancedCloner) enqueuePage(pageURL string, depth int) {
+	ec.enqueuePageWithReferer(pageURL, depth, "")
+}
+
+// enqueuePageWithReferer adds a page URL to the crawl queue with a referer
+// URL to simulate user navigation. The seed page should use an empty referer.
+func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, referer string) {
 	// Validate URL.
 	parsed, err := url.Parse(pageURL)
 	if err != nil {
@@ -1203,8 +1264,18 @@ func (ec *EnhancedCloner) enqueuePage(pageURL string, depth int) {
 	}
 
 	seed, _ := url.Parse(ec.seedURL)
-	if seed != nil && !InScope(seed, parsed, scopeCfg) {
-		return
+	isSeedURL := pageURL == ec.seedURL ||
+		(seed != nil && parsed.Path == seed.Path && parsed.Host == seed.Host)
+
+	if !isSeedURL {
+		if seed != nil && !InScope(seed, parsed, scopeCfg) {
+			return
+		}
+	} else if ec.opts.ScopePrefix != "" && !strings.HasPrefix(parsed.Path, ec.opts.ScopePrefix) {
+		fmt.Fprintf(os.Stderr,
+			"[wukong/clone] warning: seed URL %q does not match scope-prefix %q — "+
+				"crawl scope will be determined by links found on the seed page\n",
+			pageURL, ec.opts.ScopePrefix)
 	}
 
 	// Normalize and get key.
@@ -1243,7 +1314,7 @@ func (ec *EnhancedCloner) enqueuePage(pageURL string, depth int) {
 	// BFS vs DFS: enqueue to channel (FIFO) or push to stack (LIFO).
 	if ec.opts.Traversal == TraversalDFS {
 		ec.pageMu.Lock()
-		ec.pageStack = append(ec.pageStack, pageJob{url: canonURL, depth: depth})
+		ec.pageStack = append(ec.pageStack, pageJob{url: canonURL, depth: depth, referer: referer})
 		ec.pageMu.Unlock()
 		// Signal dispatcher that new pages are available.
 		select {
@@ -1251,7 +1322,7 @@ func (ec *EnhancedCloner) enqueuePage(pageURL string, depth int) {
 		default:
 		}
 	} else {
-		ec.pageJobs <- pageJob{url: canonURL, depth: depth}
+		ec.pageJobs <- pageJob{url: canonURL, depth: depth, referer: referer}
 	}
 }
 
@@ -1350,6 +1421,46 @@ func (ec *EnhancedCloner) preflightCloudflareCheck() {
 			"enabled pre-emptively\n", ec.host)
 }
 
+// runAntibotProbe performs multi-dimensional anti-bot probing and adjusts
+// clone strategy based on the detected threats.
+func (ec *EnhancedCloner) runAntibotProbe(ctx context.Context) {
+	fmt.Fprintf(os.Stderr, "[wukong/antibot] probing %s for anti-bot measures...\n", ec.seedURL)
+
+	p := prober.NewProber()
+	profile := p.Probe(ctx, ec.seedURL)
+
+	switch profile.Level {
+	case prober.LevelCritical:
+		fmt.Fprintf(os.Stderr, "[wukong/antibot] critical anti-bot protection detected — enabling stealth\n")
+		ec.opts.Stealth = true
+		ec.opts.AntibotAutoEscalate = false
+	case prober.LevelHigh:
+		fmt.Fprintf(os.Stderr, "[wukong/antibot] high anti-bot protection (%s) — enabling stealth\n", profile.WAF)
+		ec.opts.Stealth = true
+	case prober.LevelMedium:
+		fmt.Fprintf(os.Stderr, "[wukong/antibot] medium anti-bot protection — enabling stealth\n")
+		ec.opts.Stealth = true
+	case prober.LevelLow:
+		fmt.Fprintf(os.Stderr, "[wukong/antibot] low anti-bot measures detected — monitoring\n")
+		if profile.HasRateLimit {
+			if ec.opts.CrawlDelay == 0 {
+				ec.opts.CrawlDelay = 2000
+				fmt.Fprintf(os.Stderr, "[wukong/antibot] rate limiting detected — setting crawl delay to 2s\n")
+			}
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "[wukong/antibot] no significant anti-bot measures detected\n")
+	}
+
+	if profile.WAF != "" {
+		fmt.Fprintf(os.Stderr, "[wukong/antibot] detected WAF: %s\n", profile.WAF)
+	}
+
+	if profile.HasJSChallenge {
+		fmt.Fprintf(os.Stderr, "[wukong/antibot] JS challenge detected — may require browser rendering\n")
+	}
+}
+
 // setBrowserHeaders adds realistic Chrome headers (sec-ch-ua, sec-fetch-*)
 // to an HTTP request. Cloudflare L3 detection checks these to distinguish
 // browsers from simple HTTP clients. Without them, the preflight GET and
@@ -1398,10 +1509,10 @@ func (ec *EnhancedCloner) applyAntiBotLevel() {
 
 // wantAsset reports whether an asset should be downloaded and localised.
 // Two filtering policies:
-//   1. AssetSameDomain: skip assets on hosts outside the seed's registrable
-//      domain (CDNs, analytics, third-party trackers).
-//   2. SkipAssetExts: skip assets whose file extension is in the skip set
-//      (media files, archives, documents). These remain as live links.
+//  1. AssetSameDomain: skip assets on hosts outside the seed's registrable
+//     domain (CDNs, analytics, third-party trackers).
+//  2. SkipAssetExts: skip assets whose file extension is in the skip set
+//     (media files, archives, documents). These remain as live links.
 func (ec *EnhancedCloner) wantAsset(assetURL string) bool {
 	u, err := url.Parse(assetURL)
 	if err != nil {
@@ -1474,5 +1585,3 @@ func (ec *EnhancedCloner) updateCacheEntry(pageURL, localPath string, content []
 	}
 	ec.cache.SetEntry(entry)
 }
-
-

@@ -6,7 +6,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
+	"github.com/km269/wukong/internal/browser/behavior"
 	"github.com/km269/wukong/internal/browser/settle"
 	"github.com/km269/wukong/internal/browser/stealth"
 	"github.com/km269/wukong/internal/browser/types"
@@ -14,25 +16,30 @@ import (
 )
 
 type Options struct {
-	Headless      bool
-	Workers       int
-	Settle        time.Duration
-	RenderTimeout time.Duration
-	Scroll        bool
-	ChromeBin     string
-	ControlURL    string
-	Stealth       bool
+	Headless         bool
+	Workers          int
+	Settle           time.Duration
+	RenderTimeout    time.Duration
+	Scroll           bool
+	ChromeBin        string
+	ControlURL       string
+	Stealth          bool
+	ProfileDir       string
+	DisableDownloads bool
+	Proxy            string // Proxy URL (http://user:pass@host:port or socks5://...)
 }
 
 type Pool struct {
-	opts     Options
-	allocCtx context.Context
-	allocCl  context.CancelFunc
-	workers  []*worker
-	queue    chan *renderJob
-	wg       sync.WaitGroup
-	closed   bool
-	mu       sync.Mutex
+	opts               Options
+	allocCtx           context.Context
+	allocCl            context.CancelFunc
+	workers            []*worker
+	queue              chan *renderJob
+	wg                 sync.WaitGroup
+	closed             bool
+	mu                 sync.Mutex
+	behaviorSimEnabled bool
+	behaviorSimulator  *behavior.Simulator
 }
 
 type worker struct {
@@ -43,6 +50,7 @@ type worker struct {
 
 type renderJob struct {
 	url      string
+	referer  string
 	resultCh chan<- renderResultOrErr
 	ctx      context.Context
 }
@@ -74,6 +82,18 @@ func New(opts Options) *Pool {
 		chromedp.Flag("mute-audio", true),
 	)
 
+	if opts.Proxy != "" {
+		allocOpts = append(allocOpts, chromedp.ProxyServer(opts.Proxy))
+	}
+
+	if opts.DisableDownloads {
+		// download_restrictions=3 禁止所有下载.
+		allocOpts = append(allocOpts,
+			chromedp.Flag("disable-features", "DownloadBubble,DownloadBubbleV2"),
+			chromedp.Flag("safebrowsing-disable-auto-update", true),
+		)
+	}
+
 	if opts.Stealth {
 		allocOpts = append(allocOpts,
 			chromedp.Flag("disable-blink-features", "AutomationControlled"),
@@ -89,13 +109,18 @@ func New(opts Options) *Pool {
 		allocOpts = append(allocOpts, chromedp.ExecPath(opts.ChromeBin))
 	}
 
+	if opts.ProfileDir != "" {
+		allocOpts = append(allocOpts, chromedp.UserDataDir(opts.ProfileDir))
+	}
+
 	allocCtx, allocCl := chromedp.NewExecAllocator(context.Background(), allocOpts...)
 
 	p := &Pool{
-		opts:     opts,
-		allocCtx: allocCtx,
-		allocCl:  allocCl,
-		queue:    make(chan *renderJob, opts.Workers*4),
+		opts:              opts,
+		allocCtx:          allocCtx,
+		allocCl:           allocCl,
+		queue:             make(chan *renderJob, opts.Workers*4),
+		behaviorSimulator: behavior.New(behavior.DefaultConfig()),
 	}
 
 	for i := 0; i < opts.Workers; i++ {
@@ -127,12 +152,76 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 
 	var html, title, finalURL, contentType string
 
-	if err := chromedp.Run(tabCtx, chromedp.Navigate(job.url)); err != nil {
+	if err := chromedp.Run(tabCtx,
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			headers := network.Headers{
+				"Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+				"Accept-Language":           "en-US,en;q=0.9",
+				"Accept-Encoding":           "gzip, deflate, br",
+				"Connection":                "keep-alive",
+				"Sec-Ch-Ua":                 `"Not_A Brand";v="8", "Chromium";v="124", "Google Chrome";v="124"`,
+				"Sec-Ch-Ua-Mobile":          "?0",
+				"Sec-Ch-Ua-Platform":        `"Windows"`,
+				"Sec-Fetch-Dest":            "document",
+				"Sec-Fetch-Mode":            "navigate",
+				"Sec-Fetch-Site":            "none",
+				"Sec-Fetch-User":            "?1",
+				"Upgrade-Insecure-Requests": "1",
+				"User-Agent":                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+			}
+			if job.referer != "" {
+				headers["Referer"] = job.referer
+				// 有 referer 表示是从其他页面跳转,模拟点击行为.
+				headers["Sec-Fetch-Site"] = "same-origin"
+				headers["Sec-Fetch-User"] = "?1"
+			}
+			return network.SetExtraHTTPHeaders(headers).Do(ctx)
+		}),
+		chromedp.Navigate(job.url),
+	); err != nil {
 		job.resultCh <- renderResultOrErr{Err: fmt.Errorf("navigate: %w", err)}
 		return
 	}
 
 	settle.Wait(tabCtx, p.opts.Settle)
+
+	// 如果启用了行为模拟
+	if p.behaviorSimEnabled {
+		// 模拟自然的滚动和鼠标移动
+		var body string
+		chromedp.Run(tabCtx,
+			// 首先滚动一小段
+			chromedp.Evaluate(`
+				(async () => {
+					// 随机滚动一小段距离
+					const randomScroll = () => {
+						const delta = Math.floor(Math.random() * 200) - 100;
+						window.scrollBy(0, delta);
+						return new Promise(r => setTimeout(r, 200 + Math.random() * 300));
+					};
+					await randomScroll();
+				})()`, &body),
+		)
+
+		// 鼠标移动到随机位置
+		chromedp.Run(tabCtx,
+			chromedp.Evaluate(`
+				(async () => {
+					// 模拟鼠标移动到随机位置
+					const randomX = Math.random() * window.innerWidth;
+					const randomY = Math.random() * window.innerHeight;
+					// 触发鼠标移动事件
+					const mouseEvent = new MouseEvent('mousemove', {
+						clientX: randomX,
+						clientY: randomY,
+						bubbles: true
+					});
+					document.dispatchEvent(mouseEvent);
+					// 模拟鼠标停留一会儿
+					await new Promise(r => setTimeout(r, 150 + Math.random() * 350));
+				})()`, &body),
+		)
+	}
 
 	if p.opts.Scroll {
 		var body string
@@ -141,7 +230,7 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 				(async () => {
 					for (let i = 0; i < 5; i++) {
 						window.scrollBy(0, window.innerHeight);
-						await new Promise(r => setTimeout(r, 500));
+						await new Promise(r => setTimeout(r, 500 + Math.random() * 300));
 					}
 				})()`, &body),
 		)
@@ -158,6 +247,27 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 		return
 	}
 
+	if !isHTMLContentType(contentType) {
+		job.resultCh <- renderResultOrErr{Err: &types.ErrNotHTML{URL: job.url, ContentType: contentType}}
+		return
+	}
+
+	var cfClearance string
+	var cookies []*network.Cookie
+	if err := chromedp.Run(tabCtx,
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			var err error
+			cookies, err = network.GetCookies().WithURLs([]string{job.url}).Do(ctx)
+			return err
+		})); err == nil {
+		for _, c := range cookies {
+			if c.Name == "cf_clearance" {
+				cfClearance = c.Value
+				break
+			}
+		}
+	}
+
 	if finalURL == "" {
 		finalURL = job.url
 	}
@@ -167,11 +277,23 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 		URL:                 finalURL,
 		Title:               title,
 		ContentType:         contentType,
-		CloudflareClearance: "",
+		CloudflareClearance: cfClearance,
+		Referer:             job.referer,
 	}}
 }
 
+func isHTMLContentType(ct string) bool {
+	if ct == "" {
+		return true
+	}
+	return ct == "text/html" || ct == "application/xhtml+xml"
+}
+
 func (p *Pool) Render(ctx context.Context, url string) (*types.RenderResult, error) {
+	return p.RenderWithReferer(ctx, url, "")
+}
+
+func (p *Pool) RenderWithReferer(ctx context.Context, url, referer string) (*types.RenderResult, error) {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -181,7 +303,7 @@ func (p *Pool) Render(ctx context.Context, url string) (*types.RenderResult, err
 
 	resultCh := make(chan renderResultOrErr, 1)
 	select {
-	case p.queue <- &renderJob{url: url, resultCh: resultCh, ctx: ctx}:
+	case p.queue <- &renderJob{url: url, referer: referer, resultCh: resultCh, ctx: ctx}:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
@@ -208,6 +330,10 @@ func (p *Pool) EnableStealth() error {
 	}
 	p.opts.Stealth = true
 	return nil
+}
+
+func (p *Pool) SetBehaviorSimulation(enabled bool) {
+	p.behaviorSimEnabled = enabled
 }
 
 func (p *Pool) Close() {
@@ -252,13 +378,15 @@ func NewPoolFromConfig(cfg *config.BrowserConfig) *Pool {
 	}
 
 	return New(Options{
-		Headless:      cfg.Headless,
-		Workers:       workers,
-		Settle:        settleTimeout,
-		RenderTimeout: cfg.Timeout,
-		Scroll:        cfg.Scroll,
-		ChromeBin:     cfg.BrowserPath,
-		ControlURL:    cfg.ControlURL,
-		Stealth:       cfg.Stealth,
+		Headless:         cfg.Headless,
+		Workers:          workers,
+		Settle:           settleTimeout,
+		RenderTimeout:    cfg.Timeout,
+		Scroll:           cfg.Scroll,
+		ChromeBin:        cfg.BrowserPath,
+		ControlURL:       cfg.ControlURL,
+		Stealth:          cfg.Stealth,
+		ProfileDir:       cfg.ProfileDir,
+		DisableDownloads: true, // 默认禁止浏览器自动下载,由 cloner 统一管理资源.
 	})
 }

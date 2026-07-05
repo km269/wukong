@@ -1,2 +1,3 @@
-2026/07/04-11:45:39.099 9264 Creating DB E:\myVibeCoding\km269\wukong\.wukong\chrome\profile\Default\shared_proto_db\metadata since it was missing.
-2026/07/04-11:45:39.112 9264 Reusing MANIFEST E:\myVibeCoding\km269\wukong\.wukong\chrome\profile\Default\shared_proto_db\metadata/MANIFEST-000001
+2026/07/05-15:10:56.490 22d8 Reusing MANIFEST E:\myVibeCoding\km269\wukong\.wukong\chrome\profile\Default\shared_proto_db\metadata/MANIFEST-000001
+2026/07/05-15:10:56.492 22d8 Recovering log #3
+2026/07/05-15:10:56.494 22d8 Reusing old log E:\myVibeCoding\km269\wukong\.wukong\chrome\profile\Default\shared_proto_db\metadata/000003.log 
