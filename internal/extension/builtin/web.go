@@ -24,6 +24,9 @@ func NewWebToolSet(cfg *config.WukongConfig) *WebToolSet {
 	var searxngURL string
 	var searxngAPIKey string
 	var tavilyAPIKey string
+	var googleAPIKey string
+	var googleCSEID string
+	var bingAPIKey string
 
 	if cfg != nil {
 		searchCfg := cfg.Browser.Search
@@ -39,6 +42,9 @@ func NewWebToolSet(cfg *config.WukongConfig) *WebToolSet {
 		}
 		searxngAPIKey = searchCfg.SearXNG.APIKey
 		tavilyAPIKey = searchCfg.Tavily.APIKey
+		googleAPIKey = searchCfg.Google.APIKey
+		googleCSEID = searchCfg.Google.CSEID
+		bingAPIKey = searchCfg.Bing.APIKey
 	}
 
 	if len(enabledBackends) == 0 {
@@ -48,7 +54,7 @@ func NewWebToolSet(cfg *config.WukongConfig) *WebToolSet {
 	validBackends := make([]string, 0, len(enabledBackends))
 	for _, backend := range enabledBackends {
 		switch backend {
-		case "duckduckgo", "searxng", "tavily":
+		case "duckduckgo", "searxng", "tavily", "google", "bing":
 			validBackends = append(validBackends, backend)
 			fmt.Printf("[wukong/web] enabled search backend: %s\n", backend)
 		default:
@@ -72,13 +78,27 @@ func NewWebToolSet(cfg *config.WukongConfig) *WebToolSet {
 			} else {
 				ts.tools = append(ts.tools, NewTavilyTool(tavilyAPIKey))
 			}
+		case "google":
+			if googleAPIKey == "" || googleCSEID == "" {
+				fmt.Println("[wukong/web] warning: google backend enabled but API key or CSE ID not configured, falling back to duckduckgo")
+				ts.tools = append(ts.tools, duckduckgo.NewTool())
+			} else {
+				ts.tools = append(ts.tools, NewGoogleTool(googleAPIKey, googleCSEID))
+			}
+		case "bing":
+			if bingAPIKey == "" {
+				fmt.Println("[wukong/web] warning: bing backend enabled but API key not configured, falling back to duckduckgo")
+				ts.tools = append(ts.tools, duckduckgo.NewTool())
+			} else {
+				ts.tools = append(ts.tools, NewBingTool(bingAPIKey))
+			}
 		case "duckduckgo":
 		default:
 			ts.tools = append(ts.tools, duckduckgo.NewTool())
 		}
 	} else {
 		fmt.Printf("[wukong/web] aggregating %d search backends\n", len(validBackends))
-		ts.tools = append(ts.tools, NewAggregateSearchTool(validBackends, searxngURL, searxngAPIKey, tavilyAPIKey))
+		ts.tools = append(ts.tools, NewAggregateSearchTool(validBackends, searxngURL, searxngAPIKey, tavilyAPIKey, googleAPIKey, googleCSEID, bingAPIKey))
 	}
 
 	return ts

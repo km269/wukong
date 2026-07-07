@@ -22,6 +22,7 @@ import (
 	"github.com/km269/wukong/internal/browser/stealth"
 	"github.com/km269/wukong/internal/browser/types"
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/pkg/httpclient"
 )
 
 // Controller provides web content tools with dual backend support.
@@ -32,7 +33,7 @@ import (
 // are applied to reduce bot detectability.
 type Controller struct {
 	cfg            *config.BrowserConfig
-	client         *http.Client
+	client         *httpclient.Client
 	settleTimeout  time.Duration // Network-idle settle duration.
 	stealth        bool          // Anti-detection mode enabled.
 	chromedpCtx    context.Context
@@ -54,9 +55,7 @@ func NewController(cfg *config.BrowserConfig) *Controller {
 		cfg:           cfg,
 		settleTimeout: settle,
 		stealth:       cfg != nil && cfg.Stealth,
-		client: &http.Client{
-			Timeout: timeout,
-		},
+		client:        httpclient.New(httpclient.Options{Timeout: timeout}),
 	}
 
 	if cfg != nil && cfg.Enabled &&

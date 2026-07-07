@@ -24,6 +24,7 @@ import (
 	"github.com/km269/wukong/internal/browser/antibot"
 	"github.com/km269/wukong/internal/browser/antibot/prober"
 	"github.com/km269/wukong/internal/browser/types"
+	"github.com/km269/wukong/pkg/httpclient"
 	"golang.org/x/net/html"
 )
 
@@ -260,7 +261,8 @@ func DefaultEnhancedOptions() EnhancedClonerOptions {
 		CacheMaxAge:         24 * time.Hour,
 		Headless:            true, // Default: headless Chrome.
 		Stealth:             true, // Default: anti-detection active.
-		ChromeProfile:       "./wukong_chrome_profile",
+		ChromePath:          "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+		ChromeProfile:       "",
 		DisableDownloads:    true,  // Default: 禁止浏览器自动下载.
 		BehaviorSimulation:  false, // Default: 不启用人类行为模拟.
 		ProxyEnabled:        false,
@@ -362,6 +364,7 @@ type assetJob struct {
 
 // NewEnhancedCloner creates a new enhanced cloning engine.
 func NewEnhancedCloner(opts EnhancedClonerOptions) *EnhancedCloner {
+	fmt.Fprintf(os.Stderr, "[DEBUG] NewEnhancedCloner called\n")
 	if opts.Workers <= 0 {
 		opts.Workers = 4
 	}
@@ -391,6 +394,7 @@ func NewEnhancedCloner(opts EnhancedClonerOptions) *EnhancedCloner {
 		downloadedAssets: make(map[string]*downloadedAsset),
 		pageReady:        make(chan struct{}, 1),
 		dispatcherStop:   make(chan struct{}),
+		pageStack:        make([]pageJob, 0),
 	}
 }
 
@@ -416,13 +420,17 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	// Before starting headless Chrome, check if the site uses Cloudflare
 	// anti-bot protection. If so, enable Stealth pre-emptively so the
 	// first page load is already stealth-protected.
+	fmt.Fprintf(os.Stderr, "[DEBUG] Starting preflight Cloudflare check...\n")
 	ec.preflightCloudflareCheck()
+	fmt.Fprintf(os.Stderr, "[DEBUG] Preflight Cloudflare check completed\n")
 
 	// Multi-dimensional anti-bot probing.
 	// Probes HTTP headers, robots.txt, WAF fingerprint, JS challenges,
 	// and rate limits to build an anti-bot profile and adjust strategy.
 	if ec.opts.AntibotEnabled && !ec.opts.Stealth {
+		fmt.Fprintf(os.Stderr, "[DEBUG] Starting antibot probe...\n")
 		ec.runAntibotProbe(ctx)
+		fmt.Fprintf(os.Stderr, "[DEBUG] Antibot probe completed\n")
 	}
 
 	// Set up output directory.
@@ -524,11 +532,15 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 		}
 	}
 
-	// Create browser backend.
+	// Create browser backend with smart proxy pool.
 	var proxy string
 	if ec.opts.ProxyEnabled && len(ec.opts.ProxyPool) > 0 {
-		proxy = ec.opts.ProxyPool[0]
+		if browser.GlobalProxyPool() == nil {
+			browser.InitGlobalProxyPool(ec.opts.ProxyPool, 30*time.Second)
+		}
+		proxy = browser.GlobalProxyPool().GetProxy()
 	}
+	fmt.Fprintf(os.Stderr, "[DEBUG] Creating browser backend...\n")
 	browserBackend := browser.NewBackend(ec.opts.BrowserBackend, browser.BackendOptions{
 		Headless:         ec.opts.Headless,
 		Workers:          ec.opts.Workers,
@@ -587,6 +599,18 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 
 	// Enqueue seed URL.
 	ec.enqueuePage(seedURL, 0)
+
+	// When scope-prefix is specified but seed URL doesn't match it,
+	// automatically add the scope-prefix root as an additional starting point.
+	// This ensures the crawl targets the intended scope even if the seed page
+	// doesn't contain links to it.
+	if ec.opts.ScopePrefix != "" {
+		seed, _ := url.Parse(seedURL)
+		if seed != nil && !strings.HasPrefix(seed.Path, ec.opts.ScopePrefix) {
+			scopeURL := fmt.Sprintf("%s://%s%s", seed.Scheme, seed.Host, ec.opts.ScopePrefix)
+			ec.enqueuePage(scopeURL, 0)
+		}
+	}
 
 	// Discover sitemaps for additional seeds.
 	if !ec.opts.NoSitemap && ec.robots != nil && len(ec.robots.Sitemaps) > 0 {
@@ -1274,8 +1298,9 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 	} else if ec.opts.ScopePrefix != "" && !strings.HasPrefix(parsed.Path, ec.opts.ScopePrefix) {
 		fmt.Fprintf(os.Stderr,
 			"[wukong/clone] warning: seed URL %q does not match scope-prefix %q — "+
-				"crawl scope will be determined by links found on the seed page\n",
-			pageURL, ec.opts.ScopePrefix)
+				"automatically adding %q as an additional starting point\n",
+			pageURL, ec.opts.ScopePrefix,
+			fmt.Sprintf("%s://%s%s", parsed.Scheme, parsed.Host, ec.opts.ScopePrefix))
 	}
 
 	// Normalize and get key.
@@ -1359,7 +1384,7 @@ func (ec *EnhancedCloner) preflightCloudflareCheck() {
 		return // Already enabled or disabled.
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := httpclient.New(httpclient.Options{Timeout: 10 * time.Second})
 
 	// Use GET — Cloudflare may return 0/-1 ContentLength on HEAD.
 	req, err := http.NewRequest("GET", ec.seedURL, nil)
@@ -1489,8 +1514,6 @@ func (ec *EnhancedCloner) applyAntiBotLevel() {
 
 	level := ec.antibot.Level()
 
-	// If the antibot engine needs stealth script but it's not yet active,
-	// dynamically enable it in the browser pool.
 	if ec.antibot.NeedsStealthScript() && !ec.browserPool.StealthEnabled() {
 		if err := ec.browserPool.EnableStealth(); err != nil {
 			fmt.Fprintf(os.Stderr,
@@ -1498,10 +1521,12 @@ func (ec *EnhancedCloner) applyAntiBotLevel() {
 		}
 	}
 
-	// Aggressive level: rotate User-Agent to diversify fingerprint.
 	if level >= antibot.LevelAggressive {
 		rotatedUA := ec.antibot.Escalator.RotateUserAgent()
-		ec.assetDownloader.UserAgent = rotatedUA
+		ec.assetDownloader.UserAgent = rotatedUA.UserAgent
+		if pool, ok := ec.browserPool.(interface{ RotateUA() }); ok {
+			pool.RotateUA()
+		}
 		fmt.Fprintf(os.Stderr,
 			"[wukong/antibot] UA rotated for aggressive mode\n")
 	}

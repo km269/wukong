@@ -11,17 +11,23 @@ import (
 	"sync"
 	"time"
 
+	"github.com/km269/wukong/pkg/httpclient"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 )
 
 type aggregateSearchTool struct {
-	duckduckgoClient *http.Client
-	searxngClient    *http.Client
-	tavilyClient     *http.Client
+	duckduckgoClient *httpclient.Client
+	searxngClient    *httpclient.Client
+	tavilyClient     *httpclient.Client
+	googleClient     *httpclient.Client
+	bingClient       *httpclient.Client
 	searxngURL       string
 	searxngAPIKey    string
 	tavilyAPIKey     string
+	googleAPIKey     string
+	googleCSEID      string
+	bingAPIKey       string
 	enabledBackends  []string
 }
 
@@ -32,14 +38,19 @@ type searchResult struct {
 	Source  string `json:"source"`
 }
 
-func NewAggregateSearchTool(enabledBackends []string, searxngURL, searxngAPIKey, tavilyAPIKey string) tool.Tool {
+func NewAggregateSearchTool(enabledBackends []string, searxngURL, searxngAPIKey, tavilyAPIKey, googleAPIKey, googleCSEID, bingAPIKey string) tool.Tool {
 	st := &aggregateSearchTool{
-		duckduckgoClient: &http.Client{Timeout: 15 * time.Second},
-		searxngClient:    &http.Client{Timeout: 15 * time.Second},
-		tavilyClient:     &http.Client{Timeout: 20 * time.Second},
+		duckduckgoClient: httpclient.New(httpclient.Options{Timeout: 15 * time.Second}),
+		searxngClient:    httpclient.New(httpclient.Options{Timeout: 15 * time.Second}),
+		tavilyClient:     httpclient.New(httpclient.Options{Timeout: 20 * time.Second}),
+		googleClient:     httpclient.New(httpclient.Options{Timeout: 15 * time.Second}),
+		bingClient:       httpclient.New(httpclient.Options{Timeout: 15 * time.Second}),
 		searxngURL:       searxngURL,
 		searxngAPIKey:    searxngAPIKey,
 		tavilyAPIKey:     tavilyAPIKey,
+		googleAPIKey:     googleAPIKey,
+		googleCSEID:      googleCSEID,
+		bingAPIKey:       bingAPIKey,
 		enabledBackends:  enabledBackends,
 	}
 	return function.NewFunctionTool(
@@ -47,7 +58,7 @@ func NewAggregateSearchTool(enabledBackends []string, searxngURL, searxngAPIKey,
 		function.WithName("web_search"),
 		function.WithDescription(
 			"Search the web using multiple search engines and aggregate results. "+
-				"Returns combined results from DuckDuckGo, SearXNG, and Tavily. "+
+				"Returns combined results from DuckDuckGo, SearXNG, Tavily, Google, and Bing. "+
 				"Use this tool to get comprehensive search coverage across multiple sources.",
 		),
 	)
@@ -94,6 +105,12 @@ func (a *aggregateSearchTool) search(
 				resultChan <- resultWrapper{results: results, err: err}
 			case "tavily":
 				results, err := a.searchTavily(ctx, req.Query)
+				resultChan <- resultWrapper{results: results, err: err}
+			case "google":
+				results, err := a.searchGoogle(ctx, req.Query)
+				resultChan <- resultWrapper{results: results, err: err}
+			case "bing":
+				results, err := a.searchBing(ctx, req.Query)
 				resultChan <- resultWrapper{results: results, err: err}
 			}
 		}(backend)
@@ -337,6 +354,133 @@ func parseTavilyResults(data map[string]interface{}) []searchResult {
 							Snippet: content,
 							Source:  "tavily",
 						})
+					}
+				}
+			}
+		}
+	}
+
+	return results
+}
+
+func (a *aggregateSearchTool) searchGoogle(ctx context.Context, query string) ([]searchResult, error) {
+	if a.googleAPIKey == "" || a.googleCSEID == "" {
+		return nil, fmt.Errorf("google API key or CSE ID not configured")
+	}
+
+	searchURL := fmt.Sprintf(
+		"https://www.googleapis.com/customsearch/v1?key=%s&cx=%s&q=%s&num=10",
+		url.QueryEscape(a.googleAPIKey),
+		url.QueryEscape(a.googleCSEID),
+		url.QueryEscape(query),
+	)
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := a.googleClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	return parseGoogleResults(result), nil
+}
+
+func (a *aggregateSearchTool) searchBing(ctx context.Context, query string) ([]searchResult, error) {
+	if a.bingAPIKey == "" {
+		return nil, fmt.Errorf("bing API key not configured")
+	}
+
+	searchURL := fmt.Sprintf(
+		"https://api.bing.microsoft.com/v7.0/search?q=%s&count=10",
+		url.QueryEscape(query),
+	)
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Ocp-Apim-Subscription-Key", a.bingAPIKey)
+
+	resp, err := a.bingClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	return parseBingResults(result), nil
+}
+
+func parseGoogleResults(data map[string]interface{}) []searchResult {
+	var results []searchResult
+
+	if items, ok := data["items"]; ok {
+		if rs, ok := items.([]interface{}); ok {
+			for _, r := range rs {
+				if item, ok := r.(map[string]interface{}); ok {
+					title := getString(item, "title")
+					url := getString(item, "link")
+					snippet := getString(item, "snippet")
+					if url != "" && title != "" {
+						results = append(results, searchResult{
+							Title:   title,
+							URL:     url,
+							Snippet: snippet,
+							Source:  "google",
+						})
+					}
+				}
+			}
+		}
+	}
+
+	return results
+}
+
+func parseBingResults(data map[string]interface{}) []searchResult {
+	var results []searchResult
+
+	if webPages, ok := data["webPages"]; ok {
+		if wp, ok := webPages.(map[string]interface{}); ok {
+			if items, ok := wp["value"]; ok {
+				if rs, ok := items.([]interface{}); ok {
+					for _, r := range rs {
+						if item, ok := r.(map[string]interface{}); ok {
+							title := getString(item, "name")
+							url := getString(item, "url")
+							snippet := getString(item, "snippet")
+							if url != "" && title != "" {
+								results = append(results, searchResult{
+									Title:   title,
+									URL:     url,
+									Snippet: snippet,
+									Source:  "bing",
+								})
+							}
+						}
 					}
 				}
 			}

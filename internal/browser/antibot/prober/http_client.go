@@ -1,9 +1,12 @@
 package prober
 
 import (
-	"crypto/tls"
+	"context"
+	"net"
 	"net/http"
 	"time"
+
+	tls "github.com/refraction-networking/utls"
 )
 
 type HTTPClient struct {
@@ -15,8 +18,27 @@ func NewHTTPClient() *HTTPClient {
 		Client: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: true,
+				DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					conn, err := net.Dial(network, addr)
+					if err != nil {
+						return nil, err
+					}
+
+					host, _, err := net.SplitHostPort(addr)
+					if err != nil {
+						host = addr
+					}
+
+					uconn := tls.UClient(conn, &tls.Config{
+						ServerName: host,
+					}, tls.HelloChrome_Auto)
+					err = uconn.Handshake()
+					if err != nil {
+						conn.Close()
+						return nil, err
+					}
+
+					return uconn, nil
 				},
 				MaxIdleConns:        10,
 				IdleConnTimeout:     30 * time.Second,

@@ -52,6 +52,8 @@ type SearchConfig struct {
 	DuckDuckGo DuckDuckGoConfig `mapstructure:"duckduckgo"`
 	SearXNG    SearXNGConfig    `mapstructure:"searxng"`
 	Tavily     TavilyConfig     `mapstructure:"tavily"`
+	Google     GoogleConfig     `mapstructure:"google"`
+	Bing       BingConfig       `mapstructure:"bing"`
 }
 
 // DuckDuckGoConfig defines DuckDuckGo search configuration.
@@ -69,6 +71,19 @@ type SearXNGConfig struct {
 
 // TavilyConfig defines Tavily AI search configuration.
 type TavilyConfig struct {
+	Enabled bool   `mapstructure:"enabled"`
+	APIKey  string `mapstructure:"api_key"`
+}
+
+// GoogleConfig defines Google search configuration.
+type GoogleConfig struct {
+	Enabled bool   `mapstructure:"enabled"`
+	APIKey  string `mapstructure:"api_key"`
+	CSEID   string `mapstructure:"cse_id"`
+}
+
+// BingConfig defines Bing search configuration.
+type BingConfig struct {
 	Enabled bool   `mapstructure:"enabled"`
 	APIKey  string `mapstructure:"api_key"`
 }

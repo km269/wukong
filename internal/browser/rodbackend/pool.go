@@ -10,6 +10,7 @@ import (
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
+	"github.com/km269/wukong/internal/browser/antibot"
 	"github.com/km269/wukong/internal/browser/behavior"
 	"github.com/km269/wukong/internal/browser/stealth"
 	"github.com/km269/wukong/internal/browser/types"
@@ -40,6 +41,8 @@ type Pool struct {
 	mu                 sync.Mutex
 	behaviorSimEnabled bool
 	behaviorSimulator  *behavior.Simulator
+	escalator          *antibot.Escalator
+	currentUA          *antibot.UAProfile
 }
 
 type worker struct {
@@ -99,11 +102,16 @@ func New(opts Options) *Pool {
 
 	browserInstance := rod.New().ControlURL(controlURL).MustConnect()
 
+	escalator := antibot.NewEscalator(antibot.DefaultEscalatorConfig())
+	currentUA := escalator.GetRandomDesktopUA()
+
 	p := &Pool{
 		opts:              opts,
 		browser:           browserInstance,
 		queue:             make(chan *renderJob, opts.Workers*4),
 		behaviorSimulator: behavior.New(behavior.DefaultConfig()),
+		escalator:         escalator,
+		currentUA:         currentUA,
 	}
 
 	for i := 0; i < opts.Workers; i++ {
@@ -113,6 +121,18 @@ func New(opts Options) *Pool {
 	}
 
 	return p
+}
+
+func (p *Pool) getCurrentUA() *antibot.UAProfile {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.currentUA
+}
+
+func (p *Pool) RotateUA() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.currentUA = p.escalator.RotateUserAgent()
 }
 
 func (p *Pool) workerLoop(w *worker) {
@@ -159,13 +179,32 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 		page.StopLoading()
 	}()
 
-	if job.referer != "" {
-		proto.NetworkSetExtraHTTPHeaders{
-			Headers: proto.NetworkHeaders{
-				"Referer": gson.New(job.referer),
-			},
-		}.Call(page)
+	ua := p.getCurrentUA()
+
+	headers := proto.NetworkHeaders{
+		"Accept":                    gson.New("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"),
+		"Accept-Language":           gson.New("en-US,en;q=0.9"),
+		"Accept-Encoding":           gson.New("gzip, deflate, br"),
+		"Connection":                gson.New("keep-alive"),
+		"Sec-Ch-Ua":                 gson.New(ua.SecChUa),
+		"Sec-Ch-Ua-Mobile":          gson.New(ua.SecChUaMobile),
+		"Sec-Ch-Ua-Platform":        gson.New(ua.SecChUaPlatform),
+		"Sec-Fetch-Dest":            gson.New("document"),
+		"Sec-Fetch-Mode":            gson.New("navigate"),
+		"Sec-Fetch-Site":            gson.New("none"),
+		"Sec-Fetch-User":            gson.New("?1"),
+		"Upgrade-Insecure-Requests": gson.New("1"),
+		"User-Agent":                gson.New(ua.UserAgent),
 	}
+	if job.referer != "" {
+		headers["Referer"] = gson.New(job.referer)
+		headers["Sec-Fetch-Site"] = gson.New("same-origin")
+	}
+
+	proto.NetworkSetExtraHTTPHeaders{
+		Headers: headers,
+	}.Call(page)
+
 	if err := page.Navigate(job.url); err != nil {
 		job.resultCh <- renderResultOrErr{Err: fmt.Errorf("navigate: %w", err)}
 		return

@@ -11,32 +11,75 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	tls "github.com/refraction-networking/utls"
 )
 
 // AssetDownloader downloads static web resources via HTTP.
 // It is intentionally separate from the Chrome rendering pool because
 // public assets rarely need a real browser engine.
 type AssetDownloader struct {
-	Client       *http.Client
-	UserAgent    string
-	MaxBytes     int64  // 0 = no limit.
-	Retries      int    // 0 = no retries (single attempt).
-	cfClearance  string // Cloudflare bypass cookie (from Chrome render).
+	Client      *http.Client
+	UserAgent   string
+	MaxBytes    int64  // 0 = no limit.
+	Retries     int    // 0 = no retries (single attempt).
+	cfClearance string // Cloudflare bypass cookie (from Chrome render).
 }
 
 // DefaultAssetDownloader returns a downloader with sensible defaults.
 func DefaultAssetDownloader() *AssetDownloader {
 	return &AssetDownloader{
-		Client: &http.Client{
-			Timeout: 30 * time.Second,
+		Client: NewTLSClient(),
+		UserAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
+			"AppleWebKit/537.36 (KHTML, like Gecko) " +
+			"Chrome/130.0.0.0 Safari/537.36",
+		MaxBytes: 50 * 1024 * 1024, // 50 MB.
+		Retries:  3,
+	}
+}
+
+// NewTLSClient creates an HTTP client with Chrome TLS fingerprint simulation.
+func NewTLSClient() *http.Client {
+	return &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				conn, err := net.Dial(network, addr)
+				if err != nil {
+					return nil, err
+				}
+
+				host, _, err := net.SplitHostPort(addr)
+				if err != nil {
+					host = addr
+				}
+
+				uconn := tls.UClient(conn, &tls.Config{
+					ServerName: host,
+				}, tls.HelloChrome_Auto)
+				err = uconn.Handshake()
+				if err != nil {
+					conn.Close()
+					return nil, err
+				}
+
+				return uconn, nil
+			},
+			MaxIdleConns:        10,
+			IdleConnTimeout:     30 * time.Second,
+			TLSHandshakeTimeout: 10 * time.Second,
 		},
-		UserAgent: "Mozilla/5.0 (compatible; Wukong-Cloner/2.0)",
-		MaxBytes:  50 * 1024 * 1024, // 50 MB.
-		Retries:   3,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("too many redirects")
+			}
+			return nil
+		},
 	}
 }
 
@@ -62,7 +105,7 @@ func (d *AssetDownloader) Download(ctx context.Context, assetURL string) (*Downl
 	for attempt := 0; attempt <= d.Retries; attempt++ {
 		if attempt > 0 {
 			// Exponential backoff: 500ms, 1s, 2s, 4s, max 5s.
-			backoff := time.Duration(500 * (1 << (attempt - 1))) * time.Millisecond
+			backoff := time.Duration(500*(1<<(attempt-1))) * time.Millisecond
 			if backoff > 5*time.Second {
 				backoff = 5 * time.Second
 			}
@@ -145,9 +188,9 @@ func (d *AssetDownloader) tryDownload(ctx context.Context, assetURL string) (*Do
 	// Early-out: Content-Length exceeds MaxBytes.
 	if d.MaxBytes > 0 && resp.ContentLength > d.MaxBytes {
 		return nil, &DownloadError{
-			URL:     assetURL,
-			Reason:  "too_large",
-			Err:     ErrAssetTooLarge,
+			URL:    assetURL,
+			Reason: "too_large",
+			Err:    ErrAssetTooLarge,
 		}
 	}
 
@@ -162,9 +205,9 @@ func (d *AssetDownloader) tryDownload(ctx context.Context, assetURL string) (*Do
 		}
 		if int64(len(body)) > d.MaxBytes {
 			return nil, &DownloadError{
-				URL:     assetURL,
-				Reason:  "too_large",
-				Err:     ErrAssetTooLarge,
+				URL:    assetURL,
+				Reason: "too_large",
+				Err:    ErrAssetTooLarge,
 			}
 		}
 	} else {
@@ -222,9 +265,9 @@ var ErrAssetTooLarge = fmt.Errorf("asset exceeds maximum size")
 
 // DownloadError categorizes asset download failures.
 type DownloadError struct {
-	URL        string
-	Reason     string // "bad_request", "network", "http_status",
-	                 // "read", "too_large"
+	URL    string
+	Reason string // "bad_request", "network", "http_status",
+	// "read", "too_large"
 	StatusCode int
 	Err        error
 }

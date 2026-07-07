@@ -8,6 +8,16 @@ import (
 	"github.com/km269/wukong/internal/config"
 )
 
+var globalProxyPool *SmartProxyPool
+
+func InitGlobalProxyPool(proxyURLs []string, healthCheckInterval time.Duration) {
+	globalProxyPool = NewSmartProxyPool(proxyURLs, healthCheckInterval)
+}
+
+func GlobalProxyPool() *SmartProxyPool {
+	return globalProxyPool
+}
+
 type BackendType = config.BrowserBackendType
 
 const (
@@ -85,13 +95,13 @@ func NewBackendFromConfig(cfg *config.BrowserConfig) types.BrowserBackend {
 		backendType = BackendRod
 	}
 
-	// 获取代理配置
+	if cfg.Proxy.Enabled && len(cfg.Proxy.Pool) > 0 && globalProxyPool == nil {
+		globalProxyPool = NewSmartProxyPool(cfg.Proxy.Pool, 30*time.Second)
+	}
+
 	var proxy string
-	if cfg.Proxy.Enabled && len(cfg.Proxy.Pool) > 0 {
-		// 简单使用第一个代理，后续可以添加轮换逻辑
-		proxy = cfg.Proxy.Pool[cfg.Proxy.Current]
-		// 更新下一次循环
-		cfg.Proxy.Current = (cfg.Proxy.Current + 1) % len(cfg.Proxy.Pool)
+	if globalProxyPool != nil {
+		proxy = globalProxyPool.GetProxy()
 	}
 
 	return NewBackend(backendType, BackendOptions{
@@ -104,7 +114,7 @@ func NewBackendFromConfig(cfg *config.BrowserConfig) types.BrowserBackend {
 		ControlURL:       cfg.ControlURL,
 		Stealth:          cfg.Stealth,
 		ProfileDir:       cfg.ProfileDir,
-		DisableDownloads: true, // 默认禁止浏览器自动下载,由 cloner 统一管理资源.
+		DisableDownloads: true,
 		Proxy:            proxy,
 	})
 }

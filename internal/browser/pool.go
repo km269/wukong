@@ -8,6 +8,7 @@ import (
 
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
+	"github.com/km269/wukong/internal/browser/antibot"
 	"github.com/km269/wukong/internal/browser/behavior"
 	"github.com/km269/wukong/internal/browser/settle"
 	"github.com/km269/wukong/internal/browser/stealth"
@@ -40,6 +41,8 @@ type Pool struct {
 	mu                 sync.Mutex
 	behaviorSimEnabled bool
 	behaviorSimulator  *behavior.Simulator
+	escalator          *antibot.Escalator
+	currentUA          *antibot.UAProfile
 }
 
 type worker struct {
@@ -87,7 +90,6 @@ func New(opts Options) *Pool {
 	}
 
 	if opts.DisableDownloads {
-		// download_restrictions=3 禁止所有下载.
 		allocOpts = append(allocOpts,
 			chromedp.Flag("disable-features", "DownloadBubble,DownloadBubbleV2"),
 			chromedp.Flag("safebrowsing-disable-auto-update", true),
@@ -115,12 +117,17 @@ func New(opts Options) *Pool {
 
 	allocCtx, allocCl := chromedp.NewExecAllocator(context.Background(), allocOpts...)
 
+	escalator := antibot.NewEscalator(antibot.DefaultEscalatorConfig())
+	currentUA := escalator.GetRandomDesktopUA()
+
 	p := &Pool{
 		opts:              opts,
 		allocCtx:          allocCtx,
 		allocCl:           allocCl,
 		queue:             make(chan *renderJob, opts.Workers*4),
 		behaviorSimulator: behavior.New(behavior.DefaultConfig()),
+		escalator:         escalator,
+		currentUA:         currentUA,
 	}
 
 	for i := 0; i < opts.Workers; i++ {
@@ -134,6 +141,18 @@ func New(opts Options) *Pool {
 	}
 
 	return p
+}
+
+func (p *Pool) getCurrentUA() *antibot.UAProfile {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.currentUA
+}
+
+func (p *Pool) RotateUA() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.currentUA = p.escalator.RotateUserAgent()
 }
 
 func (p *Pool) workerLoop(w *worker) {
@@ -152,6 +171,8 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 
 	var html, title, finalURL, contentType string
 
+	ua := p.getCurrentUA()
+
 	if err := chromedp.Run(tabCtx,
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			headers := network.Headers{
@@ -159,19 +180,18 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 				"Accept-Language":           "en-US,en;q=0.9",
 				"Accept-Encoding":           "gzip, deflate, br",
 				"Connection":                "keep-alive",
-				"Sec-Ch-Ua":                 `"Not_A Brand";v="8", "Chromium";v="124", "Google Chrome";v="124"`,
-				"Sec-Ch-Ua-Mobile":          "?0",
-				"Sec-Ch-Ua-Platform":        `"Windows"`,
+				"Sec-Ch-Ua":                 ua.SecChUa,
+				"Sec-Ch-Ua-Mobile":          ua.SecChUaMobile,
+				"Sec-Ch-Ua-Platform":        ua.SecChUaPlatform,
 				"Sec-Fetch-Dest":            "document",
 				"Sec-Fetch-Mode":            "navigate",
 				"Sec-Fetch-Site":            "none",
 				"Sec-Fetch-User":            "?1",
 				"Upgrade-Insecure-Requests": "1",
-				"User-Agent":                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+				"User-Agent":                ua.UserAgent,
 			}
 			if job.referer != "" {
 				headers["Referer"] = job.referer
-				// 有 referer 表示是从其他页面跳转,模拟点击行为.
 				headers["Sec-Fetch-Site"] = "same-origin"
 				headers["Sec-Fetch-User"] = "?1"
 			}

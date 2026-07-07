@@ -16,9 +16,11 @@ require (
 	github.com/larksuite/oapi-sdk-go/v3 v3.9.7
 	github.com/liliang-cn/cortexdb/v2 v2.25.0
 	github.com/redis/go-redis/v9 v9.12.1
+	github.com/refraction-networking/utls v1.5.0
 	github.com/spf13/cobra v1.9.1
 	github.com/spf13/viper v1.20.1
 	github.com/temoto/robotstxt v1.1.2
+	github.com/ysmood/gson v0.7.3
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.29.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.29.0
@@ -40,6 +42,7 @@ require (
 	github.com/0x51-dev/rdf v0.1.0 // indirect
 	github.com/0x51-dev/rids v0.1.0 // indirect
 	github.com/0x51-dev/upeg v0.1.0 // indirect
+	github.com/andybalholm/brotli v1.0.5 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/bmatcuk/doublestar/v4 v4.9.1 // indirect
@@ -52,12 +55,14 @@ require (
 	github.com/charmbracelet/x/term v0.2.1 // indirect
 	github.com/chromedp/sysutil v1.1.0 // indirect
 	github.com/clbanning/mxj v1.8.4 // indirect
+	github.com/cloudflare/circl v1.3.3 // indirect
 	github.com/creack/pty v1.1.24 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/dlclark/regexp2/v2 v2.2.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
+	github.com/gaukas/godicttls v0.0.4 // indirect
 	github.com/getkin/kin-openapi v0.124.0 // indirect
 	github.com/go-ego/gse v1.0.2 // indirect
 	github.com/go-json-experiment/json v0.0.0-20260214004413-d219187c3433 // indirect
@@ -65,7 +70,6 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-openapi/jsonpointer v0.20.2 // indirect
 	github.com/go-openapi/swag v0.22.8 // indirect
-	github.com/go-rod/stealth v0.4.9 // indirect
 	github.com/go-sourcemap/sourcemap v2.1.3+incompatible // indirect
 	github.com/go-viper/mapstructure/v2 v2.2.1 // indirect
 	github.com/gobwas/httphead v0.1.0 // indirect
@@ -105,6 +109,7 @@ require (
 	github.com/panjf2000/ants/v2 v2.10.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.3 // indirect
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
+	github.com/quic-go/quic-go v0.37.4 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/sagikazarmark/locafero v0.7.0 // indirect
@@ -126,7 +131,6 @@ require (
 	github.com/ysmood/fetchup v0.2.3 // indirect
 	github.com/ysmood/goob v0.4.0 // indirect
 	github.com/ysmood/got v0.40.0 // indirect
-	github.com/ysmood/gson v0.7.3 // indirect
 	github.com/ysmood/leakless v0.9.0 // indirect
 	github.com/yuin/goldmark v1.4.13 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
