@@ -118,7 +118,7 @@ func New(opts Options) *Client {
 			DisableKeepAlives:   true,
 			TLSHandshakeTimeout: opts.TLSHandshakeTimeout,
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return net.Dial("tcp4", addr)
+				return (&net.Dialer{}).DialContext(ctx, network, addr)
 			},
 		},
 	}
