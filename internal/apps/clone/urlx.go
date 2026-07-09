@@ -389,8 +389,18 @@ func InScope(seed, u *url.URL, cfg ScopeConfig) bool {
 		return false
 	}
 
-	if cfg.ScopePrefix != "" && !strings.HasPrefix(u.Path, cfg.ScopePrefix) {
-		return false
+	if cfg.ScopePrefix != "" {
+		if !matchesScopePrefix(u.Path, cfg.ScopePrefix) {
+			basePrefix := cfg.ScopePrefix
+			if strings.HasSuffix(basePrefix, "-list") {
+				basePrefix = strings.TrimSuffix(basePrefix, "-list")
+				if !matchesScopePrefix(u.Path, basePrefix) {
+					return false
+				}
+			} else {
+				return false
+			}
+		}
 	}
 
 	for _, excl := range cfg.ExcludePrefixes {
@@ -400,6 +410,16 @@ func InScope(seed, u *url.URL, cfg ScopeConfig) bool {
 	}
 
 	return true
+}
+
+func matchesScopePrefix(path, prefix string) bool {
+	if path == prefix {
+		return true
+	}
+	if strings.HasPrefix(path, prefix+"/") {
+		return true
+	}
+	return false
 }
 
 // PageKey returns a deterministic key for a page URL used for deduplication.

@@ -1,6 +1,7 @@
 package clone
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -123,15 +124,15 @@ func TestLocalPath_Page(t *testing.T) {
 
 func TestLocalPath_Asset(t *testing.T) {
 	tests := []struct {
-		url  string
+		url        string
 		wantPrefix string
 	}{
 		{
-			url:  "https://example.com/css/style.css",
+			url:        "https://example.com/css/style.css",
 			wantPrefix: "_wukong/example.com/css/style.css",
 		},
 		{
-			url:  "https://cdn.example.com/img/logo.png",
+			url:        "https://cdn.example.com/img/logo.png",
 			wantPrefix: "_wukong/cdn.example.com/img/logo.png",
 		},
 	}
@@ -184,6 +185,71 @@ func TestRel(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("Rel(%q, %q) = %q, want %q",
 					tt.from, tt.to, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInScope_ListSuffix(t *testing.T) {
+	tests := []struct {
+		name     string
+		seedURL  string
+		checkURL string
+		cfg      ScopeConfig
+		want     bool
+	}{
+		{
+			name:     "exact scope-prefix match",
+			seedURL:  "https://www.state.gov/biographies-list",
+			checkURL: "https://www.state.gov/biographies-list",
+			cfg:      ScopeConfig{ScopePrefix: "/biographies-list"},
+			want:     true,
+		},
+		{
+			name:     "-list suffix matches base prefix",
+			seedURL:  "https://www.state.gov/biographies-list",
+			checkURL: "https://www.state.gov/biographies/john-doe",
+			cfg:      ScopeConfig{ScopePrefix: "/biographies-list"},
+			want:     true,
+		},
+		{
+			name:     "-list suffix matches base prefix with trailing slash",
+			seedURL:  "https://www.state.gov/biographies-list",
+			checkURL: "https://www.state.gov/biographies/",
+			cfg:      ScopeConfig{ScopePrefix: "/biographies-list"},
+			want:     true,
+		},
+		{
+			name:     "no -list suffix, exact match only",
+			seedURL:  "https://www.state.gov/news",
+			checkURL: "https://www.state.gov/news/latest",
+			cfg:      ScopeConfig{ScopePrefix: "/news"},
+			want:     true,
+		},
+		{
+			name:     "no -list suffix, no match",
+			seedURL:  "https://www.state.gov/news",
+			checkURL: "https://www.state.gov/news2/latest",
+			cfg:      ScopeConfig{ScopePrefix: "/news"},
+			want:     false,
+		},
+		{
+			name:     "-list suffix, no match for different base",
+			seedURL:  "https://www.state.gov/biographies-list",
+			checkURL: "https://www.state.gov/articles/john-doe",
+			cfg:      ScopeConfig{ScopePrefix: "/biographies-list"},
+			want:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			seed, _ := url.Parse(tt.seedURL)
+			check, _ := url.Parse(tt.checkURL)
+			got := InScope(seed, check, tt.cfg)
+			if got != tt.want {
+				t.Errorf("InScope(%q, %q, %+v) = %v, want %v",
+					tt.seedURL, tt.checkURL, tt.cfg, got, tt.want)
 			}
 		})
 	}

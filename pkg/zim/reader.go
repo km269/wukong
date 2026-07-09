@@ -29,10 +29,10 @@ type Reader struct {
 	hdr   Header
 	mimes []string
 
-	mu            sync.Mutex
-	cache         map[uint32][]byte // cluster index → decompressed data
-	urlPtrs       []uint64          // cached URL pointer list
-	clusterPtrs   []uint64          // cached cluster pointer list
+	mu          sync.Mutex
+	cache       map[uint32][]byte // cluster index → decompressed data
+	urlPtrs     []uint64          // cached URL pointer list
+	clusterPtrs []uint64          // cached cluster pointer list
 }
 
 // Blob is the result of a lookup: the resolved entry's bytes and metadata.
@@ -62,17 +62,14 @@ type Entry struct {
 
 // dirent is the parsed form of a single ZIM directory entry.
 type dirent struct {
-	namespace byte
-	url       string
-	title     string
-	mimeIdx   uint16
-	// articleType follows the ArticleType enum.
-	articleType ArticleType
-	// For redirect entries.
+	namespace   byte
+	url         string
+	title       string
+	mimeIdx     uint16
 	redirect    bool
 	targetIndex uint32
-	// For content entries (cluster/blob are placeholders; data is inline).
-	data []byte
+	cluster     uint32
+	blob        uint32
 }
 
 // Open opens a ZIM file on disk. Close the returned reader when done.
@@ -227,8 +224,11 @@ func (r *Reader) EntryAt(idx uint32) (Entry, error) {
 	if int(d.mimeIdx) < len(r.mimes) {
 		e.MimeType = r.mimes[d.mimeIdx]
 	}
-	e.Data = make([]byte, len(d.data))
-	copy(e.Data, d.data)
+	data, err := r.readFromCluster(d.cluster, d.blob)
+	if err != nil {
+		return Entry{}, err
+	}
+	e.Data = data
 	return e, nil
 }
 
@@ -248,13 +248,93 @@ func (r *Reader) blobAtIndex(idx uint32, hop int) (Blob, error) {
 	if int(d.mimeIdx) < len(r.mimes) {
 		mime = r.mimes[d.mimeIdx]
 	}
+	data, err := r.readFromCluster(d.cluster, d.blob)
+	if err != nil {
+		return Blob{}, err
+	}
 	return Blob{
 		Namespace: d.namespace,
 		URL:       d.url,
 		Title:     d.title,
 		MimeType:  mime,
-		Data:      d.data,
+		Data:      data,
 	}, nil
+}
+
+// readFromCluster reads data from a cluster.
+// clusterIdx is 0-based. blobIdx is the blob index (0, 1, 2, ...).
+// Standard ZIM cluster format: [compression byte][offset0][offset1]...[offsetN][blob0][blob1]...[blobN]
+// Where offsets are 4-byte little-endian uint32, offset[i] is the start offset of blob[i] relative to data area start.
+// The data area starts after all offsets, and offset[N] = total data size.
+func (r *Reader) readFromCluster(clusterIdx, blobIdx uint32) ([]byte, error) {
+	if clusterIdx >= uint32(len(r.clusterPtrs)) {
+		return nil, fmt.Errorf("zim: cluster index %d out of range (max=%d)", clusterIdx, len(r.clusterPtrs))
+	}
+
+	r.mu.Lock()
+	if cached, ok := r.cache[clusterIdx]; ok {
+		r.mu.Unlock()
+		return r.blobDataFromCluster(cached, blobIdx)
+	}
+	r.mu.Unlock()
+
+	clusterStart := r.clusterPtrs[clusterIdx]
+	compByteBuf := make([]byte, 1)
+	if _, err := r.ra.ReadAt(compByteBuf, int64(clusterStart)); err != nil {
+		return nil, fmt.Errorf("zim: read compression byte: %w", err)
+	}
+	compression := compByteBuf[0]
+
+	var clusterEnd uint64
+	if clusterIdx+1 < uint32(len(r.clusterPtrs)) {
+		clusterEnd = r.clusterPtrs[clusterIdx+1]
+	} else {
+		clusterEnd = uint64(r.size) - 16
+	}
+
+	dataStart := clusterStart + 1
+	dataSize := clusterEnd - dataStart
+
+	var clusterData []byte
+	if compression == byte(CompressionZstd) {
+		compressedBuf := make([]byte, dataSize)
+		if _, err := r.ra.ReadAt(compressedBuf, int64(dataStart)); err != nil {
+			return nil, fmt.Errorf("zim: read compressed cluster: %w", err)
+		}
+		decoder := getZstdDecoder()
+		decompressed, err := decoder.DecodeAll(compressedBuf, nil)
+		if err != nil {
+			return nil, fmt.Errorf("zim: decompress cluster: %w", err)
+		}
+		clusterData = decompressed
+	} else {
+		clusterData = make([]byte, dataSize)
+		if _, err := r.ra.ReadAt(clusterData, int64(dataStart)); err != nil {
+			return nil, fmt.Errorf("zim: read uncompressed cluster: %w", err)
+		}
+	}
+
+	r.mu.Lock()
+	r.cache[clusterIdx] = clusterData
+	r.mu.Unlock()
+
+	return r.blobDataFromCluster(clusterData, blobIdx)
+}
+
+func (r *Reader) blobDataFromCluster(clusterData []byte, blobIdx uint32) ([]byte, error) {
+	w := uint32(4)
+	need := int((blobIdx + 2) * w)
+	if need > len(clusterData) {
+		return nil, fmt.Errorf("zim: blob %d out of range in cluster", blobIdx)
+	}
+	o0 := binary.LittleEndian.Uint32(clusterData[blobIdx*w:])
+	o1 := binary.LittleEndian.Uint32(clusterData[(blobIdx+1)*w:])
+	if o0 > o1 || int(o1) > len(clusterData) {
+		return nil, fmt.Errorf("zim: bad blob offsets in cluster")
+	}
+	out := make([]byte, o1-o0)
+	copy(out, clusterData[o0:o1])
+	return out, nil
 }
 
 // direntAtIndex reads and parses the dirent at the given URL order index.
@@ -283,53 +363,48 @@ func (r *Reader) direntAtIndex(idx uint32) (dirent, error) {
 	return parseDirent(b)
 }
 
-// parseDirent decodes a single directory entry from raw bytes.
+func readCString(b []byte, start int) (string, int, bool) {
+	if start > len(b) {
+		return "", start, false
+	}
+	for i := start; i < len(b); i++ {
+		if b[i] == 0 {
+			return string(b[start:i]), i + 1, true
+		}
+	}
+	return "", start, false
+}
+
+// parseDirent decodes a single directory entry from raw bytes using standard ZIM format.
 func parseDirent(b []byte) (dirent, error) {
-	if len(b) < articleHeaderSize+8 {
-		return dirent{}, fmt.Errorf("zim: dirent too short: %d bytes",
-			len(b))
+	if len(b) < 12 {
+		return dirent{}, fmt.Errorf("zim: dirent too short: %d bytes", len(b))
 	}
 	var d dirent
 	le := binary.LittleEndian
-	titleLen := int(le.Uint16(b[0:2]))
-	urlLen := int(le.Uint16(b[2:4]))
-	d.namespace = b[4]
-	// [5:9] revision (ignored)
-	d.articleType = ArticleType(b[9])
-	d.mimeIdx = le.Uint16(b[10:12])
+	d.mimeIdx = le.Uint16(b[0:])
+	d.namespace = b[3]
 
-	// Extended data (8 bytes after 16-byte header).
-	if d.articleType == ArticleTypeRedirect {
+	var p int
+	if d.mimeIdx == redirectEntry {
 		d.redirect = true
-		d.targetIndex = le.Uint32(b[16:20])
+		d.targetIndex = le.Uint32(b[8:])
+		p = 12
 	} else {
-		d.redirect = false
-		// b[16:20] cluster, b[20:24] blob (both 0 in this impl).
+		d.cluster = le.Uint32(b[8:])
+		d.blob = le.Uint32(b[12:])
+		p = 16
 	}
 
-	pos := articleHeaderSize + 8 // 24 bytes fixed
-	if pos+urlLen+titleLen > len(b) {
-		return dirent{}, fmt.Errorf(
-			"zim: dirent strings overflow: need %d, have %d",
-			pos+urlLen+titleLen, len(b))
+	url, n1, ok := readCString(b, p)
+	if !ok {
+		return dirent{}, fmt.Errorf("zim: unterminated url")
 	}
-	d.url = string(b[pos : pos+urlLen])
-	pos += urlLen
-	d.title = string(b[pos : pos+titleLen])
-	pos += titleLen
-
-	// 4-byte alignment padding.
-	if pad := (4 - (pos % 4)) % 4; pad > 0 {
-		pos += pad
+	title, _, ok := readCString(b, n1)
+	if !ok {
+		return dirent{}, fmt.Errorf("zim: unterminated title")
 	}
 
-	// Remaining bytes are inline article data.
-	if d.articleType == ArticleTypeArticle && pos < len(b) {
-		d.data = make([]byte, len(b)-pos)
-		copy(d.data, b[pos:])
-	}
-
+	d.url, d.title = url, title
 	return d, nil
 }
-
-

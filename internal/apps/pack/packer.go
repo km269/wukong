@@ -253,6 +253,11 @@ func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Resu
 
 	packer := NewZIMPacker()
 
+	type htmlFileEntry struct {
+		url   string
+		title string
+	}
+
 	var filesProcessed int
 	var assetsIncluded int
 	var mainPageURL string
@@ -260,6 +265,7 @@ func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Resu
 	var counterStats = make(map[string]int)
 	var iconData []byte
 	var warnings []string
+	var htmlFiles []htmlFileEntry
 
 	err := filepath.Walk(sourceDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
@@ -283,7 +289,7 @@ func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Resu
 
 		url := filepath.ToSlash(relPath)
 
-		if url == "pages/index.html" && mainPageURL == "" {
+		if mainPageURL == "" && strings.HasSuffix(url, "/index.html") {
 			mainPageURL = url
 			if t := htmlTitleOfBytes(data); t != "" {
 				mainPageTitle = t
@@ -296,6 +302,7 @@ func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Resu
 			if t := htmlTitleOfBytes(data); t != "" {
 				title = t
 			}
+			htmlFiles = append(htmlFiles, htmlFileEntry{url: url, title: title})
 		} else {
 			assetsIncluded++
 		}
@@ -326,10 +333,55 @@ func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Resu
 			fmt.Errorf("no files found to pack"))
 	}
 
-	// Main page with W namespace redirect.
+	// Create index.html with list of all HTML files and set as main page.
+	if len(htmlFiles) > 0 {
+		var indexHTML strings.Builder
+		indexHTML.WriteString(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Content Index</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #333; margin-bottom: 20px; }
+        ul { list-style: none; padding: 0; }
+        li { margin: 8px 0; }
+        a { color: #1a73e8; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .count { color: #666; font-size: 14px; margin-bottom: 15px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Content Index</h1>
+        <p class="count">Found `)
+		indexHTML.WriteString(fmt.Sprintf("%d", len(htmlFiles)))
+		indexHTML.WriteString(` pages</p>
+        <ul>
+`)
+		for _, entry := range htmlFiles {
+			indexHTML.WriteString(`            <li><a href="`)
+			indexHTML.WriteString(entry.url)
+			indexHTML.WriteString(`">`)
+			indexHTML.WriteString(entry.title)
+			indexHTML.WriteString(`</a></li>
+`)
+		}
+		indexHTML.WriteString(`        </ul>
+    </div>
+</body>
+</html>`)
+
+		packer.AddArticle("index.html", "Content Index", "text/html", []byte(indexHTML.String()))
+		packer.SetMainPage(zim.NamespaceContent, "index.html")
+		packer.AddRedirect(zim.NamespaceWellKnown, "mainPage", "Main Page", zim.NamespaceContent, "index.html")
+	}
+
 	if mainPageURL != "" {
-		packer.SetMainPage('C', mainPageURL)
-		packer.AddRedirect('W', "mainPage", "Main Page", 'C', mainPageURL)
+		packer.SetMainPage(zim.NamespaceContent, mainPageURL)
+		packer.AddRedirect(zim.NamespaceWellKnown, "mainPage", "Main Page", zim.NamespaceContent, mainPageURL)
 	}
 
 	// --- Rich ZIM metadata. ---

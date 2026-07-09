@@ -11,13 +11,12 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
-	tls "github.com/refraction-networking/utls"
+	"github.com/km269/wukong/pkg/httpclient"
 )
 
 // AssetDownloader downloads static web resources via HTTP.
@@ -34,52 +33,10 @@ type AssetDownloader struct {
 // DefaultAssetDownloader returns a downloader with sensible defaults.
 func DefaultAssetDownloader() *AssetDownloader {
 	return &AssetDownloader{
-		Client: NewTLSClient(),
-		UserAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) " +
-			"AppleWebKit/537.36 (KHTML, like Gecko) " +
-			"Chrome/130.0.0.0 Safari/537.36",
-		MaxBytes: 50 * 1024 * 1024, // 50 MB.
-		Retries:  3,
-	}
-}
-
-// NewTLSClient creates an HTTP client with Chrome TLS fingerprint simulation.
-func NewTLSClient() *http.Client {
-	return &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				conn, err := net.Dial(network, addr)
-				if err != nil {
-					return nil, err
-				}
-
-				host, _, err := net.SplitHostPort(addr)
-				if err != nil {
-					host = addr
-				}
-
-				uconn := tls.UClient(conn, &tls.Config{
-					ServerName: host,
-				}, tls.HelloChrome_Auto)
-				err = uconn.Handshake()
-				if err != nil {
-					conn.Close()
-					return nil, err
-				}
-
-				return uconn, nil
-			},
-			MaxIdleConns:        10,
-			IdleConnTimeout:     30 * time.Second,
-			TLSHandshakeTimeout: 10 * time.Second,
-		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 10 {
-				return fmt.Errorf("too many redirects")
-			}
-			return nil
-		},
+		Client:    httpclient.NewDefault().Client,
+		UserAgent: httpclient.DefaultOptions().UserAgent,
+		MaxBytes:  50 * 1024 * 1024, // 50 MB.
+		Retries:   3,
 	}
 }
 

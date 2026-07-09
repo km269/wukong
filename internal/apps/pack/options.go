@@ -52,7 +52,7 @@ func DefaultOptions() Options {
 		AppVersion:    "1.0.0",
 		BaseBinary:    "",
 		IconPath:      "",
-		Compress:      true,
+		Compress:      false,
 		IncludeAssets: true,
 		EmbedFonts:    false,
 	}

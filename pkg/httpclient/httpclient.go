@@ -9,8 +9,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	tls "github.com/refraction-networking/utls"
 )
 
 type Client struct {
@@ -116,31 +114,12 @@ func New(opts Options) *Client {
 	client.Client = &http.Client{
 		Timeout: opts.Timeout,
 		Transport: &http.Transport{
-			DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				conn, err := net.Dial(network, addr)
-				if err != nil {
-					return nil, err
-				}
-
-				host, _, err := net.SplitHostPort(addr)
-				if err != nil {
-					host = addr
-				}
-
-				uconn := tls.UClient(conn, &tls.Config{
-					ServerName: host,
-				}, tls.HelloChrome_Auto)
-				err = uconn.Handshake()
-				if err != nil {
-					conn.Close()
-					return nil, err
-				}
-
-				return uconn, nil
-			},
-			MaxIdleConns:        opts.MaxIdleConns,
-			IdleConnTimeout:     opts.IdleConnTimeout,
+			ForceAttemptHTTP2:   false,
+			DisableKeepAlives:   true,
 			TLSHandshakeTimeout: opts.TLSHandshakeTimeout,
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return net.Dial("tcp4", addr)
+			},
 		},
 	}
 

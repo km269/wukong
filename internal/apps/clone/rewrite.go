@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/km269/wukong/internal/util"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 )
@@ -25,17 +26,18 @@ type RewriteSink func(absURL string, kind URLKind) (localPath string)
 // URL references to local paths using the provided sink callback.
 //
 // Supported elements and attributes:
-//   <a href>, <area href>          → page/asset (based on LikelyPage)
-//   <link href>                    → asset (stylesheet, icon, preload, etc.)
-//   <img src/srcset>               → asset
-//   <source src/srcset>            → asset
-//   <video src/poster>             → asset
-//   <audio src>, <track src>       → asset
-//   <embed src>, <object data>     → asset
-//   <iframe src>, <frame src>      → page/asset
-//   <script src>                   → asset (kept if already local)
-//   <style> text content           → CSS url() rewriting
-//   style="" attribute              → inline CSS url() rewriting
+//
+//	<a href>, <area href>          → page/asset (based on LikelyPage)
+//	<link href>                    → asset (stylesheet, icon, preload, etc.)
+//	<img src/srcset>               → asset
+//	<source src/srcset>            → asset
+//	<video src/poster>             → asset
+//	<audio src>, <track src>       → asset
+//	<embed src>, <object data>     → asset
+//	<iframe src>, <frame src>      → page/asset
+//	<script src>                   → asset (kept if already local)
+//	<style> text content           → CSS url() rewriting
+//	style="" attribute              → inline CSS url() rewriting
 func RewriteHTML(root *html.Node, base *url.URL, sink RewriteSink) {
 	walkAndRewrite(root, base, sink)
 }
@@ -145,6 +147,72 @@ func hasAttr(n *html.Node, key string) bool {
 	return false
 }
 
+// resolveLazyLoad converts lazy-loading attributes to standard src.
+// Many websites use data-src, data-lazy-src, or data-original for lazy loading.
+// After the browser scrolls and loads the image, these attributes contain
+// the actual image URL while src may contain a placeholder.
+func resolveLazyLoad(n *html.Node) {
+	if n.Type != html.ElementNode {
+		return
+	}
+
+	lazyAttrs := []string{"data-src", "data-lazy-src", "data-original", "data-srcset"}
+	foundCount := 0
+
+	for _, attr := range lazyAttrs {
+		val := getAttrCI(n, attr)
+		if val != "" {
+			foundCount++
+			var targetAttr string
+			var targetVal string
+
+			if attr == "data-src" || attr == "data-lazy-src" || attr == "data-original" {
+				targetAttr = "src"
+				targetVal = val
+				setAttrCI(n, "src", val)
+			} else if attr == "data-srcset" {
+				targetAttr = "srcset"
+				targetVal = val
+				setAttrCI(n, "srcset", val)
+			}
+
+			existingVal := getAttrCI(n, targetAttr)
+			util.Logger.Debug("[wukong/clone/lazy] converted",
+				"element", n.Data,
+				"from_attr", attr,
+				"from_val", truncateForLog(val, 100),
+				"to_attr", targetAttr,
+				"to_val", truncateForLog(targetVal, 100),
+				"existing", existingVal)
+		}
+	}
+
+	if foundCount > 0 {
+		util.Logger.Debug("[wukong/clone/lazy] processed",
+			"element", n.Data,
+			"count", foundCount)
+	}
+}
+
+// truncateForLog truncates a string for log output to avoid overly long lines.
+func truncateForLog(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+// setAttrCI sets an attribute value, creating it if it doesn't exist.
+func setAttrCI(n *html.Node, key, val string) {
+	for i, a := range n.Attr {
+		if strings.EqualFold(a.Key, key) {
+			n.Attr[i].Val = val
+			return
+		}
+	}
+	n.Attr = append(n.Attr, html.Attribute{Key: key, Val: val})
+}
+
 // rewriteElement dispatches to the appropriate rewriter based on element tag.
 func rewriteElement(n *html.Node, base *url.URL, sink RewriteSink) {
 	switch n.DataAtom {
@@ -158,9 +226,11 @@ func rewriteElement(n *html.Node, base *url.URL, sink RewriteSink) {
 	case atom.Link:
 		rewriteLink(n, base, sink)
 	case atom.Img:
+		resolveLazyLoad(n)
 		rewriteAttr(n, base, "src", sink, alwaysAsset)
 		rewriteSrcset(n, base, sink)
 	case atom.Source:
+		resolveLazyLoad(n)
 		rewriteAttr(n, base, "src", sink, alwaysAsset)
 		rewriteSrcset(n, base, sink)
 	case atom.Video:
@@ -193,7 +263,7 @@ func rewriteElement(n *html.Node, base *url.URL, sink RewriteSink) {
 // kindDecider returns the URLKind for a given absolute URL.
 type kindDecider func(absURL string) URLKind
 
-func alwaysAsset(absURL string) URLKind  { return KindAsset }
+func alwaysAsset(absURL string) URLKind { return KindAsset }
 func pageOrAssetKind(absURL string) URLKind {
 	if LikelyPage(absURL) {
 		return KindPage

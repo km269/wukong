@@ -22,6 +22,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"strings"
 )
 
 // ---------------------------------------------------------------------------
@@ -65,10 +66,9 @@ const (
 // ---------------------------------------------------------------------------
 
 // CompressionType defines the compression method for clusters.
-// Codes follow the ZIM v6 specification:
+// Codes follow the ZIM v5/v6 specification:
 //
 //	1 = stored (uncompressed)
-//	4 = xz/LZMA2 (not implemented)
 //	5 = zstd
 type CompressionType uint8
 
@@ -77,6 +77,34 @@ const (
 	CompressionNone CompressionType = 1
 	// CompressionZstd stores cluster data compressed with zstd.
 	CompressionZstd CompressionType = 5
+
+	// extendedFlag is bit 4 of the cluster info byte: cluster offsets are uint64.
+	extendedFlag uint8 = 0x10
+)
+
+// ---------------------------------------------------------------------------
+// Sentinels stored in a directory entry's MIME type field to mark non-content
+// entries. A redirect reuses the cluster slot to hold its target's URL index.
+const (
+	redirectEntry   uint16 = 0xffff
+	linkTargetEntry uint16 = 0xfffe
+	deletedEntry    uint16 = 0xfffd
+)
+
+// Namespace constants
+// ---------------------------------------------------------------------------
+
+const (
+	// NamespaceContent is the standard namespace for content (pages and assets).
+	NamespaceContent byte = 'C'
+	// NamespaceMetadata is the standard namespace for metadata entries.
+	NamespaceMetadata byte = 'M'
+	// NamespaceWellKnown is the standard namespace for well-known entries.
+	NamespaceWellKnown byte = 'W'
+	// NamespaceArticle is an alias for NamespaceContent for compatibility.
+	NamespaceArticle byte = 'C'
+	// NamespaceRedirect is an alias for NamespaceWellKnown for compatibility.
+	NamespaceRedirect byte = 'W'
 )
 
 // ---------------------------------------------------------------------------
@@ -128,6 +156,8 @@ type article struct {
 	MimeType    uint16
 	Redirect    uint32
 	Data        []byte
+	Cluster     uint32
+	Blob        uint32
 }
 
 // cluster holds compressed or uncompressed article data.
@@ -191,7 +221,7 @@ func parseHeaderBytes(b []byte, h *Header) error {
 // ---------------------------------------------------------------------------
 
 // parseMimeList splits a null-delimited MIME list into a string slice.
-// The first entry is always empty (MIME index 0).
+// MIME types are stored as null-terminated strings, ending with a double null.
 func parseMimeList(b []byte) []string {
 	var out []string
 	start := 0
@@ -201,6 +231,9 @@ func parseMimeList(b []byte) []string {
 				out = append(out, string(b[start:i]))
 			}
 			start = i + 1
+			if i > 0 && b[i-1] == 0 {
+				break
+			}
 		}
 	}
 	return out
@@ -212,14 +245,19 @@ func key(namespace byte, url string) string {
 }
 
 // findMainPage locates the main page article index or returns noMainPage.
+// Ensures the main page is a content article (not a redirect), as required by Kiwix.
 func findMainPage(articles []article) uint32 {
 	for i, a := range articles {
-		if a.URL == "index" || a.URL == "index.html" || a.URL == "main" {
+		if a.ArticleType == ArticleTypeArticle &&
+			(a.URL == "index" || a.URL == "index.html" || a.URL == "main" ||
+				strings.HasSuffix(a.URL, "/index.html")) {
 			return uint32(i)
 		}
 	}
-	if len(articles) > 0 {
-		return 0
+	for i, a := range articles {
+		if a.ArticleType == ArticleTypeArticle {
+			return uint32(i)
+		}
 	}
 	return noMainPage
 }

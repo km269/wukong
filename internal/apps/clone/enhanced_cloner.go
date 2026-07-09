@@ -243,9 +243,9 @@ func DefaultEnhancedOptions() EnhancedClonerOptions {
 		Workers:             4,
 		AssetWorkers:        8,
 		BrowserPages:        4,
-		Timeout:             60 * time.Second,
-		RenderTimeout:       60 * time.Second,
-		Settle:              1500 * time.Millisecond,
+		Timeout:             120 * time.Second,
+		RenderTimeout:       120 * time.Second,
+		Settle:              5000 * time.Millisecond,
 		Traversal:           TraversalBFS,
 		RespectRobots:       false,
 		EnableResume:        true,
@@ -280,6 +280,7 @@ type EnhancedCloner struct {
 	host       string
 	scheme     string
 	proxyIndex int
+	ctx        context.Context
 
 	// Browser pool for rendering pages.
 	browserPool types.BrowserBackend
@@ -355,6 +356,7 @@ type pageJob struct {
 	url     string
 	depth   int
 	referer string
+	inScope bool
 }
 
 // assetJob represents a pending asset download job.
@@ -401,6 +403,7 @@ func NewEnhancedCloner(opts EnhancedClonerOptions) *EnhancedCloner {
 // Clone performs the website cloning operation.
 func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, error) {
 	startTime := time.Now()
+	ec.ctx = ctx
 
 	// Parse and normalize seed URL.
 	parsedURL, err := url.Parse(seedURL)
@@ -581,7 +584,7 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	// Buffered channels prevent deadlock when workers discover new pages
 	// and try to enqueue them while all workers are busy processing.
 	ec.pageJobs = make(chan pageJob, ec.opts.Workers*8)
-	ec.assetJobs = make(chan assetJob, ec.opts.AssetWorkers*16)
+	ec.assetJobs = make(chan assetJob, ec.opts.AssetWorkers*64)
 
 	// Start traversal dispatcher: feeds pages to workers according to the
 	// selected traversal strategy (FIFO for BFS, LIFO for DFS).
@@ -606,7 +609,7 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	// doesn't contain links to it.
 	if ec.opts.ScopePrefix != "" {
 		seed, _ := url.Parse(seedURL)
-		if seed != nil && !strings.HasPrefix(seed.Path, ec.opts.ScopePrefix) {
+		if seed != nil && !matchesScopePrefix(seed.Path, ec.opts.ScopePrefix) {
 			scopeURL := fmt.Sprintf("%s://%s%s", seed.Scheme, seed.Host, ec.opts.ScopePrefix)
 			ec.enqueuePage(scopeURL, 0)
 		}
@@ -715,7 +718,7 @@ func (ec *EnhancedCloner) pageWorker(ctx context.Context, id int) {
 		default:
 		}
 
-		result := ec.processPage(ctx, job.url, job.depth, job.referer)
+		result := ec.processPage(ctx, job.url, job.depth, job.referer, job.inScope)
 
 		// Update stats.
 		ec.statsMu.Lock()
@@ -756,6 +759,18 @@ func (ec *EnhancedCloner) assetWorker(ctx context.Context, id int) {
 	}
 }
 
+func (ec *EnhancedCloner) enqueueAssetNonBlocking(assetURL string) {
+	ec.wg.Add(1)
+	select {
+	case ec.assetJobs <- assetJob{url: assetURL}:
+	default:
+		go func() {
+			ec.processAsset(ec.ctx, assetURL)
+			ec.wg.Done()
+		}()
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Page processing.
 // ---------------------------------------------------------------------------
@@ -764,7 +779,7 @@ func (ec *EnhancedCloner) assetWorker(ctx context.Context, id int) {
 // Uses a single-pass DOM walk (sink callback) to simultaneously rewrite links
 // and discover new pages/assets — eliminating the separate extract+rewrite
 // two-pass approach.
-func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth int, referer string) PageResult {
+func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth int, referer string, inScope bool) PageResult {
 	result := PageResult{
 		URL:   pageURL,
 		Depth: depth,
@@ -816,21 +831,22 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 
 		// Check if the error indicates anti-bot blocking.
 		if reason, _ := ec.antibot.CheckError(err); reason != antibot.ReasonNone {
-			retry, delay, _, msg := ec.antibot.Escalate(
-				pageURL, reason, 0)
+			retry, delay, _, msg := ec.antibot.Escalate(pageURL, reason, 0)
 			fmt.Fprintf(os.Stderr, "[wukong/antibot] %s\n", msg)
 			ec.applyAntiBotLevel()
 			if retry {
 				select {
 				case <-time.After(delay):
 					// Re-enqueue for retry with escalated level.
-					ec.enqueuePage(pageURL, depth)
+					ec.enqueuePageWithReferer(pageURL, depth, referer, inScope)
 					return result
 				case <-ctx.Done():
 					result.Error = "cancelled during anti-bot backoff"
 					return result
 				}
 			}
+			result.Error = fmt.Sprintf("render: %v", err)
+			return result
 		}
 		result.Error = fmt.Sprintf("render: %v", err)
 		return result
@@ -899,7 +915,7 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 			fmt.Fprintf(os.Stderr, "[wukong/antibot] %s\n", msg)
 			select {
 			case <-time.After(delay):
-				ec.enqueuePage(pageURL, depth)
+				ec.enqueuePageWithReferer(pageURL, depth, referer, inScope)
 				return result
 			case <-ctx.Done():
 				result.Error = "cancelled during anti-bot backoff"
@@ -965,7 +981,7 @@ processContent:
 	// into one traversal, using a sink callback.
 	pageMirrorPath := filepath.ToSlash(filepath.Join("pages", localRelPath))
 	rewrittenHTML := ec.rewriteAndDiscover(cleanHTML, pageURL, pageMirrorPath,
-		depth, &result.LinksFound, &result.AssetsFound)
+		depth, inScope, &result.LinksFound, &result.AssetsFound)
 
 	contentBytes := []byte(rewrittenHTML)
 
@@ -1016,7 +1032,6 @@ processContent:
 func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) error {
 	key := AssetKey(assetURL)
 
-	// Check if already downloaded.
 	ec.assetMu.RLock()
 	if _, exists := ec.downloadedAssets[assetURL]; exists {
 		ec.assetMu.RUnlock()
@@ -1024,9 +1039,10 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 	}
 	ec.assetMu.RUnlock()
 
-	// Download using the standalone asset downloader (with retries).
+	fmt.Fprintf(os.Stderr, "[wukong/clone] downloading asset: %s\n", assetURL)
 	assetResult, err := ec.assetDownloader.Download(ctx, assetURL)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[wukong/clone] asset download failed: %s - %v\n", assetURL, err)
 		// Anti-bot check: was this asset blocked by HTTP status?
 		var de *DownloadError
 		if AsDownloadError(err, &de) && de.StatusCode > 0 {
@@ -1063,48 +1079,41 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 	data := assetResult.Body
 	contentType := assetResult.ContentType
 
-	// Rewrite CSS url() references to local paths and discover new assets.
+	var discoveredAssets []string
 	if assetResult.IsCSS {
-		var discovered []string
-
-		// CSS file's mirror path for relative URL computation.
 		cssMirrorPath := filepath.ToSlash(filepath.Join("assets", localPath))
-
-		// Rewrite URL references using the CSS rewriter with relative paths.
 		data = RewriteCSS(data, assetURL, func(absRef string) string {
 			refKey := AssetKey(absRef)
+			if ec.front.offer(refKey) {
+				discoveredAssets = append(discoveredAssets, absRef)
+			}
 			targetLocalPath := LocalPath(ec.host, absRef, KindAsset)
 			targetMirrorPath := filepath.ToSlash(filepath.Join("assets", targetLocalPath))
-
-			// Enqueue newly discovered assets for download.
-			if ec.front.offer(refKey) {
-				discovered = append(discovered, absRef)
-			}
-
-			// Return relative path from CSS file to the referenced asset.
 			return Rel(cssMirrorPath, targetMirrorPath)
 		})
-
-		// Also extract all references for discovery (even non-rewritten ones).
-		allRefs := ExtractCSSAssetRefs(assetResult.Body, assetURL)
-		for _, refURL := range allRefs {
-			refKey := AssetKey(refURL)
-			if ec.front.offer(refKey) {
-				discovered = append(discovered, refURL)
-			}
-		}
-
-		// Enqueue all discovered CSS assets.
-		for _, discURL := range discovered {
-			ec.wg.Add(1)
-			ec.assetJobs <- assetJob{url: discURL}
-		}
 	}
 
-	// Write to disk.
 	if err := os.WriteFile(fullPath, data, 0644); err != nil {
 		ec.front.markVisited(key)
+		fmt.Fprintf(os.Stderr, "[wukong/clone] asset write failed: %s - %v\n", assetURL, err)
 		return err
+	}
+	fmt.Fprintf(os.Stderr, "[wukong/clone] asset saved: %s -> %s (%d bytes)\n", assetURL, fullPath, len(data))
+
+	if len(discoveredAssets) > 0 {
+		ec.wg.Add(1)
+		go func() {
+			defer ec.wg.Done()
+			for _, discURL := range discoveredAssets {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					ec.enqueueAssetNonBlocking(discURL)
+				}
+			}
+			fmt.Fprintf(os.Stderr, "[wukong/clone] CSS processed: %s, discovered %d assets\n", assetURL, len(discoveredAssets))
+		}()
 	}
 
 	// Register downloaded asset.
@@ -1139,7 +1148,7 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 // This merges the former three-pass approach (extractLinks + extractAssets
 // + rewritePageLinks) into one efficient traversal.
 func (ec *EnhancedCloner) rewriteAndDiscover(htmlStr, pageURL, pageMirrorPath string,
-	depth int, linksFound, assetsFound *int) string {
+	depth int, inScope bool, linksFound, assetsFound *int) string {
 
 	doc, err := html.Parse(strings.NewReader(htmlStr))
 	if err != nil {
@@ -1164,15 +1173,25 @@ func (ec *EnhancedCloner) rewriteAndDiscover(htmlStr, pageURL, pageMirrorPath st
 			// Check if this page is in scope and should be crawled.
 			if shouldCrawl {
 				if u, err := url.Parse(absURL); err == nil {
-					scopeCfg := ScopeConfig{
-						AllowSubdomains: ec.opts.Subdomains,
-						ScopePrefix:     ec.opts.ScopePrefix,
-						ExcludePrefixes: ec.opts.Exclude,
-					}
 					seed, _ := url.Parse(ec.seedURL)
-					if seed != nil && InScope(seed, u, scopeCfg) {
-						// 用当前页面 URL 作为新页面的 referer,模拟用户点击行为.
-						ec.enqueuePageWithReferer(absURL, depth+1, pageURL)
+					if seed != nil && SameSite(seed, u, ec.opts.Subdomains) {
+						linkInScope := false
+						if ec.opts.ScopePrefix != "" {
+							if matchesScopePrefix(u.Path, ec.opts.ScopePrefix) {
+								linkInScope = true
+							} else {
+								basePrefix := ec.opts.ScopePrefix
+								if strings.HasSuffix(basePrefix, "-list") {
+									basePrefix = strings.TrimSuffix(basePrefix, "-list")
+									if matchesScopePrefix(u.Path, basePrefix) {
+										linkInScope = true
+									}
+								}
+							}
+						}
+						if linkInScope {
+							ec.enqueuePageWithReferer(absURL, depth+1, pageURL, true)
+						}
 					}
 				}
 			}
@@ -1181,13 +1200,16 @@ func (ec *EnhancedCloner) rewriteAndDiscover(htmlStr, pageURL, pageMirrorPath st
 
 		case KindAsset:
 			*assetsFound++
-			// Only enqueue assets that the policy allows downloading.
 			if ec.wantAsset(absURL) {
 				key := AssetKey(absURL)
 				if ec.front.offer(key) {
-					ec.wg.Add(1)
-					ec.assetJobs <- assetJob{url: absURL}
+					ec.enqueueAssetNonBlocking(absURL)
+					fmt.Fprintf(os.Stderr, "[wukong/clone] enqueued asset: %s\n", absURL)
+				} else {
+					fmt.Fprintf(os.Stderr, "[wukong/clone] asset already seen: %s\n", absURL)
 				}
+			} else {
+				fmt.Fprintf(os.Stderr, "[wukong/clone] asset rejected by policy: %s\n", absURL)
 			}
 			targetPath = filepath.ToSlash(filepath.Join("assets",
 				LocalPath(ec.host, absURL, KindAsset)))
@@ -1263,12 +1285,20 @@ func (ec *EnhancedCloner) drainStack(ctx context.Context) {
 
 // enqueuePage adds a page URL to the crawl queue.
 func (ec *EnhancedCloner) enqueuePage(pageURL string, depth int) {
-	ec.enqueuePageWithReferer(pageURL, depth, "")
+	inScope := false
+	if ec.opts.ScopePrefix != "" {
+		parsed, _ := url.Parse(pageURL)
+		if parsed != nil && matchesScopePrefix(parsed.Path, ec.opts.ScopePrefix) {
+			inScope = true
+		}
+	}
+	ec.enqueuePageWithReferer(pageURL, depth, "", inScope)
 }
 
 // enqueuePageWithReferer adds a page URL to the crawl queue with a referer
 // URL to simulate user navigation. The seed page should use an empty referer.
-func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, referer string) {
+// inScope indicates whether this page is within the scope-prefix.
+func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, referer string, inScope bool) {
 	// Validate URL.
 	parsed, err := url.Parse(pageURL)
 	if err != nil {
@@ -1280,27 +1310,51 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 		return
 	}
 
-	// Scope check: same host or subdomain.
+	seed, _ := url.Parse(ec.seedURL)
+	isSeedURL := pageURL == ec.seedURL ||
+		(seed != nil && parsed.Path == seed.Path && parsed.Host == seed.Host)
+
+	if isSeedURL {
+		if ec.opts.ScopePrefix != "" && !matchesScopePrefix(parsed.Path, ec.opts.ScopePrefix) {
+			scopeRootURL := fmt.Sprintf("%s://%s%s", parsed.Scheme, parsed.Host, ec.opts.ScopePrefix)
+			fmt.Fprintf(os.Stderr,
+				"[wukong/clone] warning: seed URL %q does not match scope-prefix %q — "+
+					"automatically adding %q as an additional starting point\n",
+				pageURL, ec.opts.ScopePrefix, scopeRootURL)
+			ec.enqueuePageWithReferer(scopeRootURL, 0, "", true)
+		}
+	}
+
+	if ec.opts.ScopePrefix != "" && !inScope {
+		if matchesScopePrefix(parsed.Path, ec.opts.ScopePrefix) {
+			inScope = true
+		}
+		if !inScope {
+			basePrefix := ec.opts.ScopePrefix
+			if strings.HasSuffix(basePrefix, "-list") {
+				basePrefix = strings.TrimSuffix(basePrefix, "-list")
+				if matchesScopePrefix(parsed.Path, basePrefix) {
+					inScope = true
+				}
+			}
+		}
+	}
+
 	scopeCfg := ScopeConfig{
 		AllowSubdomains: ec.opts.Subdomains,
 		ScopePrefix:     ec.opts.ScopePrefix,
 		ExcludePrefixes: ec.opts.Exclude,
 	}
 
-	seed, _ := url.Parse(ec.seedURL)
-	isSeedURL := pageURL == ec.seedURL ||
-		(seed != nil && parsed.Path == seed.Path && parsed.Host == seed.Host)
-
 	if !isSeedURL {
-		if seed != nil && !InScope(seed, parsed, scopeCfg) {
+		if seed != nil && !SameSite(seed, parsed, ec.opts.Subdomains) {
 			return
 		}
-	} else if ec.opts.ScopePrefix != "" && !strings.HasPrefix(parsed.Path, ec.opts.ScopePrefix) {
-		fmt.Fprintf(os.Stderr,
-			"[wukong/clone] warning: seed URL %q does not match scope-prefix %q — "+
-				"automatically adding %q as an additional starting point\n",
-			pageURL, ec.opts.ScopePrefix,
-			fmt.Sprintf("%s://%s%s", parsed.Scheme, parsed.Host, ec.opts.ScopePrefix))
+		if ec.opts.ScopePrefix != "" && !inScope {
+			if seed != nil && !InScope(seed, parsed, scopeCfg) {
+				return
+			}
+		}
 	}
 
 	// Normalize and get key.
@@ -1339,7 +1393,7 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 	// BFS vs DFS: enqueue to channel (FIFO) or push to stack (LIFO).
 	if ec.opts.Traversal == TraversalDFS {
 		ec.pageMu.Lock()
-		ec.pageStack = append(ec.pageStack, pageJob{url: canonURL, depth: depth, referer: referer})
+		ec.pageStack = append(ec.pageStack, pageJob{url: canonURL, depth: depth, referer: referer, inScope: inScope})
 		ec.pageMu.Unlock()
 		// Signal dispatcher that new pages are available.
 		select {
@@ -1347,7 +1401,7 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 		default:
 		}
 	} else {
-		ec.pageJobs <- pageJob{url: canonURL, depth: depth, referer: referer}
+		ec.pageJobs <- pageJob{url: canonURL, depth: depth, referer: referer, inScope: inScope}
 	}
 }
 
