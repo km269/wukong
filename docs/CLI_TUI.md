@@ -91,6 +91,7 @@ internal/cli/                        # CLI 命令包 (30 文件, ~2800 行)
 ┌──────────────────────▼────────────────────────────┐
 │           internal/agent (CoreLoop)                │
 │  模型调用 → 工具执行 → 记忆管理 → 会话持久化        │
+│  → EvolutionTracker (事件插件)                     │
 └────────────────────────────────────────────────────┘
 ```
 
@@ -257,6 +258,30 @@ wukong session [flags]              # 启动 TUI
 | `wukong apps` | apps_mgmt.go | 应用管理 |
 | `wukong eval` | eval.go | 评估测试 |
 
+#### evolution 子命令树
+
+```
+wukong evolution
+  ├── status [--json]               # 显示进化引擎状态（含 export_json 配置）
+  ├── log [--json]                  # 查看 OKF 日志（Markdown 或 JSON 格式）
+  ├── reset                         # 重置进化引擎（清理历史记录）
+  └── history                       # 查看进化历史记录
+```
+
+**evolution status 输出字段：**
+
+| 字段 | 说明 |
+|------|------|
+| `enabled` | 进化引擎是否启用 |
+| `cooldown_period` | 冷却周期（秒） |
+| `max_patches_per_day` | 每日最大补丁数 |
+| `min_confidence` | 最小置信度阈值 |
+| `max_patch_size` | 最大补丁大小（字符） |
+| `export_json` | 是否导出 JSON 日志 |
+| `total_patches_applied` | 已应用补丁总数 |
+| `total_skills_evolved` | 已进化技能数 |
+| `last_evolution_time` | 上次进化时间 |
+
 ---
 
 ## 4. TUI 架构
@@ -418,14 +443,22 @@ Phase 6: 存储引擎           (~200ms)
 ├── todo.NewStore            (任务管理)
 └── knowledge.NewManager     (RAG 知识库)
 
-Phase 7: Agent 组装         (~100ms)
+Phase 7: 进化引擎           (~100ms)
+├── evolution.NewEngine      (技能进化引擎)
+│   ├── EvolutionAnalyzer    (LLM 分析器)
+│   ├── EvolutionPatcher     (补丁应用器)
+│   └── VersionStore         (版本持久化)
+└── evolutionEngine.Start    (启动后台分析 Worker)
+
+Phase 8: Agent 组装         (~100ms)
 ├── agent.NewCoreLoop        (核心代理循环)
 │   ├── 合并所有 ToolSets + FunctionTools
 │   ├── code_discover_tools (JS 代码发现工具)
-│   └── revisionModel (上下文摘要)
+│   ├── revisionModel (上下文摘要)
+│   └── EvolutionTracker (执行轨迹捕获插件)
 └── project.NewManager       (项目追踪)
 
-Phase 8: 协议服务器         (~100ms, goroutine)
+Phase 9: 协议服务器         (~100ms, goroutine)
 ├── summon.NewA2AServer      → :9090
 ├── server.NewAGUIServer     → :8080
 ├── server.NewACPServer      → :9091
@@ -433,6 +466,11 @@ Phase 8: 协议服务器         (~100ms, goroutine)
 │   ├── ard.NewDIDManager    (W3C DID 身份)
 │   ├── summon.NewMetaProtocol (能力协商)
 │   └── summon.NewE2EEMessenger (端到端加密)
+├── Gateway Server           → :9093
+│   ├── gateway.NewServer    (统一消息入口)
+│   ├── gateway.NewDedup     (消息去重)
+│   ├── gateway.NewRateLimiter (限流)
+│   └── gateway.NewSessionStore (会话映射)
 └── sandbox.Probe            (沙箱检测)
 ```
 
@@ -450,6 +488,8 @@ type BootstrapState struct {
     ANPMessenger  *summon.E2EEMessenger // ANP E2EE 消息
     KnowledgeMgr  *knowledge.Manager    // 知识库管理器
     ProjectMgr    *project.Manager      // 项目追踪管理器
+    EvolutionEngine *evolution.Engine   // 进化引擎
+    GatewayServer *gateway.Server       // Gateway 多平台消息服务器
 }
 ```
 
@@ -465,13 +505,15 @@ type BootstrapState struct {
 5. 关闭 ACP MCP Bridge
 6. 关闭 ARD Registry
 7. 关闭 ANP Server
-8. 关闭 Knowledge Manager
-9. loop.Close() 触发内部清理链：
-   ├── 记忆 workers 停止
-   ├── Runner 停止
-   ├── 会话写入刷新
-   ├── Telemetry 关闭
-   └── 数据库连接池关闭
+8. 关闭 Gateway Server
+9. 关闭 Evolution Engine
+10. 关闭 Knowledge Manager
+11. loop.Close() 触发内部清理链：
+    ├── 记忆 workers 停止
+    ├── Runner 停止
+    ├── 会话写入刷新
+    ├── Telemetry 关闭
+    └── 数据库连接池关闭
 ```
 
 ---
@@ -695,8 +737,16 @@ factory.SetACPMCPAddr(acpMCPBridge.ACPMCPAddr())
 
 ### 9.7 协议服务器统一生命周期
 
-所有协议服务器（A2A/AG-UI/ACP/ANP）共享统一的 `BootstrapState` 和关闭流程，确保无论从 TUI 还是 server 模式退出，资源都能正确释放。
+所有协议服务器（A2A/AG-UI/ACP/ANP/Gateway）共享统一的 `BootstrapState` 和关闭流程，确保无论从 TUI 还是 server 模式退出，资源都能正确释放。
+
+### 9.8 EvolutionTracker 事件驱动设计
+
+EvolutionTracker 作为 Runner 级别插件，通过事件监听异步捕获执行轨迹，不侵入主循环，确保主流程性能不受影响。
+
+### 9.9 补丁去重与限制
+
+EvolutionPatcher 采用哈希去重机制防止补丁无限增长，最多保留 5 个补丁 section，同时使用 `sync.Mutex` 确保并发安全。
 
 ---
 
-> **版本**: v0.2.0 | **最后更新**: 2026-07-01 | **文件数**: 30 CLI 文件 + 3 TUI 文件 | **总行数**: ~4500 行
+> **版本**: v0.2.0 | **最后更新**: 2026-07-11 | **文件数**: 30 CLI 文件 + 3 TUI 文件 | **总行数**: ~4500 行

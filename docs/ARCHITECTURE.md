@@ -1,7 +1,7 @@
 # Wukong 系统架构
 
 > Go: 1.26 | 30 内部包 + 2 公共包
-> 配置: 34 结构体 (config.go + types.go + defaults.go + validate.go)
+> 配置: 34 结构体 (config.go + types_*.go x6 + defaults.go + validate.go)
 > CLI: 27 顶层 + 55+ 子命令
 >
 > 基于 tRPC-Agent-Go v1.10.0 · tRPC-MCP-Go v0.0.16 · tRPC-A2A-Go v0.2.5 · CortexDB v2.25.0 · OKF v0.1
@@ -15,7 +15,7 @@
 | **记忆优先** | Agent 智能源于跨会话积累 | 双引擎三层记忆: tRPC Memory + CortexDB Stack |
 | **框架组装** | 任何组件可替换 | CoreLoop 依赖注入, 全部子系统接口隔离 |
 | **多 Agent 原生** | 编排是第一公民 | 10 种编排模式 + HITL + 子Agent委派 |
-| **进化智能** | 技能自我改进 | LLM分析 -> 补丁 -> 版本 -> 热重载 |
+| **进化智能** | 技能自我改进 | LLM分析 → 补丁生成 → 版本管理 → 热重载 |
 | **双向发现** | 发现与被发现 | ARD 联邦搜索 + RegistryServer |
 | **开放互通** | 标准化协议促进 Agent 生态互通 | ANP: DID + 能力协商 + E2EE + HTTP 签名 |
 | **知识标准化** | 知识有标准形状 | OKF v0.1: Markdown + YAML frontmatter |
@@ -34,13 +34,17 @@
 | Core Engine: CoreLoop (agent/)                                        |
 |   WorkflowBuilder(10 modes) · TeamBuilder · ContextManager(3-tier)    |
 |   Security Guard(5-tier) · HITL · TodoEnforcer · PromptTemplate       |
+|   EvolutionTracker (Runner Plugin)                                   |
++----------------------------------------------------------------------+
+| Evolution Engine:                                                     |
+|   Analyzer(LLM分析) · Patcher(补丁应用) · Store(版本管理) · OKF Log    |
 +----------------------------------------------------------------------+
 | ANP Protocol Stack:                                                   |
 |   ard(did+adp+sign) · summon(meta+e2ee+adapter) · ANP HTTP Server     |
 +----------------------------------------------------------------------+
 | OKF Knowledge Layer:                                                  |
 |   okf(Bundle v0.1) · Knowledge(Import/Export) · Skill(OKF兼容)         |
-|   Cortex(Enrichment+Injector) · Evolution(log.md) · ARD(Bundle发现)   |
+|   Cortex(Enrichment+Injector) · Evolution(log.md+log.json) · ARD      |
 +----------------------------------------------------------------------+
 | Gateway System:                                                       |
 |   GatewayServer(9-step pipeline) · Feishu Channel                     |
@@ -57,7 +61,7 @@
 |   Graph: GraphFlow — auto_extract -> RDF -> SPARQL                    |
 +----------------------------------------------------------------------+
 | Capability Layer:                                                     |
-|   Recipe(14) · 12内置扩展 · ARD(双向发现+7工具)                        |
+|   Recipe(14) · 13内置扩展 · ARD(双向发现+7工具)                        |
 |   Evolution · Summon(A2A) · CodeMode(goja) · Knowledge(RAG)            |
 |   Browser(rod) · Apps(8子命令:克隆+打包+预览)                          |
 |   pkg/sandbox · pkg/zim                                                |
@@ -76,7 +80,7 @@
 |------|--------|------|
 | cmd/wukong/ | 1 | 应用入口 |
 | internal/cli/ | 30 | CLI 命令 (Cobra) + TUI |
-| internal/agent/ | 21 | Agent 循环、Recipe、工作流、HITL |
+| internal/agent/ | 21 | Agent 循环、Recipe、工作流、HITL、EvolutionTracker |
 | internal/okf/ | 3 | OKF v0.1 核心 (Bundle 加载/写入/概念解析) |
 | internal/ard/ | 22 | ARD 服务/客户端/注册表/联邦 + ANP DID/ADP/HTTP Sign |
 | internal/summon/ | 9 | 子Agent委派 + A2A + ANP Meta-Protocol/E2EE/Adapter |
@@ -84,9 +88,9 @@
 | internal/apps/ | 31 | 应用管理器: 网站克隆引擎 + 浏览器池 + 多格式打包 + MCP桥接 |
 | internal/browser/ | 10 | 通用浏览器控制 + Stealth + Antibot + Settle |
 | internal/extension/ | 25 | 扩展管理器 + MCP Broker + 13 内置工具集 |
-| internal/config/ | 5 | 配置结构 + Viper 加载 + 验证 (含 ANP/OKF 检查) |
+| internal/config/ | 9 | 配置结构 + Viper 加载 + 验证 (含 ANP/OKF 检查) |
 | internal/cortex/ | 14 | CortexDB 记忆栈 + OKF 注入器/增强器 |
-| internal/evolution/ | 7 | 技能进化 + OKF log.md 变更追踪 |
+| internal/evolution/ | 7 | 技能进化引擎: Analyzer + Patcher + Engine + Store + Types + OKF Log |
 | internal/knowledge/ | 2 | RAG 知识库 + OKF 导入/导出 |
 | internal/skill/ | 2 | 技能管理 + OKF 兼容层 |
 | internal/ (其他) | ~55 | 安全/会话/记忆/回调/健康等 |
@@ -119,8 +123,48 @@ internal/agent/ (21 文件)
 ```
 Phase 1: Prepare — ContextManager + Recall/Cortex + WakeUp + OKF注入 + ReadMemories + KG
 Phase 2: Execute — runner.Run -> LLM -> Tool Calls -> Guard.Check
-Phase 3: Finalize — StoreMessage + IngestTurn + PromoteFacts + auto_extract
+Phase 3: Finalize — StoreMessage + IngestTurn + PromoteFacts + auto_extract + Evolution Record
 Phase 4: Return — contextMgr.AfterRun (token stats)
+```
+
+### 记忆注入流程
+
+```
+用户消息
+    |
+    v
+MemoryFlow.IngestTurn (会话转录)
+    |
+    v
+MemoryFlow.WakeUp (3层上下文构建)
+    |
+    +-- Identity: 角色定义
+    +-- Compact Recall: 最近对话线索
+    +-- Context Pack: 语义召回结果
+    |
+    v
+去重检测 (30字符滑动窗口, 60%重叠阈值)
+    |
+    v
+tRPC Memory.ReadMemories (持久记忆读取)
+    |
+    v
+合并注入到用户消息
+```
+
+### EvolutionTracker 插件
+
+EvolutionTracker 是 Runner 级别插件，通过事件监听捕获技能执行轨迹：
+
+```
+事件流
+    |
+    +-- BeforeAgent: 初始化状态 (evo_start_at, evo_llm_calls, evo_tool_call_count, evo_tool_calls)
+    +-- OnEvent: 处理响应事件
+    |   +-- 统计LLM调用次数
+    |   +-- 统计工具调用次数 (按工具调用数量递增)
+    |   +-- 捕获工具调用详情 (名称、参数) 序列化存储
+    +-- AfterAgent: 记录执行轨迹到进化引擎
 ```
 
 ---
@@ -142,7 +186,144 @@ Phase 4: Return — contextMgr.AfterRun (token stats)
 
 ---
 
-## 6. Gateway 多平台消息通道
+## 6. Evolution 技能进化引擎
+
+internal/evolution/ (7 文件)
+
+### 架构
+
+```
+Evolution Engine
+    |
+    +-- EvolutionTracker (agent/evolution_tracker.go)
+    |   |-- 事件监听捕获执行轨迹
+    |   +-- 记录LLM调用、工具调用、工具详情
+    |
+    +-- EvolutionEngine (engine.go)
+    |   |-- 异步分析通道 (缓冲64)
+    |   |-- 冷却周期检查 (cooldown_period)
+    |   |-- 每日补丁限制 (max_patches_per_day)
+    |   +-- 后台分析Worker
+    |
+    +-- EvolutionAnalyzer (analyzer.go)
+    |   |-- LLM分析执行轨迹
+    |   |-- 生成补丁建议 (PatchSuggestion)
+    |   |-- 置信度过滤 (min_confidence)
+    |   +-- 补丁大小限制 (max_patch_size)
+    |
+    +-- EvolutionPatcher (patcher.go)
+    |   |-- 版本备份 (SKILL.vNNN.md)
+    |   |-- 补丁去重 (哈希匹配)
+    |   |-- 补丁限制 (最多5个section)
+    |   |-- 并发安全 (sync.Mutex)
+    |   |-- OKF日志更新 (log.md + log.json)
+    |   +-- 版本清理 (max_versions_kept)
+    |
+    +-- VersionStore (store.go)
+    |   |-- SQLite持久化
+    |   |-- 版本记录 (skill_versions)
+    |   |-- 进化历史 (evolution_history)
+    |   +-- SmartCleanup
+    |
+    +-- Types (types.go)
+        |-- ExecutionTrace: 执行轨迹记录
+        |-- ToolCallRecord: 工具调用详情
+        |-- PatchSuggestion: 补丁建议
+        |-- EvolutionRecord: 进化记录
+        |-- SkillVersion: 技能版本
+        |-- OKFLogEntry: OKF日志条目
+        +-- OKFLog: OKF日志整体结构
+```
+
+### 执行轨迹捕获
+
+```go
+type ExecutionTrace struct {
+    SkillName     string           // 技能名称
+    SkillFile     string           // SKILL.md路径
+    SessionID     string           // 会话ID
+    UserID        string           // 用户ID
+    StartTime     time.Time        // 开始时间
+    EndTime       time.Time        // 结束时间
+    Duration      time.Duration    // 执行时长
+    ToolCalls     []ToolCallRecord // 工具调用序列
+    LLMCalls      int              // LLM调用次数
+    Error         string           // 终端错误
+    ErrorCount    int              // 错误总数
+    FinalOutput   string           // 最终输出
+    OutputLength  int              // 输出长度
+    Success       bool             // 是否成功
+    QualityScore  float64          // 质量评分 (0.0-1.0)
+}
+```
+
+### 补丁去重机制
+
+```
+补丁哈希计算: patchHash(reason + problem_type)
+    |
+    v
+查找现有补丁 (<!-- EVOLUTION PATCH {hash} -->)
+    |
+    +-- 存在: 替换旧补丁
+    +-- 不存在: 追加新补丁
+    |
+    v
+限制补丁数量 (最多5个section)
+    |
+    v
+清理最旧的补丁
+```
+
+### OKF 日志系统
+
+进化引擎支持两种日志格式：
+
+**Markdown 格式 (log.md)**
+```markdown
+# Change Log
+
+## [v2] 2026-07-11 15:30
+- **Type**: missing_prerequisite
+- **Reason**: Skill forgot to check file existence
+- **Confidence**: 0.85
+```
+
+**JSON 格式 (log.json)** - 通过 `export_json: true` 启用
+```json
+{
+  "skill_name": "code-reviewer",
+  "entries": [
+    {
+      "version": 2,
+      "timestamp": "2026-07-11T15:30:00Z",
+      "type": "missing_prerequisite",
+      "reason": "Skill forgot to check file existence",
+      "confidence": 0.85,
+      "skill_name": "code-reviewer",
+      "patch_hash": "abc12345"
+    }
+  ]
+}
+```
+
+### 并发安全
+
+EvolutionPatcher 使用 `sync.Mutex` 保护关键写入操作：
+
+```
+ApplyPatch()
+    |
+    +-- mu.Lock()
+    |   |-- 写入SKILL.md
+    |   |-- 更新OKF日志
+    |   +-- 记录版本
+    +-- mu.Unlock()
+```
+
+---
+
+## 7. Gateway 多平台消息通道
 
 internal/gateway/ (11 文件) — 统一消息入口, 插件式 Channel 架构
 
@@ -166,7 +347,7 @@ internal/gateway/ (11 文件) — 统一消息入口, 插件式 Channel 架构
 
 1. VerifyRequest — 签名验证
 2. PlatformEvent — URL 验证 (echostr)
-3. ParseMessage — 平台消息 -> 统一格式
+3. ParseMessage — 平台消息 → 统一格式
 4. Dedup — 消息去重 (MessageID + TTL)
 5. BuildUserID — 身份映射
 6. RateLimiter — 滑动窗口限流 + 并发控制
@@ -181,7 +362,7 @@ internal/gateway/ (11 文件) — 统一消息入口, 插件式 Channel 架构
 
 ---
 
-## 7. ANP Agent 互通协议栈
+## 8. ANP Agent 互通协议栈
 
 ### 架构
 
@@ -209,7 +390,7 @@ ANP Protocol Stack
 
 ---
 
-## 8. 记忆系统 (双引擎三层)
+## 9. 记忆系统 (双引擎三层)
 
 | 层级 | 引擎 | 机制 |
 |------|------|------|
@@ -218,9 +399,21 @@ ANP Protocol Stack
 | 长期 | tRPC Memory | AutoExtract + SmartCleanup |
 | 结构化 | GraphFlow | RDF知识图谱 + SPARQL |
 
+### 记忆去重策略
+
+- 30字符滑动窗口
+- 60%重叠阈值
+- 检测精确重复和近似重复
+
+### SmartCleanup 容量管理
+
+- 70% 新鲜度评分 + 30% 长度评分
+- 80% 阈值触发清理
+- 清理到 60% 容量
+
 ---
 
-## 9. OKF 知识格式系统
+## 10. OKF 知识格式系统
 
 ### 架构
 
@@ -245,12 +438,13 @@ EnrichmentAgent -> OKF Bundle (concepts/*.md)
     |
     +-- index.md -> KnowledgeIndexInjector -> MemoryFlow.WakeUp -> Agent 上下文
     +-- log.md -> Evolution 变更追踪
+    +-- log.json -> Evolution JSON导出 (外部系统消费)
     +-- CatalogEntry -> ARD 联邦发现 -> 其他 Agent
 ```
 
 ---
 
-## 10. 安全防御 (5 层)
+## 11. 安全防御 (5 层)
 
 ```
 Layer 5: Guard — auto/smart/manual/chat_only + blocked_commands + Prompt注入
@@ -260,9 +454,18 @@ Layer 2: .wukongignore — gitignore兼容文件黑名单
 Layer 1: OS权限 — 非root + ulimit
 ```
 
+### Guard 权限模式
+
+| 模式 | 行为 |
+|------|------|
+| auto | 自动批准所有工具调用 |
+| smart | 高风险操作需要用户批准 |
+| manual | 所有工具调用需要用户批准 |
+| chat_only | 禁止所有工具调用 |
+
 ---
 
-## 11. LLM Provider (7 种)
+## 12. LLM Provider (7 种)
 
 | Provider | type | SDK | 特点 |
 |----------|------|-----|------|
@@ -276,7 +479,7 @@ Layer 1: OS权限 — 非root + ulimit
 
 ---
 
-## 12. 服务端点 (6 协议)
+## 13. 服务端点 (6 协议)
 
 | 协议 | 端口 | 用途 |
 |------|------|------|
@@ -289,7 +492,7 @@ Layer 1: OS权限 — 非root + ulimit
 
 ---
 
-## 13. CLI 命令体系
+## 14. CLI 命令体系
 
 internal/cli/ (30 文件): 27 顶层命令 + 55+ 子命令
 
@@ -297,19 +500,19 @@ internal/cli/ (30 文件): 27 顶层命令 + 55+ 子命令
 
 ---
 
-## 14. 网站克隆系统
+## 15. 网站克隆系统
 
 internal/apps/clone/ (18 文件) — 完整网站离线镜像引擎, 10 层反爬
 
 ---
 
-## 15. ZIM 打包系统
+## 16. ZIM 打包系统
 
 internal/apps/pack/ (4 文件) + pkg/zim/ (6 文件) — Kiwix 兼容 ZIM v6 打包
 
 ---
 
-## 16. 技术栈
+## 17. 技术栈
 
 | 类别 | 技术 | 版本 |
 |------|------|------|
@@ -325,7 +528,7 @@ internal/apps/pack/ (4 文件) + pkg/zim/ (6 文件) — Kiwix 兼容 ZIM v6 打
 
 ---
 
-## 17. 关键设计决策 (ADRs)
+## 18. 关键设计决策 (ADRs)
 
 | # | 决策 | 理由 |
 |---|------|------|
@@ -349,3 +552,7 @@ internal/apps/pack/ (4 文件) + pkg/zim/ (6 文件) — Kiwix 兼容 ZIM v6 打
 | 18 | 采用 OKF v0.1 作为知识表示标准 | 厂商中立、git 友好、渐进式探索、消费者容错 |
 | 19 | 实现 ANP 协议栈促进 Agent 互通 | DID身份 + 能力协商 + E2EE + HTTP签名 |
 | 20 | Gateway 插件式多平台 Channel 架构 | 统一入口 + 中间件栈 + 独立 Channel 适配器 |
+| 21 | EvolutionTracker 事件驱动 | 不侵入主循环, 异步捕获执行轨迹 |
+| 22 | 补丁去重与限制 | 防止SKILL.md无限增长 |
+| 23 | OKF日志双格式输出 | Markdown人类可读, JSON外部系统消费 |
+| 24 | 进化引擎并发安全 | mutex保护关键写入操作 |

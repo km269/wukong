@@ -32,13 +32,36 @@
 | **网站克隆** | Chrome 渲染 -> Settle 等待 -> DOM 清理 -> 单次遍历重写+发现 -> 资源过滤 -> 去重 -> 断点续抓 -> 多格式打包 |
 | **反反爬** | 10 层: Stealth / Preflight / Antibot 5级升级 / cf_clearance / 161 UA 池 / sec-ch-ua / Referer / ErrNotHTML 路由 / Settle 网络空闲等待 |
 | **ZIM 打包** | Kiwix 兼容 (ZIM v6, zstd 编码 5): 元数据 + 图标 + 计数器 + 增量集群缓存 |
-| **扩展体系** | 12 内置扩展 + MCP Broker + ACP MCP Bridge |
-| **多协议** | 5 端点: A2A (:9090) / ACP (:9091) / AG-UI SSE (:8080) / ACP MCP (:3400) / ANP (:9092) |
-| **消息平台** | 飞书 (Gateway WebSocket 长连接，无需公网回调地址) |
+| **扩展体系** | 13 内置扩展 + MCP Broker + ACP MCP Bridge |
+| **多协议** | 6 端点: A2A (:9090) / ACP (:9091) / AG-UI SSE (:8080) / ACP MCP (:3400) / ANP (:9092) / Gateway (:9093) |
+| **消息平台** | Gateway 多平台通道: 飞书/企微 (插件式 Channel 架构) |
 | **知识格式** | OKF v0.1: 6 包集成 (okf/ard/cortex/evolution/knowledge/skill) |
 | **Agent 互通** | ANP: DID 身份 / 能力协商 / E2EE 加密 / HTTP 签名 |
-| **配置系统** | 34 结构体 · 4级加载优先级 · 配置验证 · env var 展开 (9 类敏感字段) |
+| **配置系统** | 34 结构体 · 7级加载优先级 · 配置验证 · env var 展开 (9 类敏感字段) |
 | **存储** | 单文件 wukong.db (SQLite WAL) |
+
+---
+
+## Evolution 技能进化引擎
+
+Wukong 实现了完整的技能自我进化系统，支持执行轨迹捕获、LLM 分析、自动补丁生成与应用：
+
+| 组件 | 包 | 功能 |
+|------|---|------|
+| **Execution Trace** | internal/evolution/types.go | 执行轨迹记录 (工具调用、LLM 调用、错误、输出) |
+| **EvolutionTracker** | internal/agent/evolution_tracker.go | Runner 事件插件，异步捕获执行轨迹 |
+| **EvolutionEngine** | internal/evolution/engine.go | 异步分析调度 (冷却周期、每日限制) |
+| **EvolutionAnalyzer** | internal/evolution/analyzer.go | LLM 分析执行轨迹，生成补丁建议 |
+| **EvolutionPatcher** | internal/evolution/patcher.go | 补丁应用 (去重、版本备份、并发安全) |
+| **VersionStore** | internal/evolution/store.go | SQLite 版本持久化与历史记录 |
+| **OKF Log** | internal/evolution/patcher.go | Markdown + JSON 双格式变更日志 |
+
+**关键特性**:
+- 事件驱动追踪，不侵入主循环
+- 哈希去重防止补丁无限增长
+- 最多保留 5 个补丁 section
+- 并发安全 (sync.Mutex)
+- JSON 日志导出支持外部系统消费
 
 ---
 
@@ -68,8 +91,24 @@ Wukong 实现了 Google 提出的 OKF v0.1 规范:
 | **Knowledge 互操作** | internal/knowledge/ | RAG 知识库与 OKF Bundle 互操作 |
 | **知识索引注入** | internal/cortex/ | OKF index.md 注入 MemoryFlow 唤醒上下文 |
 | **知识自动化生产** | internal/cortex/ | EnrichmentAgent 从 DDL/目录自动生成 OKF 概念 |
-| **变更追踪** | internal/evolution/ | 通过 log.md 追踪知识文件变更历史 |
+| **变更追踪** | internal/evolution/ | 通过 log.md + log.json 追踪知识文件变更历史 |
 | **联邦发现** | internal/ard/ | OKF Bundle 注册为 ARD CatalogEntry |
+
+---
+
+## Gateway 多平台消息通道
+
+插件式多平台消息网关，统一入口 + 中间件栈：
+
+| 组件 | 包 | 功能 |
+|------|---|------|
+| **GatewayServer** | internal/gateway/server.go | transport-agnostic 消息流水线 (9 步) |
+| **Feishu Channel** | internal/gateway/feishu/ | 飞书消息适配器 (入站传输) |
+| **Dedup** | internal/gateway/dedup.go | 消息去重 (MessageID + TTL) |
+| **RateLimiter** | internal/gateway/rate_limiter.go | 滑动窗口限流 + 并发控制 |
+| **SessionStore** | internal/gateway/session_store.go | 身份/会话映射持久化 |
+
+**消息流水线**: 签名验证 → URL 验证 → 消息解析 → 去重 → 身份映射 → 限流 → 会话存储 → CoreLoop 执行 → 回复推送
 
 ---
 
@@ -97,6 +136,11 @@ wukong apps pack example.com --format zim --compress
 
 # 配置验证
 wukong config validate
+
+# 进化引擎管理
+wukong evolution status
+wukong evolution log --json
+wukong evolution reset
 ```
 
 ---
@@ -132,7 +176,7 @@ wukong config validate
 7. 内置默认值 (internal/config/defaults.go)
 ```
 
-配置代码按职责拆分为 6 个文件:
+配置代码按职责拆分为 9 个文件:
 
 | 文件 | 职责 |
 |------|------|
@@ -175,7 +219,7 @@ env var 展开覆盖 9 类敏感字段: providers API key, A2A remotes, Gateway 
 | 文档 | 说明 |
 |------|------|
 | [架构哲学](docs/README.md) | 七大哲学 · 核心特性 · 数据流 |
-| [系统架构](docs/ARCHITECTURE.md) | 19 章架构 · 20 ADR · 模块依赖 |
+| [系统架构](docs/ARCHITECTURE.md) | 18 章架构 · 24 ADR · 模块依赖 |
 | [配置手册](docs/CONFIG.md) | 34 结构体 · 全字段 · 推荐方案 |
 | [CLI & TUI 架构](docs/CLI_TUI.md) | 命令树 · TUI 架构 · 启动序列 |
 | [Gateway 通道设计](docs/GATEWAY_CHANNEL_DESIGN.md) | 多平台消息通道架构 |
