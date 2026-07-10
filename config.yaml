@@ -62,8 +62,8 @@ providers:
   - name: "lmstudio"
     type: "lmstudio"
     api_key: "lmstudio"
-    base_url: "http://192.168.50.97:1234/v1"
-    model: "google/gemma-4-26b-a4b"
+    base_url: "${LMSTUDIO_BASE_URL:-http://localhost:1234/v1}"
+    model: "${LMSTUDIO_MODEL:-google/gemma-4-26b-a4b}"
 
   - name: "acp-coder"
     type: "acp"
@@ -148,6 +148,7 @@ session:
   ttl: "0h"
   enable_summary: true
   summary_trigger: 50
+  redis_url: "${REDIS_URL:-}"
 
 memory:
   backend: "sqlite"
@@ -155,6 +156,15 @@ memory:
   max_memories: 100
   auto_extract: true
   extract_timeout: "300s"
+  extractor_provider: ""
+  extractor_model: ""
+  extractor_prompt: ""
+
+  recency_weight: 0.4
+  reference_weight: 0.3
+  importance_weight: 0.2
+  length_weight: 0.1
+  dynamic_ttl: true
 
   enable_smart_cleanup: true
   cleanup_trigger_threshold: 0.8
@@ -183,21 +193,24 @@ cortex:
   db_path: "wukong.db"
   max_results: 10
   max_messages_per_session: 200
-  embedding_base_url: "http://192.168.50.97:1234"
-  embedding_api_key: "lmstudio"
-  embedding_model: "qwen3-embedding-0.6b"
+  embedding_base_url: "${EMBEDDING_BASE_URL:-http://localhost:1234}"
+  embedding_api_key: "${EMBEDDING_API_KEY:-lmstudio}"
+  embedding_model: "${EMBEDDING_MODEL:-qwen3-embedding-0.6b}"
 
 memoryflow:
   enabled: true
   db_path: "wukong.db"
   namespace: "assistant"
   embedding_dimensions: 0
+  planner_model: ""
+  extractor_model: ""
 
 graphflow:
   enabled: true
   db_path: "wukong.db"
   max_chars_per_doc: 8000
   auto_extract: true
+  extractor_model: ""
 
 importflow:
   enabled: true
@@ -208,6 +221,8 @@ importflow:
 # ===========================================================================
 revision:
   enabled: true
+  revision_provider: ""
+  revision_model: ""
   enable_llm_summarize: true
   summary_cooldown: "120s"
   summary_timeout: "30s"
@@ -232,6 +247,14 @@ browser:
   timeout: "60s"
   viewport_width: 1280
   viewport_height: 720
+  scroll: false
+  control_url: ""
+  workers: 4
+  profile_dir: ""
+  proxy:
+    enabled: false
+    pool: []
+    rotate_every: 10
   search:
     backends:
       - duckduckgo
@@ -241,11 +264,12 @@ browser:
       enabled: true
       url: "https://api.duckduckgo.com/"
     searxng:
-      enabled: true
-      url: "http://43.167.226.121:8080/"
+      enabled: false
+      url: "${SEARXNG_URL:-http://localhost:8080/}"
+      api_key: "${SEARXNG_API_KEY:-}"
     tavily:
-      enabled: true
-      api_key: "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"
+      enabled: false
+      api_key: "${TAVILY_API_KEY:-}"
     google:
       enabled: false
       api_key: "${GOOGLE_API_KEY}"
@@ -310,6 +334,10 @@ apps:
     antibot_enabled: true
     antibot_auto_escalate: true
     cookie_file: ""
+    browser_backend: "rod"
+    proxy_enabled: false
+    proxy_pool: []
+    proxy_rotate_every: 10
 
   pack:
     compress: true
@@ -452,6 +480,9 @@ workflow:
   cache_enabled: false
   engine: "bsp"
   sub_agents: []
+  team_members: []
+  claude_code_bin: ""
+  codex_bin: ""
 
 # ===========================================================================
 # N. Observability & Evaluation

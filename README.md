@@ -112,7 +112,7 @@ wukong config validate
 | 记忆引擎 | CortexDB | v2.25.0 | HNSW+FTS5+RDF |
 | 知识格式 | OKF (Open Knowledge Format) | v0.1 | 知识标准化 |
 | CLI | Cobra + Viper | v1.9.1 / v1.20.1 | 命令行 |
-| 浏览器 | Chromedp | v0.15.1 | 无头 Chrome |
+| 浏览器 | rod | v0.128.0 | 无头 Chrome |
 | JS 沙箱 | goja | latest | 安全沙箱 |
 | 数据库 | modernc.org/sqlite | v1.38.2 | 纯 Go SQLite |
 

@@ -141,6 +141,76 @@ func (c *WukongConfig) Validate() error {
 		}
 	}
 
+	// Validate session backend.
+	switch c.Session.Backend {
+	case "sqlite", "memory", "redis", "":
+		// Valid. Empty defaults to sqlite.
+	default:
+		return fmt.Errorf(
+			"session.backend %q is invalid; use sqlite, memory, or redis",
+			c.Session.Backend,
+		)
+	}
+
+	// Validate memory backend.
+	switch c.Memory.Backend {
+	case "sqlite", "redis", "":
+		// Valid. Empty defaults to sqlite.
+	default:
+		return fmt.Errorf(
+			"memory.backend %q is invalid; use sqlite or redis",
+			c.Memory.Backend,
+		)
+	}
+
+	// Validate memory cleanup thresholds range.
+	if c.Memory.EnableSmartCleanup {
+		if c.Memory.CleanupTriggerThreshold < 0.0 ||
+			c.Memory.CleanupTriggerThreshold > 1.0 {
+			return fmt.Errorf(
+				"memory.cleanup_trigger_threshold %.2f is out of range [0.0, 1.0]",
+				c.Memory.CleanupTriggerThreshold,
+			)
+		}
+		if c.Memory.CleanupTargetThreshold < 0.0 ||
+			c.Memory.CleanupTargetThreshold > 1.0 {
+			return fmt.Errorf(
+				"memory.cleanup_target_threshold %.2f is out of range [0.0, 1.0]",
+				c.Memory.CleanupTargetThreshold,
+			)
+		}
+		if c.Memory.CleanupTargetThreshold >= c.Memory.CleanupTriggerThreshold {
+			return fmt.Errorf(
+				"memory.cleanup_target_threshold (%.2f) must be less than "+
+					"cleanup_trigger_threshold (%.2f)",
+				c.Memory.CleanupTargetThreshold,
+				c.Memory.CleanupTriggerThreshold,
+			)
+		}
+	}
+
+	// Validate recall search mode.
+	switch c.Recall.SearchMode {
+	case "fts5", "hybrid", "":
+		// Valid. Empty defaults to fts5.
+	default:
+		return fmt.Errorf(
+			"recall.search_mode %q is invalid; use fts5 or hybrid",
+			c.Recall.SearchMode,
+		)
+	}
+
+	// Validate artifact backend.
+	switch c.Artifact.Backend {
+	case "inmemory", "cos", "":
+		// Valid. Empty defaults to inmemory.
+	default:
+		return fmt.Errorf(
+			"artifact.backend %q is invalid; use inmemory or cos",
+			c.Artifact.Backend,
+		)
+	}
+
 	return nil
 }
 

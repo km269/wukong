@@ -59,7 +59,7 @@
 | Capability Layer:                                                     |
 |   Recipe(14) · 12内置扩展 · ARD(双向发现+7工具)                        |
 |   Evolution · Summon(A2A) · CodeMode(goja) · Knowledge(RAG)            |
-|   Browser(Chromedp) · Apps(8子命令:克隆+打包+预览)                     |
+|   Browser(rod) · Apps(8子命令:克隆+打包+预览)                          |
 |   pkg/sandbox · pkg/zim                                                |
 +----------------------------------------------------------------------+
 | Infrastructure: 7 LLM · OpenTelemetry · Langfuse · MultiPool(SQLite)  |
@@ -98,7 +98,12 @@
 | 文件 | 职责 |
 |------|------|
 | config.go | 包文档 · ResolvePath · WukongConfig · Loader · 查询方法 |
-| types.go | 34 个子配置结构体 (含 ANP/Gateway 通道/OKF) |
+| types_agent.go | Agent/Security 配置结构体 |
+| types_provider.go | Provider/Extension/ToolPermission 配置结构体 |
+| types_storage.go | Session/Memory/Todo/Recall 存储配置结构体 |
+| types_cortex.go | CortexDB/MemoryFlow/GraphFlow/ImportFlow 配置结构体 |
+| types_browser.go | Browser/BrowserSearch 配置结构体 (含 BrowserBackendType 类型定义) |
+| types_orchestration.go | ARD/Summon/ANP/Skill/Evolution/Knowledge/OKF/Dify/Workflow 配置结构体 |
 | defaults.go | setDefaults 按子系统拆分为 13 个方法 (含 Gateway/Clone/OKF) |
 | validate.go | Validate() 致命错误检查 + Warnings() 非致命警告 |
 | config_test.go | 9 个单元测试 (加载/默认值/env展开/查询) |
@@ -315,7 +320,7 @@ internal/apps/pack/ (4 文件) + pkg/zim/ (6 文件) — Kiwix 兼容 ZIM v6 打
 | 智能记忆 | CortexDB | v2.25.0 |
 | 知识格式 | OKF (Open Knowledge Format) | v0.1 |
 | CLI | Cobra + Viper | v1.9.1 / v1.20.1 |
-| 浏览器 | Chromedp | v0.15.1 |
+| 浏览器 | rod | v0.128.0 |
 | 数据库 | modernc.org/sqlite | v1.38.2 |
 
 ---

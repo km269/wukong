@@ -52,7 +52,10 @@
 | telemetry.sample_rate 在 [0.0, 1.0] 范围 | 致命 |
 | anp.port 在 [0, 65535] 范围 | 致命 |
 | anp.meta_protocol_enabled 但 port <= 0 | 致命 |
-| browser.backend 为有效值 (chromedp/rod/空) | 致命 |
+| session.backend 为有效值 (sqlite/memory/redis/空) | 致命 |
+| memory.backend 为有效值 (sqlite/redis/空) | 致命 |
+| recall.search_mode 为有效值 (fts5/hybrid/空) | 致命 |
+| artifact.backend 为有效值 (inmemory/cos/空) | 致命 |
 
 `Warnings()` 非致命警告:
 - 无 providers 配置
@@ -148,8 +151,8 @@ providers:
   - name: "lmstudio"
     type: "lmstudio"
     api_key: "lmstudio"
-    base_url: "http://192.168.50.97:1234/v1"
-    model: "google/gemma-4-26b-a4b"
+    base_url: "${LMSTUDIO_BASE_URL:-http://localhost:1234/v1}"
+    model: "${LMSTUDIO_MODEL:-google/gemma-4-26b-a4b}"
   - name: "acp-coder"
     type: "acp"
     agent_url: "http://localhost:4000"
@@ -244,6 +247,7 @@ session:
   ttl: "0h"                          # 0 = 无过期
   enable_summary: true
   summary_trigger: 50
+  redis_url: "${REDIS_URL:-}"
 ```
 
 ### E2. Memory
@@ -255,6 +259,15 @@ memory:
   max_memories: 100
   auto_extract: true
   extract_timeout: "300s"
+  extractor_provider: ""
+  extractor_model: ""
+  extractor_prompt: ""
+
+  recency_weight: 0.4
+  reference_weight: 0.3
+  importance_weight: 0.2
+  length_weight: 0.1
+  dynamic_ttl: true
 
   # Smart cleanup
   enable_smart_cleanup: true
@@ -297,9 +310,9 @@ cortex:
   db_path: "wukong.db"
   max_results: 10
   max_messages_per_session: 200
-  embedding_base_url: "http://192.168.50.97:1234"
-  embedding_api_key: "lmstudio"
-  embedding_model: "qwen3-embedding-0.6b"
+  embedding_base_url: "${EMBEDDING_BASE_URL:-http://localhost:1234}"
+  embedding_api_key: "${EMBEDDING_API_KEY:-lmstudio}"
+  embedding_model: "${EMBEDDING_MODEL:-qwen3-embedding-0.6b}"
 ```
 
 ### F2. MemoryFlow — 转录 + 唤醒
@@ -373,11 +386,12 @@ browser:
       enabled: true
       url: "https://api.duckduckgo.com/"
     searxng:
-      enabled: true
-      url: "http://43.167.226.121:8080/"
+      enabled: false
+      url: "${SEARXNG_URL:-http://localhost:8080/}"
+      api_key: "${SEARXNG_API_KEY:-}"
     tavily:
-      enabled: true
-      api_key: "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"
+      enabled: false
+      api_key: "${TAVILY_API_KEY:-}"
 ```
 
 **浏览器后端说明:**
