@@ -10,7 +10,7 @@ import (
 var (
 	Version   = "0.2.4"
 	GitCommit = "unknown"
-	BuildDate = "2026-07-9"
+	BuildDate = "2026-07-10"
 )
 
 func newVersionCmd() *cobra.Command {
