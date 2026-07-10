@@ -62,7 +62,7 @@ providers:
   - name: "lmstudio"
     type: "lmstudio"
     api_key: "lmstudio"
-    base_url: "${LMSTUDIO_BASE_URL:-http://localhost:1234/v1}"
+    base_url: "${LMSTUDIO_BASE_URL:-http://192.168.50.97:1234/v1}"
     model: "${LMSTUDIO_MODEL:-google/gemma-4-26b-a4b}"
 
   - name: "acp-coder"
@@ -468,6 +468,7 @@ evolution:
   max_versions_kept: 10
   max_patch_size: 8192
   analysis_timeout: "60s"
+  export_json: false
 
 # ===========================================================================
 # M. Agent Orchestration

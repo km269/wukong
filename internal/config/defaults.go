@@ -329,6 +329,7 @@ func (l *Loader) setOrchestrationDefaults() {
 	l.v.SetDefault("evolution.max_versions_kept", 10)
 	l.v.SetDefault("evolution.max_patch_size", 8192)
 	l.v.SetDefault("evolution.analysis_timeout", "60s")
+	l.v.SetDefault("evolution.export_json", false)
 
 	// Knowledge
 	l.v.SetDefault("knowledge.enabled", false)

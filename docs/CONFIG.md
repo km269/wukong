@@ -685,6 +685,7 @@ evolution:
   max_versions_kept: 10
   max_patch_size: 8192
   analysis_timeout: "60s"
+  export_json: false                 # 导出进化日志为JSON格式，便于外部系统消费
 ```
 
 ---

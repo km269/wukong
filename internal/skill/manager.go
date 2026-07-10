@@ -50,6 +50,19 @@ type SkillExecutionTrace struct {
 	FinalOutput  string
 	OutputLength int
 	Success      bool
+	QualityScore float64
+	ToolCalls    []SkillToolCallRecord
+}
+
+// SkillToolCallRecord mirrors evolution.ToolCallRecord.
+type SkillToolCallRecord struct {
+	Name     string
+	Args     string
+	Result   string
+	Error    string
+	Duration time.Duration
+	Sequence int
+	Retried  bool
 }
 
 // Manager manages the lifecycle of agent skills, including
@@ -191,6 +204,18 @@ func (m *Manager) CreateSkillAgent(
 		skillName := name
 		hook := m.evoHook
 		callbacks := agent.NewCallbacks()
+		callbacks.RegisterBeforeAgent(
+			func(aCtx context.Context,
+				args *agent.BeforeAgentArgs,
+			) (*agent.BeforeAgentResult, error) {
+				if args.Invocation != nil {
+					args.Invocation.SetState("start_at", time.Now())
+					args.Invocation.SetState("llm_calls", 0)
+					args.Invocation.SetState("tool_calls", []SkillToolCallRecord{})
+				}
+				return nil, nil
+			},
+		)
 		callbacks.RegisterAfterAgent(
 			func(aCtx context.Context,
 				args *agent.AfterAgentArgs,
@@ -228,10 +253,11 @@ func captureEvolutionTrace(
 		EndTime:   now,
 	}
 
-	// Approximate start time from invocation state if available,
-	// otherwise use EndTime (duration will be 0).
-	if startAt, ok := invocation.GetState("start_at"); ok {
-		if t, ok := startAt.(time.Time); ok {
+	if startAt, ok := invocation.GetState("evo_start_at"); ok {
+		if ts, ok := startAt.(int64); ok {
+			trace.StartTime = time.Unix(0, ts)
+			trace.Duration = now.Sub(trace.StartTime)
+		} else if t, ok := startAt.(time.Time); ok {
 			trace.StartTime = t
 			trace.Duration = now.Sub(t)
 		}
@@ -245,7 +271,6 @@ func captureEvolutionTrace(
 		trace.ErrorCount = 1
 	}
 
-	// Extract final output from invocation state
 	if lastResp, ok := invocation.GetState("last_response"); ok {
 		if s, ok := lastResp.([]byte); ok {
 			trace.FinalOutput = string(s)
@@ -256,17 +281,69 @@ func captureEvolutionTrace(
 		}
 	}
 
+	if llmCalls, ok := invocation.GetState("evo_llm_calls"); ok {
+		if n, ok := llmCalls.(int); ok {
+			trace.LLMCalls = n
+		}
+	}
+
+	if toolCalls, ok := invocation.GetState("evo_tool_calls"); ok {
+		if calls, ok := toolCalls.([]map[string]string); ok {
+			for i, call := range calls {
+				trace.ToolCalls = append(trace.ToolCalls, SkillToolCallRecord{
+					Name:     call["name"],
+					Args:     call["args"],
+					Sequence: i + 1,
+				})
+			}
+		}
+	}
+
 	trace.Success = trace.Error == "" &&
 		trace.OutputLength > 0
 
-	// Log trace capture for debugging
+	trace.QualityScore = calculateQualityScore(trace)
+
 	util.Logger.Debug("evolution: captured skill trace",
 		slog.String("skill", skillName),
 		slog.Bool("success", trace.Success),
 		slog.Int("output_len", trace.OutputLength),
+		slog.Int("llm_calls", trace.LLMCalls),
+		slog.Int("tool_calls", len(trace.ToolCalls)),
+		slog.Float64("quality_score", trace.QualityScore),
 	)
 
 	hook.RecordExecution(trace)
+}
+
+// calculateQualityScore computes a heuristic quality score (0.0-1.0) based on
+// output length, error count, and execution duration.
+func calculateQualityScore(trace *SkillExecutionTrace) float64 {
+	if !trace.Success {
+		return 0.3
+	}
+
+	score := 0.5
+
+	if trace.OutputLength >= 100 {
+		score += 0.2
+	} else if trace.OutputLength >= 20 {
+		score += 0.1
+	}
+
+	if trace.ErrorCount == 0 {
+		score += 0.2
+	}
+
+	if len(trace.ToolCalls) > 0 {
+		score += 0.1
+	}
+
+	if score > 1.0 {
+		score = 1.0
+	}
+
+	return score
 }
 
 // Refresh reloads the skill repository to pick up new or updated

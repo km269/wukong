@@ -74,6 +74,7 @@ type EvolutionConfig struct {
 	MaxVersionsKept  int           `mapstructure:"max_versions_kept"`
 	MaxPatchSize     int           `mapstructure:"max_patch_size"`
 	AnalysisTimeout  time.Duration `mapstructure:"analysis_timeout"`
+	ExportJSON       bool          `mapstructure:"export_json"`
 }
 
 // KnowledgeConfig defines the RAG knowledge retrieval system settings.

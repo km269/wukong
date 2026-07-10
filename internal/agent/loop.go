@@ -263,6 +263,10 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 		)
 	}
 
+	runnerOpts = append(runnerOpts,
+		runner.WithPlugins(newEvolutionTracker()),
+	)
+
 	r := runner.NewRunner("wukong-app", ag, runnerOpts...)
 
 	// Create context manager

@@ -1514,6 +1514,18 @@ func (a *skillEvoAdapter) RecordExecution(
 	if a.engine == nil || trace == nil {
 		return
 	}
+	toolCalls := make([]evolution.ToolCallRecord, 0, len(trace.ToolCalls))
+	for _, tc := range trace.ToolCalls {
+		toolCalls = append(toolCalls, evolution.ToolCallRecord{
+			Name:     tc.Name,
+			Args:     tc.Args,
+			Result:   tc.Result,
+			Error:    tc.Error,
+			Duration: tc.Duration,
+			Sequence: tc.Sequence,
+			Retried:  tc.Retried,
+		})
+	}
 	a.engine.RecordExecution(&evolution.ExecutionTrace{
 		SkillName:    trace.SkillName,
 		SkillFile:    trace.SkillFile,
@@ -1528,6 +1540,8 @@ func (a *skillEvoAdapter) RecordExecution(
 		FinalOutput:  trace.FinalOutput,
 		OutputLength: trace.OutputLength,
 		Success:      trace.Success,
+		QualityScore: trace.QualityScore,
+		ToolCalls:    toolCalls,
 	})
 }
 
