@@ -11,9 +11,23 @@
 #   6. /etc/wukong/config.yaml (non-Windows)
 #   7. Built-in defaults (internal/config/defaults.go)
 #
-# Env var expansion: ${ENV_VAR} supported in api_key, app_secret,
-# encrpy_key, token, encoding_aes_key, jwt_secret, cos_secret_id,
-# cos_secret_key, langfuse_public_key, langfuse_secret_key fields.
+# Env var expansion: ${ENV_VAR} and ${VAR:-default} syntax supported
+# in the following fields:
+#   - providers[].api_key, base_url, model
+#   - summon.a2a_remotes[].api_key, jwt_secret, oauth_client_secret
+#   - gateway.feishu.app_secret, encrypt_key, verification_token
+#   - observability.langfuse_public_key, langfuse_secret_key
+#   - artifact.cos_secret_id, cos_secret_key
+#   - acp_server.api_key
+#   - cortex.embedding_api_key, embedding_base_url, embedding_model
+#   - memoryflow.planner_model, memoryflow.extractor_model
+#   - graphflow.extractor_model
+#   - dify.api_secret
+#   - session.redis_url
+#   - browser.search.searxng.url, searxng.api_key
+#   - browser.search.tavily.api_key
+#   - browser.search.google.api_key, google.cse_id
+#   - browser.search.bing.api_key
 #
 # Path conventions:
 #   - .wukong/      — Runtime data (apps, cache, skills, visuals, okf, evals)

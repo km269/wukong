@@ -83,6 +83,23 @@ func (c *WukongConfig) Validate() error {
 		)
 	}
 
+	// Validate provider types.
+	for _, p := range c.Providers {
+		switch ProviderType(p.Type) {
+		case ProviderOpenAI, ProviderAnthropic, ProviderGoogle,
+			ProviderDeepSeek, ProviderOllama, ProviderLMStudio,
+			ProviderACP, "":
+			// Valid.
+		default:
+			return fmt.Errorf(
+				"providers[%q].type %q is invalid; "+
+					"use openai, anthropic, google, deepseek, "+
+					"ollama, lmstudio, or acp",
+				p.Name, p.Type,
+			)
+		}
+	}
+
 	// Validate browser backend.
 	switch c.Browser.Backend {
 	case BackendChromedp, BackendRod, "":
@@ -92,6 +109,22 @@ func (c *WukongConfig) Validate() error {
 			"browser.backend %q is invalid; "+
 				"use chromedp or rod",
 			c.Browser.Backend,
+		)
+	}
+
+	// Validate workflow mode.
+	switch WorkflowMode(c.Workflow.Mode) {
+	case WorkflowModeSingle, WorkflowModeChain, WorkflowModeParallel,
+		WorkflowModeCycle, WorkflowModeGraph, WorkflowModeTeamCoordinator,
+		WorkflowModeTeamSwarm, WorkflowModeClaudeCode, WorkflowModeCodex,
+		WorkflowModeDify, "":
+		// Valid. Empty defaults to single.
+	default:
+		return fmt.Errorf(
+			"workflow.mode %q is invalid; "+
+				"use single, chain, parallel, cycle, graph, "+
+				"team_coordinator, team_swarm, claude_code, codex, or dify",
+			c.Workflow.Mode,
 		)
 	}
 
@@ -209,6 +242,78 @@ func (c *WukongConfig) Validate() error {
 			"artifact.backend %q is invalid; use inmemory or cos",
 			c.Artifact.Backend,
 		)
+	}
+
+	// Validate todo backend.
+	switch c.Todo.Backend {
+	case "sqlite", "":
+		// Valid. Empty defaults to sqlite.
+	default:
+		return fmt.Errorf(
+			"todo.backend %q is invalid; use sqlite",
+			c.Todo.Backend,
+		)
+	}
+
+	// Validate agent max_llm_calls.
+	if c.Agent.MaxLLMCalls < 0 {
+		return fmt.Errorf(
+			"agent.max_llm_calls must be >= 0, got %d",
+			c.Agent.MaxLLMCalls,
+		)
+	}
+
+	// Validate agent max_tool_iterations.
+	if c.Agent.MaxToolIterations < 0 {
+		return fmt.Errorf(
+			"agent.max_tool_iterations must be >= 0, got %d",
+			c.Agent.MaxToolIterations,
+		)
+	}
+
+	// Validate memory scoring weights sum to ~1.0.
+	if c.Memory.RecencyWeight < 0 || c.Memory.RecencyWeight > 1 ||
+		c.Memory.ReferenceWeight < 0 || c.Memory.ReferenceWeight > 1 ||
+		c.Memory.ImportanceWeight < 0 || c.Memory.ImportanceWeight > 1 ||
+		c.Memory.LengthWeight < 0 || c.Memory.LengthWeight > 1 {
+		return fmt.Errorf(
+			"memory weights must be in [0.0, 1.0]; "+
+				"got recency=%.2f, reference=%.2f, importance=%.2f, length=%.2f",
+			c.Memory.RecencyWeight, c.Memory.ReferenceWeight,
+			c.Memory.ImportanceWeight, c.Memory.LengthWeight,
+		)
+	}
+
+	// Validate memory max_memories.
+	if c.Memory.MaxMemories < 0 {
+		return fmt.Errorf(
+			"memory.max_memories must be >= 0, got %d",
+			c.Memory.MaxMemories,
+		)
+	}
+
+	// Validate revision trim_ratio.
+	if c.Revision.TrimRatio < 0.0 || c.Revision.TrimRatio > 1.0 {
+		return fmt.Errorf(
+			"revision.trim_ratio %.2f is out of range [0.0, 1.0]",
+			c.Revision.TrimRatio,
+		)
+	}
+
+	// Validate apps config (only when enabled).
+	if c.Apps.Enabled {
+		if c.Apps.Clone.Workers < 1 {
+			return fmt.Errorf(
+				"apps.clone.workers must be >= 1, got %d",
+				c.Apps.Clone.Workers,
+			)
+		}
+		if c.Apps.Clone.AssetWorkers < 1 {
+			return fmt.Errorf(
+				"apps.clone.asset_workers must be >= 1, got %d",
+				c.Apps.Clone.AssetWorkers,
+			)
+		}
 	}
 
 	return nil

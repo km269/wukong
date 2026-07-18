@@ -1,7 +1,7 @@
 # Wukong 配置参考
 
 > 配置文件: config.yaml | 加载器: Viper + Cobra
-> 配置结构: A-O 共 15 组 (34 结构体) | 配置代码: 9 文件 (config.go + types_*.go x6 + defaults.go + validate.go)
+> 配置结构: A-O 共 15 组 | 配置代码: 13 文件 (config.go + types_*.go x10 + defaults.go + validate.go)
 
 ---
 
@@ -21,18 +21,25 @@
 
 ## env var 展开
 
-`${ENV_VAR}` 语法, 运行时自动展开。覆盖 9 类敏感字段:
+`${ENV_VAR}` 和 `${VAR:-default}` 语法, 运行时自动展开。覆盖 15 类字段:
 
 | 类别 | 字段 |
 |------|------|
-| Providers | api_key |
-| A2A Remotes | api_key, jwt_secret |
+| Providers | api_key, base_url, model |
+| A2A Remotes | api_key, jwt_secret, oauth_client_secret |
 | Gateway Feishu | app_secret, encrypt_key, verification_token |
-| CortexDB | embedding_api_key |
+| CortexDB | embedding_api_key, embedding_base_url, embedding_model |
+| MemoryFlow | planner_model, extractor_model |
+| GraphFlow | extractor_model |
 | Dify | api_secret |
 | Observability (Langfuse) | public_key, secret_key |
 | Artifact (COS) | cos_secret_id, cos_secret_key |
 | ACP Server | api_key |
+| Session | redis_url |
+| Browser Search (SearXNG) | url, api_key |
+| Browser Search (Tavily) | api_key |
+| Browser Search (Google) | api_key, cse_id |
+| Browser Search (Bing) | api_key |
 
 ---
 
@@ -43,12 +50,22 @@
 | 检查项 | 类型 |
 |--------|------|
 | default_provider 在 providers 列表中存在 | 致命 |
+| providers[].type 为有效 ProviderType (openai/anthropic/google/deepseek/ollama/lmstudio/acp) | 致命 |
 | agent.temperature 在 [0.0, 2.0] 范围内 | 致命 |
 | agent.max_tokens >= 0 | 致命 |
+| agent.max_llm_calls >= 0 | 致命 |
+| agent.max_tool_iterations >= 0 | 致命 |
 | security.permission_mode 为有效值 | 致命 |
 | memory.cleanup_target_threshold < cleanup_trigger_threshold | 致命 |
 | memory.cleanup 阈值在 [0.0, 1.0] 范围 | 致命 |
+| memory.scoring_weights 各权重在 [0.0, 1.0] 范围 | 致命 |
+| memory.extract_timeout 为有效持续时间 | 致命 |
+| todo.backend 为有效值 (sqlite/memory/空) | 致命 |
 | evolution.min_confidence 在 [0.0, 1.0] 范围 | 致命 |
+| apps.clone.workers >= 1 | 致命 |
+| apps.pack.workers >= 1 | 致命 |
+| revision.trim_ratio 在 [0.0, 1.0] 范围 | 致命 |
+| orchestration.workflow.mode 为有效 WorkflowMode (10 种模式) | 致命 |
 | telemetry.sample_rate 在 [0.0, 1.0] 范围 | 致命 |
 | anp.port 在 [0, 65535] 范围 | 致命 |
 | anp.meta_protocol_enabled 但 port <= 0 | 致命 |
@@ -75,18 +92,22 @@
 
 ## 配置代码结构
 
-配置代码按职责拆分为 9 个文件:
+配置代码按职责拆分为 13 个文件:
 
 | 文件 | 职责 |
 |------|------|
 | config.go | 根结构体 WukongConfig + Loader + 查询方法 |
 | types_agent.go | AgentConfig、SecurityConfig 结构体定义 |
-| types_provider.go | ProviderConfig、ExtensionConfig、ToolPermission 结构体定义 |
+| types_provider.go | ProviderConfig、ExtensionConfig、ToolPermission 结构体定义，含 ProviderType 类型常量 |
 | types_storage.go | SessionConfig、MemoryConfig、TodoConfig、RecallConfig 结构体定义 |
-| types_cortex.go | CortexConfig、MemoryFlowConfig、GraphFlowConfig、ImportFlowConfig 结构体定义 |
-| types_browser.go | BrowserConfig、BrowserSearchConfig 结构体定义，含 BrowserBackendType 类型 |
-| types_orchestration.go | ARDConfig、SummonConfig、ANPConfig、SkillConfig、EvolutionConfig、KnowledgeConfig、OKFConfig、DifyConfig、WorkflowConfig、SubAgentConfig、TeamMemberConfig 结构体定义 |
-| defaults.go | 内置默认值 (按子系统分组, 13 个方法) |
+| types_cortex.go | CortexConfig、MemoryFlowConfig、GraphFlowConfig、ImportFlowConfig、RevisionConfig 结构体定义 |
+| types_browser.go | BrowserConfig、ProxyConfig、SearchConfig 及各搜索引擎配置结构体定义，含 BrowserBackendType 类型 |
+| types_features.go | VisualiserConfig、TutorialConfig、TopOfMindConfig、CodeModeConfig 结构体定义 |
+| types_apps.go | AppsConfig、CloneDefaults、PackDefaults 结构体定义 |
+| types_server.go | A2AServerConfig、AGUIConfig、ACPServerConfig、ACPMCPConfig 结构体定义 |
+| types_orchestration.go | ARDConfig、SummonConfig、A2ARemoteConfig、ANPConfig、SkillConfig、EvolutionConfig、KnowledgeConfig、OKFConfig、DifyConfig、WorkflowConfig、SubAgentConfig、TeamMemberConfig 结构体定义，含 WorkflowMode 类型常量 |
+| types_observability.go | TelemetryConfig、ObservabilityConfig、EvalConfig、EvalMetricConfig、ArtifactConfig 结构体定义 |
+| defaults.go | 内置默认值 (按子系统分组, 14 个方法) |
 | validate.go | 配置验证 (致命错误) + Warnings() (非致命警告) |
 
 ---
@@ -96,7 +117,7 @@
 | 组 | 标签 | 内容 |
 |----|------|------|
 | A | Global | log_level, default_provider, lightweight_* |
-| B | Providers | 7 种 LLM Provider 配置 |
+| B | Providers | 7 种 LLM Provider 配置 (openai/anthropic/google/deepseek/ollama/lmstudio/acp) |
 | C | Agent | 核心循环、生成参数、工具重试、规划器、上下文压缩 |
 | D | Security | 工具执行安全、命令阻止、权限模式 |
 | E | Storage | Session / Memory / Todo / Recall (4 子系统) |
@@ -107,7 +128,7 @@
 | J | Service Endpoints | A2A / AG-UI / ACP / ACP MCP / Gateway |
 | K | Agent-to-Agent | Summon / ANP / ARD / Dify |
 | L | Knowledge & Skill | Knowledge / OKF / Skill / Evolution |
-| M | Orchestration | Workflow (10 种模式) |
+| M | Orchestration | Workflow (10 种模式: single/chain/parallel/cycle/graph/team_coordinator/team_swarm/claude_code/codex/dify) |
 | N | Observability | Telemetry / Langfuse / Eval / Artifact |
 | O | Project | project_dir |
 

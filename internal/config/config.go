@@ -30,8 +30,9 @@
 //
 // # Environment Variable Expansion
 //
-// API keys, secrets, URLs, and models support ${ENV_VAR} syntax for runtime expansion
-// via expandSecrets(). Bash-style ${VAR:-default} fallback is also supported.
+// API keys, secrets, URLs, models, and other configurable fields support
+// ${ENV_VAR} syntax for runtime expansion via expandSecrets().
+// Bash-style ${VAR:-default} fallback is also supported.
 // This applies to:
 //   - providers[].api_key, base_url, model
 //   - summon.a2a_remotes[].api_key, jwt_secret, oauth_client_secret
@@ -40,6 +41,8 @@
 //   - artifact.cos_secret_id, cos_secret_key
 //   - acp_server.api_key
 //   - cortex.embedding_api_key, embedding_base_url, embedding_model
+//   - memoryflow.planner_model, extractor_model
+//   - graphflow.extractor_model
 //   - dify.api_secret
 //   - session.redis_url
 //   - browser.search.searxng.url, api_key

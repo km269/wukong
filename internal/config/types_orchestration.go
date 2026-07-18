@@ -112,6 +112,22 @@ type DifyConfig struct {
 	Timeout         time.Duration `mapstructure:"timeout"`
 }
 
+// WorkflowMode defines the agent orchestration mode.
+type WorkflowMode string
+
+const (
+	WorkflowModeSingle         WorkflowMode = "single"
+	WorkflowModeChain          WorkflowMode = "chain"
+	WorkflowModeParallel       WorkflowMode = "parallel"
+	WorkflowModeCycle          WorkflowMode = "cycle"
+	WorkflowModeGraph          WorkflowMode = "graph"
+	WorkflowModeTeamCoordinator WorkflowMode = "team_coordinator"
+	WorkflowModeTeamSwarm      WorkflowMode = "team_swarm"
+	WorkflowModeClaudeCode     WorkflowMode = "claude_code"
+	WorkflowModeCodex          WorkflowMode = "codex"
+	WorkflowModeDify           WorkflowMode = "dify"
+)
+
 // WorkflowConfig defines multi-mode agent orchestration settings.
 type WorkflowConfig struct {
 	Mode          string             `mapstructure:"mode"`

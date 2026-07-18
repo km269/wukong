@@ -288,27 +288,59 @@ wukong.db
 
 ## 5. 配置体系
 
-### 加载优先级 (4级)
+### 加载优先级 (7级)
 
 ```
-1. CLI 参数
-2. 环境变量 (WUKONG_ 前缀)
-3. YAML 配置文件
-4. 内置默认值
+1. CLI 参数 (--provider, --model, --temperature, --max-tokens, --config)
+2. 环境变量 (WUKONG_ 前缀, e.g. WUKONG_DEFAULT_PROVIDER)
+3. --config CLI 指定文件
+4. ./config.yaml (当前目录)
+5. ~/.config/wukong/config.yaml
+6. /etc/wukong/config.yaml (非 Windows)
+7. 内置默认值 (internal/config/defaults.go)
 ```
 
 ### 配置代码组织
 
+配置代码按职责拆分为 10 个文件：
+
 | 文件 | 职责 |
 |------|------|
-| config.go | 根结构体 + Loader + 查询方法 |
-| types.go | 34 个子配置结构体定义 |
-| defaults.go | 内置默认值 (按子系统分组, 13 个方法) |
-| validate.go | 配置验证 + 非致命警告 (含 ANP/OKF 检查) |
+| config.go | 根结构体 WukongConfig + Loader + 查询方法 |
+| types_agent.go | AgentConfig、SecurityConfig 结构体定义 |
+| types_provider.go | ProviderConfig、ExtensionConfig、ToolPermission 结构体定义，含 ProviderType 类型 |
+| types_storage.go | SessionConfig、MemoryConfig、TodoConfig、RecallConfig 结构体定义 |
+| types_cortex.go | CortexConfig、MemoryFlowConfig、GraphFlowConfig、ImportFlowConfig、RevisionConfig 结构体定义 |
+| types_browser.go | BrowserConfig、ProxyConfig、SearchConfig 及各搜索引擎配置结构体定义，含 BrowserBackendType 类型 |
+| types_features.go | VisualiserConfig、TutorialConfig、TopOfMindConfig、CodeModeConfig 结构体定义 |
+| types_apps.go | AppsConfig、CloneDefaults、PackDefaults 结构体定义 |
+| types_server.go | A2AServerConfig、AGUIConfig、ACPServerConfig、ACPMCPConfig 结构体定义 |
+| types_orchestration.go | ARDConfig、SummonConfig、A2ARemoteConfig、ANPConfig、SkillConfig、EvolutionConfig、KnowledgeConfig、OKFConfig、DifyConfig、WorkflowConfig、SubAgentConfig、TeamMemberConfig 结构体定义，含 WorkflowMode 类型 |
+| types_observability.go | TelemetryConfig、ObservabilityConfig、EvalConfig、EvalMetricConfig、ArtifactConfig 结构体定义 |
+| defaults.go | 内置默认值 (按子系统分组, 14 个方法) |
+| validate.go | 配置验证 (致命错误) + Warnings() (非致命警告) |
 
 ### env var 展开覆盖
 
-providers api_key, A2A remotes, Gateway channels (app_secret/encrypt_key/token/encoding_aes_key), observability, artifact COS, ACPServer, CortexDB, Dify。
+支持 `${ENV_VAR}` 和 `${VAR:-default}` 语法，覆盖 15 类字段：
+
+| 类别 | 字段 |
+|------|------|
+| Providers | api_key, base_url, model |
+| A2A Remotes | api_key, jwt_secret, oauth_client_secret |
+| Gateway Feishu | app_secret, encrypt_key, verification_token |
+| CortexDB | embedding_api_key, embedding_base_url, embedding_model |
+| MemoryFlow | planner_model, extractor_model |
+| GraphFlow | extractor_model |
+| Dify | api_secret |
+| Observability (Langfuse) | public_key, secret_key |
+| Artifact (COS) | cos_secret_id, cos_secret_key |
+| ACP Server | api_key |
+| Session | redis_url |
+| Browser Search (SearXNG) | url, api_key |
+| Browser Search (Tavily) | api_key |
+| Browser Search (Google) | api_key, cse_id |
+| Browser Search (Bing) | api_key |
 
 ---
 
@@ -316,8 +348,8 @@ providers api_key, A2A remotes, Gateway channels (app_secret/encrypt_key/token/e
 
 | 文档 | 说明 |
 |------|------|
-| [系统架构](ARCHITECTURE.md) | 19 章架构、20 ADR、模块依赖、数据流 |
-| [配置手册](CONFIG.md) | 34 结构体、全字段、推荐方案 |
-| [CLI & TUI 架构](CLI_TUI.md) | 命令树、TUI Elm 架构、8阶段启动 |
-| [Gateway 通道设计](GATEWAY_CHANNEL_DESIGN.md) | 多平台消息通道架构 |
-| [Gateway 部署](GATEWAY_DEPLOY.md) | 飞书/企微接入、Nginx、Docker、监控 |
+| [系统架构](ARCHITECTURE.md) | 系统全景、模块依赖、核心数据流、关键设计决策 |
+| [配置手册](CONFIG.md) | 全配置项说明、推荐配置、结构体索引 |
+| [CLI & TUI 架构](CLI_TUI.md) | 命令树、TUI Elm 架构、启动序列 |
+| [Gateway 网关](GATEWAY.md) | 多平台消息通道架构 |
+| [许可证](../LICENSE) | 项目许可证 |

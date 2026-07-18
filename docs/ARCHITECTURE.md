@@ -1,8 +1,6 @@
 # Wukong 系统架构
 
-> Go: 1.26 | 30 内部包 + 2 公共包
-> 配置: 34 结构体 (config.go + types_*.go x6 + defaults.go + validate.go)
-> CLI: 27 顶层 + 55+ 子命令
+> Go: 1.26 | 配置: 15 组 (config.go + types_*.go x10 + defaults.go + validate.go)
 >
 > 基于 tRPC-Agent-Go v1.10.0 · tRPC-MCP-Go v0.0.16 · tRPC-A2A-Go v0.2.5 · CortexDB v2.25.0 · OKF v0.1
 

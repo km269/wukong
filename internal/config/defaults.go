@@ -116,7 +116,7 @@ func (l *Loader) setStorageDefaults() {
 	l.v.SetDefault("memory.db_path", "wukong.db")
 	l.v.SetDefault("memory.max_memories", 100)
 	l.v.SetDefault("memory.auto_extract", true)
-	l.v.SetDefault("memory.extract_timeout", "60s")
+	l.v.SetDefault("memory.extract_timeout", "300s")
 
 	// Memory scoring weights
 	l.v.SetDefault("memory.recency_weight", 0.4)

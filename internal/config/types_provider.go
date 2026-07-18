@@ -6,6 +6,19 @@ import "time"
 // Provider & Extension Configuration
 // ============================================================================
 
+// ProviderType defines the type of LLM provider.
+type ProviderType string
+
+const (
+	ProviderOpenAI    ProviderType = "openai"
+	ProviderAnthropic ProviderType = "anthropic"
+	ProviderGoogle    ProviderType = "google"
+	ProviderDeepSeek  ProviderType = "deepseek"
+	ProviderOllama    ProviderType = "ollama"
+	ProviderLMStudio  ProviderType = "lmstudio"
+	ProviderACP       ProviderType = "acp"
+)
+
 // ProviderConfig defines a connection to an LLM backend.
 // Supported types: openai, anthropic, google, deepseek, ollama, lmstudio, acp.
 // API keys support ${ENV_VAR} expansion for secrets management.
