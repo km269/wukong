@@ -27,7 +27,7 @@
 log_level: "info"                    # debug | info | warn | error
 default_provider: "lmstudio"         # must match a name in providers[]
 lightweight_provider: "lmstudio"     # background tasks (empty = default_provider)
-lightweight_model: "gemma-4-e2b-it"  # background lightweight model
+lightweight_model: "google/gemma-4-26b-a4b"  # background lightweight model
 
 # ===========================================================================
 # B. Providers — LLM backends
@@ -62,7 +62,7 @@ providers:
   - name: "lmstudio"
     type: "lmstudio"
     api_key: "lmstudio"
-    base_url: "${LMSTUDIO_BASE_URL:-http://192.168.50.97:1234/v1}"
+    base_url: "${LMSTUDIO_BASE_URL:-http://localhost:1234/v1}"
     model: "${LMSTUDIO_MODEL:-google/gemma-4-26b-a4b}"
 
   - name: "acp-coder"
@@ -193,7 +193,7 @@ cortex:
   db_path: "wukong.db"
   max_results: 10
   max_messages_per_session: 200
-  embedding_base_url: "${EMBEDDING_BASE_URL:-http://localhost:1234}"
+  embedding_base_url: "${EMBEDDING_BASE_URL:-http://192.168.50.97:1234}"
   embedding_api_key: "${EMBEDDING_API_KEY:-lmstudio}"
   embedding_model: "${EMBEDDING_MODEL:-qwen3-embedding-0.6b}"
 
@@ -202,15 +202,15 @@ memoryflow:
   db_path: "wukong.db"
   namespace: "assistant"
   embedding_dimensions: 0
-  planner_model: ""
-  extractor_model: ""
+  planner_model: "${LMSTUDIO_MODEL:-google/gemma-4-26b-a4b}"
+  extractor_model: "${LMSTUDIO_MODEL:-google/gemma-4-26b-a4b}"
 
 graphflow:
   enabled: true
   db_path: "wukong.db"
   max_chars_per_doc: 8000
   auto_extract: true
-  extractor_model: ""
+  extractor_model: "${LMSTUDIO_MODEL:-google/gemma-4-26b-a4b}"
 
 importflow:
   enabled: true
@@ -264,8 +264,8 @@ browser:
       enabled: true
       url: "https://api.duckduckgo.com/"
     searxng:
-      enabled: false
-      url: "${SEARXNG_URL:-http://localhost:8080/}"
+      enabled: true
+      url: "${SEARXNG_URL:-http://43.167.226.121:8080/}"
       api_key: "${SEARXNG_API_KEY:-}"
     tavily:
       enabled: false

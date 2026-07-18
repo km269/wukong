@@ -29,9 +29,9 @@ type ChatMessage struct {
 
 // SearchResult represents a recall search result.
 type SearchResult struct {
-	Message     ChatMessage `json:"message"`
-	Score       float64     `json:"score"`
-	Preview     string      `json:"preview"`
+	Message ChatMessage `json:"message"`
+	Score   float64     `json:"score"`
+	Preview string      `json:"preview"`
 }
 
 // Embedder defines the interface for generating text embeddings.
@@ -126,6 +126,7 @@ func (s *Store) StoreMessage(msg ChatMessage) error {
 
 // Search searches across all stored messages using FTS5 full-text search.
 // Falls back to LIKE search if FTS5 is not available.
+// When userID is non-empty, results are filtered to that user only.
 func (s *Store) Search(
 	query, userID string, limit int,
 ) ([]SearchResult, error) {
@@ -138,17 +139,35 @@ func (s *Store) Search(
 
 	// Use FTS5 full-text search for better relevance and performance.
 	// The FTS5 BM25 ranking provides much better scoring than naive LIKE.
-	rows, err := s.db.Query(
-		`SELECT cr.id, cr.session_id, cr.user_id, cr.role,
-		        cr.content, cr.created_at,
-		        fts.rank AS score
-		 FROM chat_recall_fts fts
-		 JOIN chat_recall cr ON cr.id = fts.rowid
-		 WHERE chat_recall_fts MATCH ?
-		 ORDER BY fts.rank
-		 LIMIT ?`,
-		ftsQuery(query), limit,
+	var (
+		rows *sql.Rows
+		err  error
 	)
+	if userID != "" {
+		rows, err = s.db.Query(
+			`SELECT cr.id, cr.session_id, cr.user_id, cr.role,
+			        cr.content, cr.created_at,
+			        fts.rank AS score
+			 FROM chat_recall_fts fts
+			 JOIN chat_recall cr ON cr.id = fts.rowid
+			 WHERE chat_recall_fts MATCH ? AND cr.user_id = ?
+			 ORDER BY fts.rank
+			 LIMIT ?`,
+			ftsQuery(query), userID, limit,
+		)
+	} else {
+		rows, err = s.db.Query(
+			`SELECT cr.id, cr.session_id, cr.user_id, cr.role,
+			        cr.content, cr.created_at,
+			        fts.rank AS score
+			 FROM chat_recall_fts fts
+			 JOIN chat_recall cr ON cr.id = fts.rowid
+			 WHERE chat_recall_fts MATCH ?
+			 ORDER BY fts.rank
+			 LIMIT ?`,
+			ftsQuery(query), limit,
+		)
+	}
 	if err != nil {
 		// If FTS5 fails (e.g., table not found), fall back to LIKE
 		return s.searchLike(query, userID, limit)

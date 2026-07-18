@@ -77,9 +77,12 @@ func (s *CortexStore) StoreMessage(msg recall.ChatMessage) error {
 	}
 
 	// Store in lexical table as authoritative source.
-	if err := s.lexical.storeMessage(msg); err != nil {
+	// Get the auto-incremented ID for vector cache key.
+	msgID, err := s.lexical.storeMessage(msg)
+	if err != nil {
 		return err
 	}
+	msg.ID = msgID
 
 	if s.db != nil && s.embedder != nil {
 		return s.storeCortexVector(msg)

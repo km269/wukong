@@ -4,12 +4,13 @@ package sandbox
 
 import (
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/km269/wukong/internal/util"
 )
 
 // macOS backend uses the built-in sandbox-exec(1) command.
@@ -81,7 +82,7 @@ func applySandbox(cmd *exec.Cmd, ctx *sandboxCtx) error {
 			abs = resolved
 		} else {
 			// Log but continue — the unresolved path may still work.
-			slog.Debug("sandbox: symlink resolution failed, using raw path",
+			util.Logger.Debug("sandbox: symlink resolution failed, using raw path",
 				"path", abs, "error", err.Error())
 		}
 		fmt.Fprintf(allowWrites, "(allow file-write* (subpath %q))\n", abs)

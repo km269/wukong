@@ -23,8 +23,8 @@ providers:
   - name: "lmstudio"
     type: "lmstudio"
     api_key: "lmstudio"
-    base_url: "http://localhost:1234/v1"
-    model: "google/gemma-4-26b-a4b"
+    base_url: "${LMSTUDIO_BASE_URL:-http://192.168.50.97:1234/v1}"
+    model: "${LMSTUDIO_MODEL:-google/gemma-4-26b-a4b}"
 
 agent:
   max_llm_calls: 50

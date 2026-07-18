@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/util"
 
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/duckduckgo"
@@ -56,15 +57,21 @@ func NewWebToolSet(cfg *config.WukongConfig) *WebToolSet {
 		switch backend {
 		case "duckduckgo", "searxng", "tavily", "google", "bing":
 			validBackends = append(validBackends, backend)
-			fmt.Printf("[wukong/web] enabled search backend: %s\n", backend)
+			if util.DebugEnabled {
+				fmt.Printf("[wukong/web] enabled search backend: %s\n", backend)
+			}
 		default:
-			fmt.Printf("[wukong/web] warning: unknown search backend %q, skipping\n", backend)
+			if util.DebugEnabled {
+				fmt.Printf("[wukong/web] warning: unknown search backend %q, skipping\n", backend)
+			}
 		}
 	}
 
 	if len(validBackends) == 0 {
 		validBackends = append(validBackends, "duckduckgo")
-		fmt.Println("[wukong/web] no valid backends configured, using default: duckduckgo")
+		if util.DebugEnabled {
+			fmt.Println("[wukong/web] no valid backends configured, using default: duckduckgo")
+		}
 	}
 
 	if len(validBackends) == 1 {
@@ -73,21 +80,27 @@ func NewWebToolSet(cfg *config.WukongConfig) *WebToolSet {
 			ts.tools = append(ts.tools, NewSearXNGTool(searxngURL, searxngAPIKey))
 		case "tavily":
 			if tavilyAPIKey == "" {
-				fmt.Println("[wukong/web] warning: tavily backend enabled but no API key configured, falling back to duckduckgo")
+				if util.DebugEnabled {
+					fmt.Println("[wukong/web] warning: tavily backend enabled but no API key configured, falling back to duckduckgo")
+				}
 				ts.tools = append(ts.tools, duckduckgo.NewTool())
 			} else {
 				ts.tools = append(ts.tools, NewTavilyTool(tavilyAPIKey))
 			}
 		case "google":
 			if googleAPIKey == "" || googleCSEID == "" {
-				fmt.Println("[wukong/web] warning: google backend enabled but API key or CSE ID not configured, falling back to duckduckgo")
+				if util.DebugEnabled {
+					fmt.Println("[wukong/web] warning: google backend enabled but API key or CSE ID not configured, falling back to duckduckgo")
+				}
 				ts.tools = append(ts.tools, duckduckgo.NewTool())
 			} else {
 				ts.tools = append(ts.tools, NewGoogleTool(googleAPIKey, googleCSEID))
 			}
 		case "bing":
 			if bingAPIKey == "" {
-				fmt.Println("[wukong/web] warning: bing backend enabled but API key not configured, falling back to duckduckgo")
+				if util.DebugEnabled {
+					fmt.Println("[wukong/web] warning: bing backend enabled but API key not configured, falling back to duckduckgo")
+				}
 				ts.tools = append(ts.tools, duckduckgo.NewTool())
 			} else {
 				ts.tools = append(ts.tools, NewBingTool(bingAPIKey))
@@ -97,7 +110,9 @@ func NewWebToolSet(cfg *config.WukongConfig) *WebToolSet {
 			ts.tools = append(ts.tools, duckduckgo.NewTool())
 		}
 	} else {
-		fmt.Printf("[wukong/web] aggregating %d search backends\n", len(validBackends))
+		if util.DebugEnabled {
+			fmt.Printf("[wukong/web] aggregating %d search backends\n", len(validBackends))
+		}
 		ts.tools = append(ts.tools, NewAggregateSearchTool(validBackends, searxngURL, searxngAPIKey, tavilyAPIKey, googleAPIKey, googleCSEID, bingAPIKey))
 	}
 

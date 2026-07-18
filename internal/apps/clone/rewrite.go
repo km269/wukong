@@ -227,25 +227,25 @@ func rewriteElement(n *html.Node, base *url.URL, sink RewriteSink) {
 		rewriteLink(n, base, sink)
 	case atom.Img:
 		resolveLazyLoad(n)
-		rewriteAttr(n, base, "src", sink, alwaysAsset)
+		rewriteAttr(n, base, "src", sink, alwaysImage)
 		rewriteSrcset(n, base, sink)
 	case atom.Source:
 		resolveLazyLoad(n)
-		rewriteAttr(n, base, "src", sink, alwaysAsset)
+		rewriteAttr(n, base, "src", sink, alwaysImage)
 		rewriteSrcset(n, base, sink)
 	case atom.Video:
-		rewriteAttr(n, base, "src", sink, alwaysAsset)
-		rewriteAttr(n, base, "poster", sink, alwaysAsset)
+		rewriteAttr(n, base, "src", sink, alwaysMedia)
+		rewriteAttr(n, base, "poster", sink, alwaysImage)
 	case atom.Audio:
-		rewriteAttr(n, base, "src", sink, alwaysAsset)
+		rewriteAttr(n, base, "src", sink, alwaysMedia)
 	case atom.Track:
-		rewriteAttr(n, base, "src", sink, alwaysAsset)
+		rewriteAttr(n, base, "src", sink, alwaysMedia)
 	case atom.Embed:
 		rewriteAttr(n, base, "src", sink, alwaysAsset)
 	case atom.Object:
 		rewriteAttr(n, base, "data", sink, alwaysAsset)
 	case atom.Script:
-		rewriteAttr(n, base, "src", sink, alwaysAsset)
+		rewriteAttr(n, base, "src", sink, alwaysJS)
 
 	// CSS rewriting.
 	case atom.Style:
@@ -264,6 +264,11 @@ func rewriteElement(n *html.Node, base *url.URL, sink RewriteSink) {
 type kindDecider func(absURL string) URLKind
 
 func alwaysAsset(absURL string) URLKind { return KindAsset }
+func alwaysImage(absURL string) URLKind { return KindImage }
+func alwaysCSS(absURL string) URLKind   { return KindCSS }
+func alwaysFont(absURL string) URLKind  { return KindFont }
+func alwaysJS(absURL string) URLKind    { return KindJS }
+func alwaysMedia(absURL string) URLKind { return KindMedia }
 func pageOrAssetKind(absURL string) URLKind {
 	if LikelyPage(absURL) {
 		return KindPage
@@ -293,6 +298,12 @@ func rewriteAttr(n *html.Node, base *url.URL, attrName string, sink RewriteSink,
 		absURL, err := Normalize(base.String(), val)
 		if err != nil || absURL == "" {
 			return
+		}
+
+		// Preserve the fragment from the original URL for scope matching.
+		// Normalize strips fragments, but we need them for anchor-based scope rules.
+		if parsedRef, pErr := url.Parse(val); pErr == nil && parsedRef.Fragment != "" {
+			absURL += "#" + parsedRef.Fragment
 		}
 
 		kind := decide(absURL)
@@ -340,7 +351,7 @@ func rewriteSrcset(n *html.Node, base *url.URL, sink RewriteSink) {
 				continue
 			}
 
-			localPath := sink(absURL, KindAsset)
+			localPath := sink(absURL, KindImage)
 			if localPath == "" {
 				rewritten = append(rewritten, part)
 				continue
@@ -381,18 +392,57 @@ func rewriteLink(n *html.Node, base *url.URL, sink RewriteSink) {
 	}
 
 	tokens := strings.Fields(strings.ToLower(rel))
-	isAsset := false
+
+	// Determine the most specific asset kind from the rel tokens.
+	kind := KindAsset
+	hasStylesheet := false
+	hasIcon := false
+	hasPreload := false
+	hasAsset := false
+
 	for _, t := range tokens {
+		switch t {
+		case "stylesheet":
+			hasStylesheet = true
+		case "icon", "shortcut icon", "apple-touch-icon", "apple-touch-icon-precomposed", "mask-icon":
+			hasIcon = true
+		case "preload", "prefetch":
+			hasPreload = true
+		}
 		if assetRels[t] {
-			isAsset = true
-			break
+			hasAsset = true
 		}
 	}
-	if !isAsset {
+
+	if !hasAsset {
 		return
 	}
 
-	rewriteAttr(n, base, "href", sink, alwaysAsset)
+	// Pick the most specific kind.
+	if hasStylesheet {
+		kind = KindCSS
+	} else if hasIcon {
+		kind = KindImage
+	} else if hasPreload {
+		// For preload/prefetch, try to guess from the "as" attribute.
+		if asAttr := getAttrCI(n, "as"); asAttr != "" {
+			switch strings.ToLower(asAttr) {
+			case "style":
+				kind = KindCSS
+			case "image":
+				kind = KindImage
+			case "font":
+				kind = KindFont
+			case "script":
+				kind = KindJS
+			case "audio", "video":
+				kind = KindMedia
+			}
+		}
+	}
+
+	decider := func(absURL string) URLKind { return kind }
+	rewriteAttr(n, base, "href", sink, decider)
 }
 
 // ---------------------------------------------------------------------------
@@ -411,7 +461,10 @@ func rewriteStyleElement(n *html.Node, base *url.URL, sink RewriteSink) {
 	}
 
 	rewritten := RewriteCSS([]byte(cssText), base.String(), func(absURL string) string {
-		return sink(absURL, KindAsset)
+		// CSS url() references are mostly images (backgrounds, icons).
+		// Font files usually have extensions and will be correctly
+		// identified by isCriticalRenderingAsset anyway.
+		return sink(absURL, KindImage)
 	})
 
 	n.FirstChild.Data = string(rewritten)
@@ -430,7 +483,8 @@ func rewriteInlineStyle(n *html.Node, base *url.URL, sink RewriteSink) {
 		// Wrap style value as a CSS rule with a dummy selector to use RewriteCSS.
 		css := fmt.Sprintf("x{%s}", a.Val)
 		rewritten := RewriteCSS([]byte(css), base.String(), func(absURL string) string {
-			return sink(absURL, KindAsset)
+			// Inline style url() refs are mostly images (backgrounds, etc.)
+			return sink(absURL, KindImage)
 		})
 
 		// Unwrap: strip the "x{" prefix and "}" suffix.

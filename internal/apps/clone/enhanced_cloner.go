@@ -24,6 +24,7 @@ import (
 	"github.com/km269/wukong/internal/browser/antibot"
 	"github.com/km269/wukong/internal/browser/antibot/prober"
 	"github.com/km269/wukong/internal/browser/types"
+	"github.com/km269/wukong/internal/util"
 	"github.com/km269/wukong/pkg/httpclient"
 	"golang.org/x/net/html"
 )
@@ -72,6 +73,8 @@ type EnhancedClonerOptions struct {
 
 	// ScopePrefix restricts crawling to paths starting with this prefix.
 	ScopePrefix string
+	// ScopeAnchor restricts crawling to pages with a specific URL fragment/anchor.
+	ScopeAnchor string
 
 	// Exclude lists path prefixes to skip.
 	Exclude []string
@@ -164,6 +167,12 @@ type EnhancedClonerOptions struct {
 	// as live links. Default is true.
 	AssetSameDomain bool
 
+	// AssetDomains is a list of additional domain names whose assets should
+	// be downloaded even when AssetSameDomain is true. This allows listing
+	// known CDNs or content hosts that serve images, fonts, or CSS needed
+	// for the page to render correctly. Example: []string{"media.example.com", "cdn.example.com"}
+	AssetDomains []string
+
 	// SkipAssetExts is a set of file extensions that should NOT be downloaded.
 	// Assets matching these extensions keep their original remote URLs.
 	// Typical values: .mp4, .pdf, .zip, .exe, etc.
@@ -241,8 +250,8 @@ func DefaultEnhancedOptions() EnhancedClonerOptions {
 	return EnhancedClonerOptions{
 		OutputDir:           outputDir,
 		Workers:             4,
-		AssetWorkers:        8,
-		BrowserPages:        4,
+		AssetWorkers:        12,
+		BrowserPages:        6,
 		Timeout:             120 * time.Second,
 		RenderTimeout:       120 * time.Second,
 		Settle:              5000 * time.Millisecond,
@@ -366,7 +375,9 @@ type assetJob struct {
 
 // NewEnhancedCloner creates a new enhanced cloning engine.
 func NewEnhancedCloner(opts EnhancedClonerOptions) *EnhancedCloner {
-	fmt.Fprintf(os.Stderr, "[DEBUG] NewEnhancedCloner called\n")
+	if util.DebugEnabled {
+		fmt.Fprintf(os.Stderr, "[DEBUG] NewEnhancedCloner called\n")
+	}
 	if opts.Workers <= 0 {
 		opts.Workers = 4
 	}
@@ -386,6 +397,12 @@ func NewEnhancedCloner(opts EnhancedClonerOptions) *EnhancedCloner {
 	dl.UserAgent = opts.UserAgent
 	if opts.MaxAssetBytes > 0 {
 		dl.MaxBytes = opts.MaxAssetBytes
+	}
+	if opts.ProxyEnabled && len(opts.ProxyPool) > 0 {
+		dl.ProxyPool = opts.ProxyPool
+		if util.DebugEnabled {
+			fmt.Fprintf(os.Stderr, "[wukong/clone] asset downloader using proxy pool (%d proxies)\n", len(opts.ProxyPool))
+		}
 	}
 
 	return &EnhancedCloner{
@@ -423,17 +440,25 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	// Before starting headless Chrome, check if the site uses Cloudflare
 	// anti-bot protection. If so, enable Stealth pre-emptively so the
 	// first page load is already stealth-protected.
-	fmt.Fprintf(os.Stderr, "[DEBUG] Starting preflight Cloudflare check...\n")
+	if util.DebugEnabled {
+		fmt.Fprintf(os.Stderr, "[DEBUG] Starting preflight Cloudflare check...\n")
+	}
 	ec.preflightCloudflareCheck()
-	fmt.Fprintf(os.Stderr, "[DEBUG] Preflight Cloudflare check completed\n")
+	if util.DebugEnabled {
+		fmt.Fprintf(os.Stderr, "[DEBUG] Preflight Cloudflare check completed\n")
+	}
 
 	// Multi-dimensional anti-bot probing.
 	// Probes HTTP headers, robots.txt, WAF fingerprint, JS challenges,
 	// and rate limits to build an anti-bot profile and adjust strategy.
 	if ec.opts.AntibotEnabled && !ec.opts.Stealth {
-		fmt.Fprintf(os.Stderr, "[DEBUG] Starting antibot probe...\n")
+		if util.DebugEnabled {
+			fmt.Fprintf(os.Stderr, "[DEBUG] Starting antibot probe...\n")
+		}
 		ec.runAntibotProbe(ctx)
-		fmt.Fprintf(os.Stderr, "[DEBUG] Antibot probe completed\n")
+		if util.DebugEnabled {
+			fmt.Fprintf(os.Stderr, "[DEBUG] Antibot probe completed\n")
+		}
 	}
 
 	// Set up output directory.
@@ -524,14 +549,17 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 			}
 		}
 	} else {
-		ec.rateLimiter = NewRateLimiter(100 * time.Millisecond)
+		ec.rateLimiter = NewRateLimiter(500 * time.Millisecond)
 	}
 
 	// Resume from previous state.
 	if ec.opts.EnableResume && !ec.opts.Refresh {
 		statePath := frontierStatePath(outputDir)
-		if err := ec.front.load(statePath); err != nil {
-			// Non-fatal.
+		if err := ec.front.load(statePath); err == nil {
+			seenCount := ec.front.seenCount()
+			if seenCount > 0 {
+				fmt.Fprintf(os.Stderr, "  Resuming previous crawl (%d pages seen) ...\n", seenCount)
+			}
 		}
 	}
 
@@ -543,7 +571,10 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 		}
 		proxy = browser.GlobalProxyPool().GetProxy()
 	}
-	fmt.Fprintf(os.Stderr, "[DEBUG] Creating browser backend...\n")
+	fmt.Fprintf(os.Stderr, "  Launching browser (%s) ...\n", ec.opts.BrowserBackend)
+	if util.DebugEnabled {
+		fmt.Fprintf(os.Stderr, "[DEBUG] Creating browser backend...\n")
+	}
 	browserBackend := browser.NewBackend(ec.opts.BrowserBackend, browser.BackendOptions{
 		Headless:         ec.opts.Headless,
 		Workers:          ec.opts.Workers,
@@ -558,6 +589,7 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	})
 	ec.browserPool = browserBackend
 	defer browserBackend.Close()
+	fmt.Fprintf(os.Stderr, "  Browser ready. Starting crawl ...\n")
 
 	// Enable human-like behavior simulation if configured
 	if ec.opts.BehaviorSimulation {
@@ -818,7 +850,9 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 	ec.antibot.Wait()
 
 	// Render page in headless Chrome.
-	fmt.Fprintf(os.Stderr, "[wukong/clone] rendering %s ...\n", pageURL)
+	if util.DebugEnabled {
+		fmt.Fprintf(os.Stderr, "[wukong/clone] rendering %s ...\n", pageURL)
+	}
 	renderResult, err := ec.browserPool.RenderWithReferer(ctx, pageURL, referer)
 	if err != nil {
 		// Non-HTML resource? Route to asset downloader instead of failing.
@@ -861,6 +895,24 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 		fmt.Fprintf(os.Stderr,
 			"[wukong/antibot] cf_clearance obtained — "+
 				"Cloudflare bypass active for subsequent requests\n")
+	}
+
+	// Save assets collected from the browser's network stack during rendering.
+	// These are already downloaded by the browser, so we save them directly
+	// instead of re-downloading via HTTP (which may fail due to DNS issues).
+	if renderResult.CollectedAssets != nil && len(renderResult.CollectedAssets) > 0 {
+		saved := 0
+		for _, asset := range renderResult.CollectedAssets {
+			if asset == nil || len(asset.Body) == 0 {
+				continue
+			}
+			if ec.saveCollectedAsset(ctx, asset) {
+				saved++
+			}
+		}
+		if util.DebugEnabled && saved > 0 {
+			fmt.Fprintf(os.Stderr, "[wukong/clone] saved %d assets from browser cache\n", saved)
+		}
 	}
 
 	// Detect anti-bot patterns in the rendered page.
@@ -983,6 +1035,24 @@ processContent:
 	rewrittenHTML := ec.rewriteAndDiscover(cleanHTML, pageURL, pageMirrorPath,
 		depth, inScope, &result.LinksFound, &result.AssetsFound)
 
+	// Process links extracted from the browser's rendered DOM.
+	// This captures dynamically generated links that static HTML parsing may miss.
+	if len(renderResult.ExtractedLinks) > 0 {
+		if util.DebugEnabled {
+			fmt.Fprintf(os.Stderr, "\n[wukong/clone] browser extracted %d links from %s\n",
+				len(renderResult.ExtractedLinks), pageURL)
+		}
+		browserLinks := ec.processBrowserExtractedLinks(
+			renderResult.ExtractedLinks, pageURL, depth, inScope)
+		result.LinksFound += browserLinks
+		if util.DebugEnabled {
+			fmt.Fprintf(os.Stderr, "[wukong/clone] %d new pages enqueued from browser links\n",
+				browserLinks)
+		}
+	} else if util.DebugEnabled {
+		fmt.Fprintf(os.Stderr, "\n[wukong/clone] browser extracted 0 links from %s\n", pageURL)
+	}
+
 	contentBytes := []byte(rewrittenHTML)
 
 	// Content dedup: if identical content exists, create hard link.
@@ -1013,7 +1083,16 @@ processContent:
 	result.Title = renderResult.Title
 	result.Size = int64(len(rewrittenHTML))
 
-	fmt.Fprintf(os.Stderr, "[wukong/clone] saved %s (%d bytes)\n", pageURL, result.Size)
+	ec.statsMu.RLock()
+	cloned := ec.stats.PagesCloned + 1
+	failed := ec.stats.PagesFailed
+	ec.statsMu.RUnlock()
+	seenCount := ec.front.seenCount()
+	pending := seenCount - cloned - failed
+	fmt.Fprintf(os.Stderr, "\r  [wukong/clone] %d pages cloned, %d pending, %d failed ...", cloned, pending, failed)
+	if util.DebugEnabled {
+		fmt.Fprintf(os.Stderr, "\n  saved %s (%d bytes)", pageURL, result.Size)
+	}
 
 	// Save to incremental cache for future runs.
 	ec.updateCacheEntry(pageURL, fullPath, contentBytes)
@@ -1028,43 +1107,19 @@ processContent:
 // Asset processing.
 // ---------------------------------------------------------------------------
 
-// processAsset downloads and saves a single asset, rewriting CSS references.
-func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) error {
-	key := AssetKey(assetURL)
+// saveCollectedAsset saves an asset that was already downloaded by the browser
+// during page rendering. Returns true if the asset was newly saved.
+func (ec *EnhancedCloner) saveCollectedAsset(ctx context.Context, asset *types.CollectedAsset) bool {
+	assetURL := asset.URL
 
 	ec.assetMu.RLock()
 	if _, exists := ec.downloadedAssets[assetURL]; exists {
 		ec.assetMu.RUnlock()
-		return nil
+		return false
 	}
 	ec.assetMu.RUnlock()
 
-	fmt.Fprintf(os.Stderr, "[wukong/clone] downloading asset: %s\n", assetURL)
-	assetResult, err := ec.assetDownloader.Download(ctx, assetURL)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[wukong/clone] asset download failed: %s - %v\n", assetURL, err)
-		// Anti-bot check: was this asset blocked by HTTP status?
-		var de *DownloadError
-		if AsDownloadError(err, &de) && de.StatusCode > 0 {
-			reason, desc := antibot.DetectHTTP(de.StatusCode, nil)
-			if reason != antibot.ReasonNone {
-				retry, delay, _, msg := ec.antibot.Escalate(
-					assetURL, reason, de.StatusCode)
-				ec.applyAntiBotLevel()
-				fmt.Fprintf(os.Stderr,
-					"[wukong/antibot] asset %s: %s. %s\n",
-					assetURL, desc, msg)
-				if retry {
-					time.Sleep(delay)
-					ec.wg.Add(1)
-					ec.assetJobs <- assetJob{url: assetURL}
-					return nil
-				}
-			}
-		}
-		ec.front.markVisited(key)
-		return err
-	}
+	key := AssetKey(assetURL)
 
 	// Determine local path.
 	localPath := LocalPath(ec.host, assetURL, KindAsset)
@@ -1073,21 +1128,31 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 	// Ensure directory.
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 		ec.front.markVisited(key)
-		return err
+		return false
 	}
 
-	data := assetResult.Body
-	contentType := assetResult.ContentType
+	contentType := asset.ContentType
+	isCSS := isCSSContentType(contentType) ||
+		strings.HasSuffix(strings.ToLower(assetURL), ".css")
+
+	data := asset.Body
 
 	var discoveredAssets []string
-	if assetResult.IsCSS {
+	if isCSS {
 		cssMirrorPath := filepath.ToSlash(filepath.Join("assets", localPath))
 		data = RewriteCSS(data, assetURL, func(absRef string) string {
+			// References inside CSS are mostly images (backgrounds, etc.)
+			// Font files usually have extensions and are handled correctly.
+			refKind := KindImage
+			if !ec.wantAsset(absRef, refKind) {
+				// Keep original URL for rejected assets.
+				return absRef
+			}
 			refKey := AssetKey(absRef)
 			if ec.front.offer(refKey) {
 				discoveredAssets = append(discoveredAssets, absRef)
 			}
-			targetLocalPath := LocalPath(ec.host, absRef, KindAsset)
+			targetLocalPath := LocalPath(ec.host, absRef, refKind)
 			targetMirrorPath := filepath.ToSlash(filepath.Join("assets", targetLocalPath))
 			return Rel(cssMirrorPath, targetMirrorPath)
 		})
@@ -1095,10 +1160,8 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 
 	if err := os.WriteFile(fullPath, data, 0644); err != nil {
 		ec.front.markVisited(key)
-		fmt.Fprintf(os.Stderr, "[wukong/clone] asset write failed: %s - %v\n", assetURL, err)
-		return err
+		return false
 	}
-	fmt.Fprintf(os.Stderr, "[wukong/clone] asset saved: %s -> %s (%d bytes)\n", assetURL, fullPath, len(data))
 
 	if len(discoveredAssets) > 0 {
 		ec.wg.Add(1)
@@ -1112,7 +1175,202 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 					ec.enqueueAssetNonBlocking(discURL)
 				}
 			}
-			fmt.Fprintf(os.Stderr, "[wukong/clone] CSS processed: %s, discovered %d assets\n", assetURL, len(discoveredAssets))
+		}()
+	}
+
+	// Register downloaded asset.
+	ec.assetMu.Lock()
+	ec.downloadedAssets[assetURL] = &downloadedAsset{
+		URL:         assetURL,
+		LocalPath:   localPath,
+		ContentType: contentType,
+		Size:        int64(len(data)),
+		MimeType:    contentType,
+	}
+	ec.assetMu.Unlock()
+
+	ec.statsMu.Lock()
+	ec.stats.AssetsDownloaded++
+	ec.stats.TotalBytes += int64(len(data))
+	ec.statsMu.Unlock()
+
+	ec.front.markVisited(key)
+	return true
+}
+
+// processAsset downloads and saves a single asset, rewriting CSS references.
+// Uses HTTP client first, falls back to browser network stack on network errors.
+func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) error {
+	key := AssetKey(assetURL)
+
+	ec.assetMu.RLock()
+	if _, exists := ec.downloadedAssets[assetURL]; exists {
+		ec.assetMu.RUnlock()
+		return nil
+	}
+	ec.assetMu.RUnlock()
+
+	if util.DebugEnabled {
+		fmt.Fprintf(os.Stderr, "[wukong/clone] downloading asset: %s\n", assetURL)
+	}
+
+	var body []byte
+	var contentType string
+	var isCSS bool
+
+	// Try HTTP client first.
+	assetResult, httpErr := ec.assetDownloader.Download(ctx, assetURL)
+	if httpErr == nil {
+		body = assetResult.Body
+		contentType = assetResult.ContentType
+		isCSS = assetResult.IsCSS
+	} else {
+		if util.DebugEnabled {
+			fmt.Fprintf(os.Stderr, "[wukong/clone] HTTP asset download failed: %s - %v\n", assetURL, httpErr)
+		}
+
+		// Check if we should try browser fallback.
+		// Fallback strategy:
+		//   - network errors (DNS, connection, etc.)
+		//   - 403 Forbidden: browser has better chance with proper
+		//     cookies, referer, and cache from page rendering
+		//   - other non-404 HTTP errors
+		//   - 404 is skipped because browser would also get 404
+		shouldFallback := false
+		var de *DownloadError
+		if AsDownloadError(httpErr, &de) {
+			switch de.Reason {
+			case "network":
+				shouldFallback = true
+			case "http_status":
+				if de.StatusCode == 403 {
+					shouldFallback = true
+				} else if de.StatusCode != 404 {
+					shouldFallback = true
+				}
+			}
+		} else {
+			shouldFallback = true
+		}
+
+		if shouldFallback && ec.browserPool != nil {
+			if util.DebugEnabled {
+				fmt.Fprintf(os.Stderr, "[wukong/clone] falling back to browser download for: %s\n", assetURL)
+			}
+			browserResult, browserErr := ec.browserPool.DownloadAsset(ctx, assetURL, ec.seedURL)
+			if browserErr == nil && len(browserResult.Body) > 0 {
+				body = browserResult.Body
+				contentType = browserResult.ContentType
+				isCSS = isCSSContentType(contentType) ||
+					strings.HasSuffix(strings.ToLower(assetURL), ".css")
+				if util.DebugEnabled {
+					fmt.Fprintf(os.Stderr, "[wukong/clone] browser download succeeded for: %s (%d bytes)\n", assetURL, len(body))
+				}
+			} else {
+				if util.DebugEnabled {
+					fmt.Fprintf(os.Stderr, "[wukong/clone] browser download also failed: %s - %v\n", assetURL, browserErr)
+				}
+			}
+		}
+
+		// If both methods failed, handle anti-bot and return error.
+		if len(body) == 0 {
+			// Anti-bot check: was this asset blocked by HTTP status?
+			if AsDownloadError(httpErr, &de) && de.StatusCode > 0 {
+				reason, desc := antibot.DetectHTTP(de.StatusCode, nil)
+				if reason != antibot.ReasonNone {
+					// Already at max level? Skip useless retry and
+					// just give up on this asset instead of wasting
+					// minutes on UA rotation that doesn't help.
+					atMax := ec.antibot.Level() >= ec.antibot.Escalator.MaxLevel
+					isSameLevel := ec.antibot.Escalator.RetryCount(assetURL) > 0
+
+					if atMax && isSameLevel {
+						fmt.Fprintf(os.Stderr,
+							"[wukong/antibot] asset %s: %s. already at max level (%s), skipping retry\n",
+							assetURL, desc, ec.antibot.Level())
+						ec.front.markVisited(key)
+						return httpErr
+					}
+
+					retry, delay, _, msg := ec.antibot.Escalate(
+						assetURL, reason, de.StatusCode)
+					ec.applyAntiBotLevel()
+					fmt.Fprintf(os.Stderr,
+						"[wukong/antibot] asset %s: %s. %s\n",
+						assetURL, desc, msg)
+					if retry {
+						time.Sleep(delay)
+						ec.wg.Add(1)
+						ec.assetJobs <- assetJob{url: assetURL}
+						return nil
+					}
+				}
+			}
+			ec.front.markVisited(key)
+			return httpErr
+		}
+	}
+
+	// Determine local path.
+	localPath := LocalPath(ec.host, assetURL, KindAsset)
+	fullPath := filepath.Join(ec.assetDir, localPath)
+
+	// Ensure directory.
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		ec.front.markVisited(key)
+		return err
+	}
+
+	data := body
+
+	var discoveredAssets []string
+	if isCSS {
+		cssMirrorPath := filepath.ToSlash(filepath.Join("assets", localPath))
+		data = RewriteCSS(data, assetURL, func(absRef string) string {
+			// References inside CSS are mostly images (backgrounds, etc.)
+			// Font files usually have extensions and are handled correctly.
+			refKind := KindImage
+			if !ec.wantAsset(absRef, refKind) {
+				// Keep original URL for rejected assets.
+				return absRef
+			}
+			refKey := AssetKey(absRef)
+			if ec.front.offer(refKey) {
+				discoveredAssets = append(discoveredAssets, absRef)
+			}
+			targetLocalPath := LocalPath(ec.host, absRef, refKind)
+			targetMirrorPath := filepath.ToSlash(filepath.Join("assets", targetLocalPath))
+			return Rel(cssMirrorPath, targetMirrorPath)
+		})
+	}
+
+	if err := os.WriteFile(fullPath, data, 0644); err != nil {
+		ec.front.markVisited(key)
+		if util.DebugEnabled {
+			fmt.Fprintf(os.Stderr, "[wukong/clone] asset write failed: %s - %v\n", assetURL, err)
+		}
+		return err
+	}
+	if util.DebugEnabled {
+		fmt.Fprintf(os.Stderr, "[wukong/clone] asset saved: %s -> %s (%d bytes)\n", assetURL, fullPath, len(data))
+	}
+
+	if len(discoveredAssets) > 0 {
+		ec.wg.Add(1)
+		go func() {
+			defer ec.wg.Done()
+			for _, discURL := range discoveredAssets {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					ec.enqueueAssetNonBlocking(discURL)
+				}
+			}
+			if util.DebugEnabled {
+				fmt.Fprintf(os.Stderr, "[wukong/clone] CSS processed: %s, discovered %d assets\n", assetURL, len(discoveredAssets))
+			}
 		}()
 	}
 
@@ -1171,24 +1429,43 @@ func (ec *EnhancedCloner) rewriteAndDiscover(htmlStr, pageURL, pageMirrorPath st
 		case KindPage:
 			*linksFound++
 			// Check if this page is in scope and should be crawled.
+			// scope-prefix and scope-anchor are OR relationships.
 			if shouldCrawl {
 				if u, err := url.Parse(absURL); err == nil {
 					seed, _ := url.Parse(ec.seedURL)
 					if seed != nil && SameSite(seed, u, ec.opts.Subdomains) {
 						linkInScope := false
+
+						// Check scope-prefix first.
 						if ec.opts.ScopePrefix != "" {
-							if matchesScopePrefix(u.Path, ec.opts.ScopePrefix) {
+							if matchesScopePrefixWithList(u.Path, ec.opts.ScopePrefix) {
 								linkInScope = true
-							} else {
-								basePrefix := ec.opts.ScopePrefix
-								if strings.HasSuffix(basePrefix, "-list") {
-									basePrefix = strings.TrimSuffix(basePrefix, "-list")
-									if matchesScopePrefix(u.Path, basePrefix) {
+							}
+						}
+
+						// Check scope-anchor (OR: if not already matched, check anchor)
+						if !linkInScope && ec.opts.ScopeAnchor != "" {
+							if u.Fragment != "" && strings.EqualFold(u.Fragment, ec.opts.ScopeAnchor) {
+								linkInScope = true
+							}
+							// Also check last segment of scope-prefix against fragment
+							if !linkInScope && ec.opts.ScopePrefix != "" && u.Fragment != "" {
+								cleanPrefix := strings.Trim(ec.opts.ScopePrefix, "/")
+								parts := strings.Split(cleanPrefix, "/")
+								if len(parts) > 0 {
+									lastSegment := strings.ToLower(parts[len(parts)-1])
+									if strings.ToLower(u.Fragment) == lastSegment {
 										linkInScope = true
 									}
 								}
 							}
 						}
+
+						// If no scope restrictions at all, allow by default.
+						if ec.opts.ScopePrefix == "" && ec.opts.ScopeAnchor == "" {
+							linkInScope = true
+						}
+
 						if linkInScope {
 							ec.enqueuePageWithReferer(absURL, depth+1, pageURL, true)
 						}
@@ -1198,24 +1475,28 @@ func (ec *EnhancedCloner) rewriteAndDiscover(htmlStr, pageURL, pageMirrorPath st
 			targetPath = filepath.ToSlash(filepath.Join("pages",
 				LocalPath(ec.host, absURL, KindPage)))
 
-		case KindAsset:
+		default:
 			*assetsFound++
-			if ec.wantAsset(absURL) {
+			if ec.wantAsset(absURL, kind) {
 				key := AssetKey(absURL)
 				if ec.front.offer(key) {
 					ec.enqueueAssetNonBlocking(absURL)
-					fmt.Fprintf(os.Stderr, "[wukong/clone] enqueued asset: %s\n", absURL)
+					if util.DebugEnabled {
+						fmt.Fprintf(os.Stderr, "[wukong/clone] enqueued asset: %s\n", absURL)
+					}
 				} else {
-					fmt.Fprintf(os.Stderr, "[wukong/clone] asset already seen: %s\n", absURL)
+					if util.DebugEnabled {
+						fmt.Fprintf(os.Stderr, "[wukong/clone] asset already seen: %s\n", absURL)
+					}
 				}
+				targetPath = filepath.ToSlash(filepath.Join("assets",
+					LocalPath(ec.host, absURL, kind)))
 			} else {
-				fmt.Fprintf(os.Stderr, "[wukong/clone] asset rejected by policy: %s\n", absURL)
+				if util.DebugEnabled {
+					fmt.Fprintf(os.Stderr, "[wukong/clone] asset rejected by policy: %s\n", absURL)
+				}
+				return ""
 			}
-			targetPath = filepath.ToSlash(filepath.Join("assets",
-				LocalPath(ec.host, absURL, KindAsset)))
-
-		default:
-			return "" // Keep original for unknown kinds.
 		}
 
 		return Rel(pageMirrorPath, targetPath)
@@ -1228,6 +1509,255 @@ func (ec *EnhancedCloner) rewriteAndDiscover(htmlStr, pageURL, pageMirrorPath st
 		return htmlStr
 	}
 	return buf.String()
+}
+
+// processBrowserExtractedLinks processes links extracted from the browser's
+// rendered DOM. These are links that were dynamically generated by JavaScript
+// and may not be present in the static HTML.
+func (ec *EnhancedCloner) processBrowserExtractedLinks(
+	links []string, pageURL string, depth int, inScope bool) int {
+
+	if !ec.shouldCrawlMore(depth) {
+		return 0
+	}
+
+	seed, _ := url.Parse(ec.seedURL)
+	if seed == nil {
+		return 0
+	}
+
+	count := 0
+	seenInBatch := make(map[string]bool)
+
+	for _, absURL := range links {
+		if absURL == "" {
+			continue
+		}
+
+		// Normalize first to dedup.
+		canonURL, err := Normalize(ec.seedURL, absURL)
+		if err != nil {
+			continue
+		}
+		if seenInBatch[canonURL] {
+			continue
+		}
+		seenInBatch[canonURL] = true
+
+		u, err := url.Parse(absURL)
+		if err != nil {
+			continue
+		}
+
+		// Only HTTP(S).
+		if u.Scheme != "http" && u.Scheme != "https" {
+			continue
+		}
+
+		// Must be same site.
+		if !SameSite(seed, u, ec.opts.Subdomains) {
+			continue
+		}
+
+		// Must be a page (not a binary asset).
+		if !LikelyPage(absURL) {
+			continue
+		}
+
+		if util.DebugEnabled && count < 20 {
+			fmt.Fprintf(os.Stderr, "[wukong/clone] browser link candidate: %s\n", absURL)
+		}
+
+		// Use enqueuePageWithReferer which handles all checks (scope, dedup, limits).
+		// We check if it was already seen first to count new pages.
+		key := PageKey(ec.host, canonURL)
+		if ec.front.offer(key) {
+			// Not seen before — remove our mark so enqueuePageWithReferer can do it properly.
+			ec.front.mu.Lock()
+			delete(ec.front.seen, key)
+			ec.front.mu.Unlock()
+			ec.enqueuePageWithReferer(absURL, depth+1, pageURL, true)
+			count++
+		}
+	}
+
+	if util.DebugEnabled {
+		fmt.Fprintf(os.Stderr, "[wukong/clone] browser links: %d total candidates, %d new pages enqueued\n",
+			len(seenInBatch), count)
+	}
+
+	// Smart pagination detection: find pagination patterns in the links
+	// and generate missing pages.
+	if len(links) > 0 {
+		paginationCount := ec.detectAndGeneratePagination(links, pageURL, depth)
+		count += paginationCount
+	}
+
+	return count
+}
+
+// detectAndGeneratePagination detects pagination patterns from the extracted
+// links and generates URLs for missing pages. This handles cases where only
+// a subset of pagination links are visible (e.g., "1 2 3 ... 10" where
+// pages 4-9 are not shown as links).
+func (ec *EnhancedCloner) detectAndGeneratePagination(
+	links []string, pageURL string, depth int) int {
+
+	if len(links) == 0 {
+		return 0
+	}
+
+	seed, _ := url.Parse(ec.seedURL)
+	if seed == nil {
+		return 0
+	}
+
+	// Common pagination parameter names.
+	paginationParams := []string{
+		"page", "Page", "p", "pg", "pn",
+		"page_num", "pageNum", "page_number",
+		"start", "offset", "skip",
+	}
+
+	// Group links by (host + path) to find pagination patterns.
+	type pageInfo struct {
+		url     *url.URL
+		pageNum int
+	}
+	pageGroups := make(map[string][]pageInfo)
+
+	baseParsed, _ := url.Parse(pageURL)
+	basePath := baseParsed.Path
+
+	if util.DebugEnabled {
+		fmt.Fprintf(os.Stderr, "[wukong/clone/pagination] detecting patterns for base path: %s\n", basePath)
+	}
+
+	for _, link := range links {
+		u, err := url.Parse(link)
+		if err != nil {
+			continue
+		}
+		if !SameSite(seed, u, ec.opts.Subdomains) {
+			continue
+		}
+		// Only consider same-path links (same listing page, different page param).
+		if u.Path != basePath {
+			continue
+		}
+		if !LikelyPage(link) {
+			continue
+		}
+
+		// Check for pagination parameters.
+		for _, param := range paginationParams {
+			val := u.Query().Get(param)
+			if val == "" {
+				continue
+			}
+			// Try to parse as integer.
+			var pageNum int
+			if _, err := fmt.Sscanf(val, "%d", &pageNum); err != nil {
+				continue
+			}
+			key := u.Host + u.Path + "?" + param
+			pageGroups[key] = append(pageGroups[key], pageInfo{url: u, pageNum: pageNum})
+			if util.DebugEnabled {
+				fmt.Fprintf(os.Stderr, "[wukong/clone/pagination] found page link: %s (param=%s, num=%d)\n",
+					link, param, pageNum)
+			}
+			break
+		}
+	}
+
+	count := 0
+
+	// For each group, find min/max page and generate missing pages.
+	for groupKey, pages := range pageGroups {
+		if len(pages) < 2 {
+			if util.DebugEnabled {
+				fmt.Fprintf(os.Stderr, "[wukong/clone/pagination] group %s has only %d page(s), skipping\n",
+					groupKey, len(pages))
+			}
+			continue // Need at least 2 pages to detect a pattern.
+		}
+
+		// Find min and max page numbers.
+		minPage := pages[0].pageNum
+		maxPage := pages[0].pageNum
+		for _, p := range pages {
+			if p.pageNum < minPage {
+				minPage = p.pageNum
+			}
+			if p.pageNum > maxPage {
+				maxPage = p.pageNum
+			}
+		}
+
+		if util.DebugEnabled {
+			fmt.Fprintf(os.Stderr, "[wukong/clone/pagination] group %s: %d pages, range %d-%d\n",
+				groupKey, len(pages), minPage, maxPage)
+		}
+
+		// Extract the parameter name from the group key.
+		// Key format: "host/path?param"
+		paramIdx := strings.LastIndex(groupKey, "?")
+		if paramIdx < 0 {
+			continue
+		}
+		paramName := groupKey[paramIdx+1:]
+
+		// Use the first page's URL as a template.
+		templateURL := pages[0].url
+
+		// Generate all pages from minPage to maxPage.
+		for pageNum := minPage; pageNum <= maxPage; pageNum++ {
+			// Create a copy of the template URL.
+			newURL := *templateURL
+			q := newURL.Query()
+			q.Set(paramName, fmt.Sprintf("%d", pageNum))
+			newURL.RawQuery = q.Encode()
+
+			absURL := newURL.String()
+
+			// Check scope.
+			linkInScope := false
+			if ec.opts.ScopePrefix != "" {
+				if matchesScopePrefix(newURL.Path, ec.opts.ScopePrefix) {
+					linkInScope = true
+				}
+			}
+			if ec.opts.ScopePrefix == "" && ec.opts.ScopeAnchor == "" {
+				linkInScope = true
+			}
+
+			if !linkInScope {
+				continue
+			}
+
+			// Enqueue the page.
+			canonURL, err := Normalize(ec.seedURL, absURL)
+			if err != nil {
+				continue
+			}
+			key := PageKey(ec.host, canonURL)
+			if ec.front.offer(key) {
+				ec.front.mu.Lock()
+				delete(ec.front.seen, key)
+				ec.front.mu.Unlock()
+				ec.enqueuePageWithReferer(absURL, depth+1, pageURL, true)
+				count++
+			}
+		}
+	}
+
+	if count > 0 {
+		fmt.Fprintf(os.Stderr, "\n[wukong/clone] pagination: generated %d additional pages from pattern detection\n", count)
+	} else if util.DebugEnabled {
+		fmt.Fprintf(os.Stderr, "[wukong/clone/pagination] no new pages generated\n")
+	}
+
+	return count
 }
 
 // ---------------------------------------------------------------------------
@@ -1302,17 +1832,32 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 	// Validate URL.
 	parsed, err := url.Parse(pageURL)
 	if err != nil {
+		if util.DebugEnabled {
+			fmt.Fprintf(os.Stderr, "[wukong/clone] enqueue rejected (parse error): %s\n", pageURL)
+		}
 		return
 	}
 
 	// Only HTTP(S).
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		if util.DebugEnabled {
+			fmt.Fprintf(os.Stderr, "[wukong/clone] enqueue rejected (non-http): %s\n", pageURL)
+		}
 		return
 	}
 
 	seed, _ := url.Parse(ec.seedURL)
 	isSeedURL := pageURL == ec.seedURL ||
 		(seed != nil && parsed.Path == seed.Path && parsed.Host == seed.Host)
+
+	// Skip non-HTML file extensions to avoid wasting render time on downloads.
+	// The seed URL is always allowed.
+	if !isSeedURL && !LikelyPage(pageURL) {
+		if util.DebugEnabled {
+			fmt.Fprintf(os.Stderr, "[wukong/clone] enqueue rejected (not a page): %s\n", pageURL)
+		}
+		return
+	}
 
 	if isSeedURL {
 		if ec.opts.ScopePrefix != "" && !matchesScopePrefix(parsed.Path, ec.opts.ScopePrefix) {
@@ -1325,50 +1870,89 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 		}
 	}
 
-	if ec.opts.ScopePrefix != "" && !inScope {
-		if matchesScopePrefix(parsed.Path, ec.opts.ScopePrefix) {
-			inScope = true
+	// Always re-check scope here as the final gatekeeper,
+	// regardless of what the caller passed in.
+	// scope-prefix and scope-anchor are OR relationships:
+	// a page is in scope if it matches EITHER the prefix OR the anchor.
+	scopeMatched := false
+
+	// Check scope-prefix first.
+	if ec.opts.ScopePrefix != "" {
+		if matchesScopePrefixWithList(parsed.Path, ec.opts.ScopePrefix) {
+			scopeMatched = true
 		}
-		if !inScope {
-			basePrefix := ec.opts.ScopePrefix
-			if strings.HasSuffix(basePrefix, "-list") {
-				basePrefix = strings.TrimSuffix(basePrefix, "-list")
-				if matchesScopePrefix(parsed.Path, basePrefix) {
-					inScope = true
+	}
+
+	// Check scope-anchor (OR: if not already matched by prefix, check anchor).
+	if !scopeMatched && ec.opts.ScopeAnchor != "" {
+		if parsed.Fragment != "" && strings.EqualFold(parsed.Fragment, ec.opts.ScopeAnchor) {
+			scopeMatched = true
+		}
+		// Also check if the last segment of scope-prefix matches the fragment,
+		// e.g. scope-prefix="/biographies-list" matches "#biographies"
+		if !scopeMatched && ec.opts.ScopePrefix != "" && parsed.Fragment != "" {
+			cleanPrefix := strings.Trim(ec.opts.ScopePrefix, "/")
+			parts := strings.Split(cleanPrefix, "/")
+			if len(parts) > 0 {
+				lastSegment := strings.ToLower(parts[len(parts)-1])
+				if strings.ToLower(parsed.Fragment) == lastSegment {
+					scopeMatched = true
 				}
 			}
 		}
 	}
 
-	scopeCfg := ScopeConfig{
-		AllowSubdomains: ec.opts.Subdomains,
-		ScopePrefix:     ec.opts.ScopePrefix,
-		ExcludePrefixes: ec.opts.Exclude,
+	// Seed URL is always allowed.
+	if isSeedURL {
+		scopeMatched = true
+	}
+
+	// Final scope check: only if at least one scope option is specified.
+	if ec.opts.ScopePrefix != "" || ec.opts.ScopeAnchor != "" {
+		if !scopeMatched {
+			if util.DebugEnabled {
+				fmt.Fprintf(os.Stderr, "[wukong/clone] out of scope, skipping: %s (path=%s, fragment=%s)\n",
+					pageURL, parsed.Path, parsed.Fragment)
+			}
+			return
+		}
 	}
 
 	if !isSeedURL {
 		if seed != nil && !SameSite(seed, parsed, ec.opts.Subdomains) {
-			return
-		}
-		if ec.opts.ScopePrefix != "" && !inScope {
-			if seed != nil && !InScope(seed, parsed, scopeCfg) {
-				return
+			if util.DebugEnabled {
+				fmt.Fprintf(os.Stderr, "[wukong/clone] enqueue rejected (cross-site): %s\n", pageURL)
 			}
+			return
 		}
 	}
 
 	// Normalize and get key.
 	canonURL, err := Normalize(ec.seedURL, pageURL)
 	if err != nil {
+		if util.DebugEnabled {
+			fmt.Fprintf(os.Stderr, "[wukong/clone] enqueue rejected (normalize error): %s - %v\n", pageURL, err)
+		}
 		return
 	}
 	key := PageKey(ec.host, canonURL)
+
+	// Check MaxDepth.
+	if ec.opts.MaxDepth > 0 && depth > ec.opts.MaxDepth {
+		if util.DebugEnabled {
+			fmt.Fprintf(os.Stderr, "[wukong/clone] enqueue rejected (max depth %d): %s\n", depth, pageURL)
+		}
+		return
+	}
 
 	// Check MaxPages limit.
 	if ec.opts.MaxPages > 0 {
 		ec.enqueuedMu.Lock()
 		if ec.enqueuedPages >= ec.opts.MaxPages {
 			ec.enqueuedMu.Unlock()
+			if util.DebugEnabled {
+				fmt.Fprintf(os.Stderr, "[wukong/clone] enqueue rejected (max pages): %s\n", pageURL)
+			}
 			return
 		}
 		ec.enqueuedMu.Unlock()
@@ -1376,12 +1960,10 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 
 	// Offer to frontier for dedup.
 	if !ec.front.offer(key) {
+		if util.DebugEnabled {
+			fmt.Fprintf(os.Stderr, "[wukong/clone] enqueue rejected (already seen): %s\n", pageURL)
+		}
 		return // Already seen.
-	}
-
-	// Check MaxDepth.
-	if ec.opts.MaxDepth > 0 && depth > ec.opts.MaxDepth {
-		return
 	}
 
 	ec.enqueuedMu.Lock()
@@ -1389,6 +1971,10 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 	ec.enqueuedMu.Unlock()
 
 	ec.wg.Add(1)
+
+	if util.DebugEnabled {
+		fmt.Fprintf(os.Stderr, "[wukong/clone] enqueued page (depth=%d): %s\n", depth, canonURL)
+	}
 
 	// BFS vs DFS: enqueue to channel (FIFO) or push to stack (LIFO).
 	if ec.opts.Traversal == TraversalDFS {
@@ -1401,7 +1987,28 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 		default:
 		}
 	} else {
-		ec.pageJobs <- pageJob{url: canonURL, depth: depth, referer: referer, inScope: inScope}
+		// Non-blocking send: if channel is full, process in a goroutine
+		// to avoid deadlock when all workers are busy discovering new pages.
+		job := pageJob{url: canonURL, depth: depth, referer: referer, inScope: inScope}
+		select {
+		case ec.pageJobs <- job:
+		default:
+			go func(j pageJob) {
+				result := ec.processPage(ec.ctx, j.url, j.depth, j.referer, j.inScope)
+				ec.statsMu.Lock()
+				if result.Error == "" {
+					ec.stats.PagesCloned++
+					ec.stats.TotalBytes += result.Size
+				} else {
+					ec.stats.PagesFailed++
+				}
+				ec.statsMu.Unlock()
+				ec.resultsMu.Lock()
+				ec.results = append(ec.results, result)
+				ec.resultsMu.Unlock()
+				ec.wg.Done()
+			}(job)
+		}
 	}
 }
 
@@ -1587,12 +2194,16 @@ func (ec *EnhancedCloner) applyAntiBotLevel() {
 }
 
 // wantAsset reports whether an asset should be downloaded and localised.
-// Two filtering policies:
-//  1. AssetSameDomain: skip assets on hosts outside the seed's registrable
-//     domain (CDNs, analytics, third-party trackers).
-//  2. SkipAssetExts: skip assets whose file extension is in the skip set
+// The kind parameter indicates the asset type (image, CSS, font, JS, etc.)
+// as determined by the HTML context (e.g. <img> → image, <link rel=stylesheet> → CSS).
+//
+// Filtering policies:
+//  1. Critical rendering assets (images, CSS, fonts) are ALWAYS downloaded
+//     regardless of domain — the page needs them to render correctly.
+//  2. Non-critical assets (JS, media, other) are subject to AssetSameDomain.
+//  3. SkipAssetExts: skip assets whose file extension is in the skip set
 //     (media files, archives, documents). These remain as live links.
-func (ec *EnhancedCloner) wantAsset(assetURL string) bool {
+func (ec *EnhancedCloner) wantAsset(assetURL string, kind URLKind) bool {
 	u, err := url.Parse(assetURL)
 	if err != nil {
 		return false
@@ -1602,21 +2213,85 @@ func (ec *EnhancedCloner) wantAsset(assetURL string) bool {
 		return false
 	}
 
-	// AssetSameDomain: only download same-registrable-domain assets.
-	if ec.opts.AssetSameDomain {
-		seed, _ := url.Parse(ec.seedURL)
-		if seed != nil && !SameRegistrableDomain(seed, u) {
-			return false
-		}
-	}
+	ext := strings.ToLower(PathExt(assetURL))
 
 	// SkipAssetExts: skip bulk media, documents, archives, installers.
-	ext := strings.ToLower(PathExt(assetURL))
+	// Check early so skipped assets are never downloaded.
 	if ec.opts.SkipAssetExts[ext] {
 		return false
 	}
 
+	// Critical rendering assets are always downloaded regardless of domain.
+	if isCriticalRenderingAsset(ext, kind) {
+		return true
+	}
+
+	// AssetSameDomain: only download same-registrable-domain assets
+	// for non-critical asset types (JS, media, other).
+	if ec.opts.AssetSameDomain {
+		seed, _ := url.Parse(ec.seedURL)
+		if seed != nil && !SameRegistrableDomain(seed, u) {
+			// Check if the asset host is in the allowed additional domains.
+			if !ec.isAssetDomainAllowed(u.Host) {
+				return false
+			}
+		}
+	}
+
 	return true
+}
+
+// isCriticalRenderingAsset returns true if the asset is essential for page
+// rendering and should be downloaded even when AssetSameDomain is true and
+// the host is on a different domain.
+func isCriticalRenderingAsset(ext string, kind URLKind) bool {
+	// First, check by extension — most reliable.
+	switch ext {
+	case
+		// Images
+		".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico",
+		".bmp", ".tiff", ".tif", ".avif", ".apng", ".jxl", ".heic", ".heif",
+		// CSS
+		".css",
+		// Fonts
+		".woff", ".woff2", ".ttf", ".otf", ".eot":
+		return true
+	}
+
+	// If extension is empty or unknown, use the kind determined from HTML context.
+	switch kind {
+	case KindImage, KindCSS, KindFont:
+		return true
+	}
+
+	return false
+}
+
+// isAssetDomainAllowed checks whether a host is in the additional allowed
+// asset domains list. Matching is case-insensitive and supports subdomain
+// matching via leading dot (e.g. ".example.com" matches "cdn.example.com").
+func (ec *EnhancedCloner) isAssetDomainAllowed(host string) bool {
+	host = strings.ToLower(host)
+	for _, domain := range ec.opts.AssetDomains {
+		domain = strings.ToLower(strings.TrimSpace(domain))
+		if domain == "" {
+			continue
+		}
+		// Exact match.
+		if domain == host {
+			return true
+		}
+		// Subdomain match: ".example.com" matches "cdn.example.com".
+		if strings.HasPrefix(domain, ".") && strings.HasSuffix(host, domain) {
+			return true
+		}
+		// Registrable domain match: "example.com" matches "cdn.example.com".
+		if !strings.HasPrefix(domain, ".") &&
+			(strings.HasSuffix(host, "."+domain) || host == domain) {
+			return true
+		}
+	}
+	return false
 }
 
 // useCachedPage returns a cached page result when the page hasn't changed.

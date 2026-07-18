@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/km269/wukong/pkg/httpclient"
@@ -25,9 +26,13 @@ import (
 type AssetDownloader struct {
 	Client      *http.Client
 	UserAgent   string
-	MaxBytes    int64  // 0 = no limit.
-	Retries     int    // 0 = no retries (single attempt).
-	cfClearance string // Cloudflare bypass cookie (from Chrome render).
+	MaxBytes    int64    // 0 = no limit.
+	Retries     int      // 0 = no retries (single attempt).
+	cfClearance string   // Cloudflare bypass cookie (from Chrome render).
+	ProxyURL    string   // Single proxy URL (http://, https://, socks5://)
+	ProxyPool   []string // List of proxy URLs for rotation
+	proxyIndex  int      // Current index in proxy pool
+	proxyMu     sync.Mutex
 }
 
 // DefaultAssetDownloader returns a downloader with sensible defaults.
@@ -125,8 +130,42 @@ func (d *AssetDownloader) tryDownload(ctx context.Context, assetURL string) (*Do
 		})
 	}
 
-	resp, err := d.Client.Do(req)
+	client := d.Client
+	if len(d.ProxyPool) > 0 {
+		d.proxyMu.Lock()
+		proxyURL := d.ProxyPool[d.proxyIndex%len(d.ProxyPool)]
+		d.proxyMu.Unlock()
+
+		proxyParsed, err := url.Parse(proxyURL)
+		if err == nil {
+			transport := &http.Transport{
+				Proxy: http.ProxyURL(proxyParsed),
+			}
+			client = &http.Client{
+				Transport: transport,
+				Timeout:   d.Client.Timeout,
+			}
+		}
+	} else if d.ProxyURL != "" {
+		proxyParsed, err := url.Parse(d.ProxyURL)
+		if err == nil {
+			transport := &http.Transport{
+				Proxy: http.ProxyURL(proxyParsed),
+			}
+			client = &http.Client{
+				Transport: transport,
+				Timeout:   d.Client.Timeout,
+			}
+		}
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
+		if len(d.ProxyPool) > 0 {
+			d.proxyMu.Lock()
+			d.proxyIndex++
+			d.proxyMu.Unlock()
+		}
 		return nil, &DownloadError{URL: assetURL, Reason: "network", Err: err}
 	}
 	defer resp.Body.Close()

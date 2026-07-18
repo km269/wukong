@@ -15,6 +15,7 @@ import (
 
 	"github.com/km269/wukong/internal/agent"
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/util"
 )
 
 // maxMessages limits the chat history retained in memory.
@@ -34,6 +35,25 @@ type toolCallEntry struct {
 	Args   string
 	Result string
 	Status string // "running", "done", "error"
+}
+
+// ModalType defines the type of modal window.
+type ModalType int
+
+const (
+	ModalNone ModalType = iota
+	ModalCommands
+	ModalSkills
+	ModalSettings
+)
+
+// modalState represents the state of a modal window.
+type modalState struct {
+	Type     ModalType
+	Title    string
+	Content  string
+	Selected int
+	Items    []string
 }
 
 // Model is the Bubbletea model for the wukong TUI.
@@ -57,7 +77,7 @@ type Model struct {
 	// Streaming state
 	streaming     bool
 	currentStream string
-	streamCancel  func() // NEW: cancel function for interrupting streaming
+	streamCancel  func() // cancel function for interrupting streaming
 	streamCh      <-chan streamEvent
 
 	// Exit flag (set by /exit or /quit command)
@@ -75,6 +95,19 @@ type Model struct {
 	width  int
 	height int
 	ready  bool
+
+	// Header/Banner info
+	providerName string
+	toolCount    int
+	skillName    string
+
+	// Log buffer for status bar
+	logBuffer []string
+
+	// Modal state
+	modal       *modalState
+	modalHeight int
+	modalWidth  int
 }
 
 // ModelConfig holds dependencies for creating the TUI model.
@@ -103,20 +136,37 @@ func NewModel(cfg ModelConfig) *Model {
 
 	// Extract model name for status bar display
 	modelDisplay := cfg.Config.DefaultProvider
-	if p := cfg.Config.FindProvider(cfg.Config.DefaultProvider); p != nil && p.Model != "" {
-		modelDisplay = p.Model
+	providerDisplay := cfg.Config.DefaultProvider
+	if p := cfg.Config.FindProvider(cfg.Config.DefaultProvider); p != nil {
+		if p.Model != "" {
+			modelDisplay = p.Model
+		}
+		if p.Name != "" {
+			providerDisplay = p.Name
+		}
+	}
+
+	// Count enabled tools/extensions
+	toolCount := 0
+	for _, ext := range cfg.Config.Extensions {
+		if ext.Enabled {
+			toolCount++
+		}
 	}
 
 	return &Model{
-		viewport:   vp,
-		textarea:   ta,
-		userID:     cfg.UserID,
-		sessionID:  cfg.SessionID,
-		loop:       cfg.Loop,
-		cfg:        cfg.Config,
-		modelName:  modelDisplay,
-		workingDir: cfg.WorkingDir,
-		projectMgr: cfg.ProjectMgr,
+		viewport:     vp,
+		textarea:     ta,
+		userID:       cfg.UserID,
+		sessionID:    cfg.SessionID,
+		loop:         cfg.Loop,
+		cfg:          cfg.Config,
+		modelName:    modelDisplay,
+		providerName: providerDisplay,
+		toolCount:    toolCount,
+		skillName:    "-",
+		workingDir:   cfg.WorkingDir,
+		projectMgr:   cfg.ProjectMgr,
 		messages: []chatEntry{
 			{Role: "system", Content: startupMsg},
 		},
@@ -127,31 +177,38 @@ func NewModel(cfg ModelConfig) *Model {
 // buildStartupSummary creates a human-readable config summary
 // displayed at the top of the chat on startup.
 func buildStartupSummary(cfg *config.WukongConfig) string {
-	provider := cfg.DefaultProvider
-	modelName := ""
-	if p := cfg.FindProvider(provider); p != nil {
-		modelName = p.Model
-	}
-
 	summary := "🟢 Wukong Ready\n" +
-		"  Provider: " + provider
-	if modelName != "" {
-		summary += "\n  Model:    " + modelName
-	}
-	summary += "\n  Log:      " + cfg.LogLevel
-	summary += "\n  Session:  " + cfg.Session.Backend +
+		"  Log:      " + cfg.LogLevel +
+		" | Session: " + cfg.Session.Backend +
 		" | Memory: " + cfg.Memory.Backend +
-		" | Recall: " + map[bool]string{true: "on", false: "off"}[cfg.Recall.Enabled]
+		" | Recall: " + map[bool]string{true: "on", false: "off"}[cfg.Recall.Enabled] +
+		"(" + cfg.Recall.SearchMode + ")"
 
 	if cfg.Agent.Planner != "" {
 		summary += "\n  Planner:  " + cfg.Agent.Planner
 	}
+
+	agentFeatures := []string{}
+	if cfg.Agent.ThinkingEnabled != nil && *cfg.Agent.ThinkingEnabled {
+		agentFeatures = append(agentFeatures, "thinking")
+	}
+	if cfg.Agent.ContextCompaction {
+		agentFeatures = append(agentFeatures, "context_compaction")
+	}
+	if cfg.Agent.Streaming {
+		agentFeatures = append(agentFeatures, "streaming")
+	}
+	if len(agentFeatures) > 0 {
+		summary += "\n  Agent:    " + strings.Join(agentFeatures, ", ")
+	}
+
+	summary += "\n  Security: permission=" + string(cfg.Security.PermissionMode) +
+		" | guardrail=" + map[bool]string{true: "on", false: "off"}[cfg.Security.GuardrailEnabled]
+
 	summary += "\n  Tools:    parallel=" +
 		map[bool]string{true: "on", false: "off"}[cfg.Agent.ParallelTools] +
 		" | tool_search=" +
-		map[bool]string{true: "on", false: "off"}[cfg.Agent.ToolSearchEnabled] +
-		" | guardrail=" +
-		map[bool]string{true: "on", false: "off"}[cfg.Security.GuardrailEnabled]
+		map[bool]string{true: "on", false: "off"}[cfg.Agent.ToolSearchEnabled]
 
 	return summary
 }
@@ -165,6 +222,29 @@ func (m *Model) Init() tea.Cmd {
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		// Handle modal navigation first
+		if m.modal != nil {
+			switch msg.Type {
+			case tea.KeyEscape:
+				m.modal = nil
+				return m, nil
+			case tea.KeyEnter:
+				m.handleModalSelection()
+				return m, nil
+			case tea.KeyUp:
+				if m.modal.Selected > 0 {
+					m.modal.Selected--
+				}
+				return m, nil
+			case tea.KeyDown:
+				if m.modal.Selected < len(m.modal.Items)-1 {
+					m.modal.Selected++
+				}
+				return m, nil
+			}
+			return m, nil
+		}
+
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			if m.streaming {
@@ -239,20 +319,27 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case streamingErrorMsg:
-		m.currentStream += string(msg)
+		m.addMessage("system", string(msg))
 		m.updateViewport()
 		return m, readStreamEvent(m.streamCh)
 
 	case streamEndMsg:
+		if !m.streaming {
+			return m, nil
+		}
 		m.streaming = false
 		m.streamCancel = nil
-		// Save the response: prefer Content from streamEndMsg,
-		// but fall back to any partially-streamed currentStream
-		// so incremental delta output is never lost.
-		finalContent := msg.Content
-		if finalContent == "" && m.currentStream != "" {
+		// Use currentStream as the final content since it already
+		// contains all accumulated delta content during streaming.
+		// This avoids duplication with msg.Content which contains
+		// the same full content.
+		var finalContent string
+		if m.currentStream != "" {
 			finalContent = m.currentStream
+		} else if msg.Content != "" {
+			finalContent = msg.Content
 		}
+		m.currentStream = ""
 		if finalContent != "" {
 			m.addMessage("assistant", finalContent)
 		}
@@ -262,7 +349,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.toolCalls[i].Status = "done"
 			}
 		}
-		m.currentStream = ""
 		m.setStatus("Ready")
 		m.updateViewport()
 		return m, nil
@@ -286,28 +372,56 @@ func (m *Model) View() string {
 		return "\n  Initializing Wukong...\n"
 	}
 
-	var modelName string
-	p := m.cfg.DefaultProviderConfig()
-	if p != nil {
-		modelName = p.Model
-	}
+	// Render banner (top)
+	banner := RenderBanner("v0.2.4", m.providerName, m.width)
 
-	statusBar := RenderStatusBar(
-		m.sessionID, m.status,
-		m.cfg.DefaultProvider, modelName,
+	// Render status bar (below banner)
+	statusBar := RenderStatusBarBottom(
+		m.modelName,
+		m.providerName,
+		m.skillName,
+		m.toolCount,
+		m.status,
+		m.logBuffer,
 		m.width,
 	)
 
+	// Render input area (bottom)
+	inputArea := m.textarea.View()
+
+	// Calculate heights
+	bannerHeight := lipgloss.Height(banner)
+	statusBarHeight := lipgloss.Height(statusBar)
+	inputHeight := lipgloss.Height(inputArea)
+
+	// Recalculate viewport height to fit remaining space
+	availableHeight := m.height - bannerHeight - statusBarHeight - inputHeight
+	if availableHeight < 5 {
+		availableHeight = 5
+	}
+	m.viewport.Height = availableHeight
+
+	// Render conversation area
 	conversation := m.viewport.View()
 
-	bottom := m.renderToolCalls()
-	bottom += "\n" + m.textarea.View()
+	// If modal is open, show it centered
+	if m.modal != nil {
+		modalContent := RenderModal(m.modal, m.modalWidth, m.modalHeight)
+		return lipgloss.Place(
+			m.width,
+			m.height,
+			lipgloss.Center,
+			lipgloss.Center,
+			modalContent,
+		)
+	}
 
 	return lipgloss.JoinVertical(
 		lipgloss.Top,
+		banner,
 		statusBar,
 		conversation,
-		bottom,
+		inputArea,
 	)
 }
 
@@ -315,18 +429,14 @@ func (m *Model) handleResize(msg tea.WindowSizeMsg) {
 	m.width = msg.Width
 	m.height = msg.Height
 
-	headerHeight := 3
-	footerHeight := 6
-
 	if !m.ready {
 		m.viewport = viewport.New(
-			msg.Width-4, msg.Height-headerHeight-footerHeight,
+			msg.Width, msg.Height-8,
 		)
-		m.textarea.SetWidth(msg.Width - 4)
+		m.textarea.SetWidth(msg.Width)
 		m.ready = true
 	} else {
-		m.viewport.Width = msg.Width - 4
-		m.viewport.Height = msg.Height - headerHeight - footerHeight
+		m.viewport.Width = msg.Width
 	}
 }
 
@@ -338,7 +448,13 @@ func (m *Model) updateViewport() {
 			content += RenderUserMessage(msg.Content) + "\n\n"
 		case "assistant":
 			content += RenderAssistantMessage(msg.Content) + "\n\n"
+		case "system":
+			content += RenderSystemMessage(msg.Content) + "\n\n"
 		}
+	}
+
+	for _, tc := range m.toolCalls {
+		content += RenderToolCallResult(tc) + "\n\n"
 	}
 
 	if m.currentStream != "" {
@@ -354,14 +470,31 @@ func (m *Model) renderToolCalls() string {
 		return ""
 	}
 
-	var parts []string
+	var content string
 	for _, tc := range m.toolCalls {
-		parts = append(parts, RenderToolCall(tc.Name, tc.Status))
+		content += RenderToolCallResult(tc) + "\n"
 	}
 
 	return lipgloss.NewStyle().
 		Padding(0, 2).
-		Render(strings.Join(parts, "  "))
+		Render(content)
+}
+
+func (m *Model) renderSystemMessages() string {
+	var content string
+	for _, msg := range m.messages {
+		if msg.Role == "system" {
+			content += RenderSystemMessage(msg.Content) + "\n"
+		}
+	}
+
+	if content == "" {
+		return ""
+	}
+
+	return lipgloss.NewStyle().
+		Padding(0, 2).
+		Render(content)
 }
 
 func (m *Model) handleCommand(input string) {
@@ -386,7 +519,7 @@ func (m *Model) handleCommand(input string) {
 				strings.Join(extNames, "\n  ")
 		}
 		m.messages = append(m.messages, chatEntry{
-			Role:    "assistant",
+			Role:    "system",
 			Content: content,
 		})
 
@@ -415,7 +548,7 @@ func (m *Model) handleCommand(input string) {
 			modelName = p.Model
 		}
 		m.messages = append(m.messages, chatEntry{
-			Role: "assistant",
+			Role: "system",
 			Content: fmt.Sprintf(
 				"Current: %s / %s\n"+
 					"Usage: /model <model-name> to switch models",
@@ -432,9 +565,10 @@ func (m *Model) handleCommand(input string) {
 		if p != nil {
 			oldModel := p.Model
 			p.Model = newModel
+			m.modelName = newModel
 			m.status = "Ready"
 			m.messages = append(m.messages, chatEntry{
-				Role: "assistant",
+				Role: "system",
 				Content: fmt.Sprintf(
 					"Switched model: %s -> %s",
 					oldModel, newModel,
@@ -442,23 +576,35 @@ func (m *Model) handleCommand(input string) {
 			})
 		} else {
 			m.messages = append(m.messages, chatEntry{
-				Role:    "assistant",
+				Role:    "system",
 				Content: "No provider configured to switch models.",
 			})
 		}
 
+	case trimmed == "/commands":
+		m.openCommandsModal()
+
+	case trimmed == "/skills":
+		m.openSkillsModal()
+
+	case trimmed == "/settings":
+		m.openSettingsModal()
+
 	case strings.HasPrefix(trimmed, "/help"):
 		m.messages = append(m.messages, chatEntry{
-			Role: "assistant",
+			Role: "system",
 			Content: `Wukong Commands:
-  /new      Start a new session
-  /clear    Clear screen
-  /help     Show this help
-  /exts     List extensions
-  /model    Show or switch model (usage: /model [name])
-  /exit     Quit wukong
-  Ctrl+D    Send message
-  Ctrl+C    Quit
+  /new        Start a new session
+  /clear      Clear screen
+  /help       Show this help
+  /exts       List extensions
+  /model      Show or switch model (usage: /model [name])
+  /commands   Open command menu
+  /skills     Open skills browser
+  /settings   Open settings panel
+  /exit       Quit wukong
+  Ctrl+D      Send message
+  Ctrl+C      Quit
 
 Built-in Extensions:
   developer            File ops, commands, code search
@@ -477,10 +623,103 @@ Platform Extensions:
 
 	default:
 		m.messages = append(m.messages, chatEntry{
-			Role: "assistant",
+			Role: "system",
 			Content: "Unknown command: " + trimmed +
 				". Type /help for available commands.",
 		})
+	}
+}
+
+func (m *Model) openCommandsModal() {
+	commands := []string{
+		"/new        - Start a new session",
+		"/clear      - Clear screen",
+		"/exts       - List extensions",
+		"/model      - Show or switch model",
+		"/skills     - Browse available skills",
+		"/settings   - Open settings",
+		"/help       - Show help",
+		"/exit       - Quit wukong",
+	}
+	m.modal = &modalState{
+		Type:     ModalCommands,
+		Title:    "Available Commands",
+		Selected: 0,
+		Items:    commands,
+	}
+	m.modalWidth = 60
+	m.modalHeight = 14
+}
+
+func (m *Model) openSkillsModal() {
+	var skills []string
+	if m.cfg != nil {
+		for _, ext := range m.cfg.Extensions {
+			if ext.Enabled {
+				skills = append(skills, ext.Name)
+			}
+		}
+	}
+	if len(skills) == 0 {
+		skills = []string{"No skills loaded"}
+	}
+	m.modal = &modalState{
+		Type:     ModalSkills,
+		Title:    "Loaded Skills",
+		Selected: 0,
+		Items:    skills,
+	}
+	m.modalWidth = 60
+	m.modalHeight = min(len(skills)+4, 14)
+}
+
+func (m *Model) openSettingsModal() {
+	content := fmt.Sprintf(`Provider: %s
+Model:    %s
+Log Level: %s
+Memory:   %s
+Recall:   %s
+Session:  %s
+
+Press ESC to close`,
+		m.providerName,
+		m.modelName,
+		m.cfg.LogLevel,
+		m.cfg.Memory.Backend,
+		map[bool]string{true: "on", false: "off"}[m.cfg.Recall.Enabled],
+		m.cfg.Session.Backend,
+	)
+	m.modal = &modalState{
+		Type:    ModalSettings,
+		Title:   "Settings",
+		Content: content,
+	}
+	m.modalWidth = 60
+	m.modalHeight = 14
+}
+
+func (m *Model) handleModalSelection() {
+	if m.modal == nil {
+		return
+	}
+
+	switch m.modal.Type {
+	case ModalCommands:
+		selected := m.modal.Items[m.modal.Selected]
+		// Extract command from selection
+		if strings.HasPrefix(selected, "/") {
+			cmd := strings.Split(selected, " ")[0]
+			m.modal = nil
+			m.handleCommand(cmd)
+		}
+	case ModalSkills:
+		if m.modal.Selected >= 0 && m.modal.Selected < len(m.modal.Items) {
+			m.skillName = m.modal.Items[m.modal.Selected]
+			m.status = "Skill: " + m.skillName
+		}
+		m.modal = nil
+	case ModalSettings:
+		m.modal = nil
 	}
 }
 
@@ -492,6 +731,8 @@ func StartTUI(
 	workingDir string,
 	projectMgr any,
 ) error {
+	util.SetQuietMode()
+
 	m := NewModel(ModelConfig{
 		Config:     cfg,
 		Loop:       loop,

@@ -819,6 +819,90 @@ func htmlTitleOfBytes(data []byte) string {
 	return strings.Join(fields, " ")
 }
 
+// adjustHTMLPaths adjusts relative paths in HTML content after stripping
+// directory prefixes from page URLs. Since the page moves up in the directory
+// hierarchy, each "../" in relative resource paths is reduced by the number
+// of levels stripped.
+//
+// e.g. with levels=2: "../../../assets/..." -> "../assets/..."
+func adjustHTMLPaths(data []byte, levels int) []byte {
+	s := string(data)
+
+	for i := 0; i < levels; i++ {
+		// Process href attributes
+		s = replaceOneParentDir(s, `href="`)
+		s = replaceOneParentDir(s, `href='`)
+
+		// Process src attributes
+		s = replaceOneParentDir(s, `src="`)
+		s = replaceOneParentDir(s, `src='`)
+
+		// Process srcset attributes
+		s = replaceOneParentDir(s, `srcset="`)
+		s = replaceOneParentDir(s, `srcset='`)
+
+		// Process content attributes (for og:image etc)
+		s = replaceOneParentDir(s, `content="`)
+		s = replaceOneParentDir(s, `content='`)
+	}
+
+	return []byte(s)
+}
+
+// replaceOneParentDir removes one leading "../" from relative paths in HTML
+// attributes starting with the given prefix (e.g. `href="` or `src='`).
+// Only paths that begin with "../" are modified; absolute paths and external
+// URLs are left unchanged.
+func replaceOneParentDir(s, attrPrefix string) string {
+	var builder strings.Builder
+	pos := 0
+	prefixLen := len(attrPrefix)
+
+	for {
+		idx := strings.Index(s[pos:], attrPrefix)
+		if idx < 0 {
+			builder.WriteString(s[pos:])
+			break
+		}
+		absIdx := pos + idx
+		builder.WriteString(s[pos:absIdx])
+
+		// The quote character is the last character of the attrPrefix.
+		quote := attrPrefix[prefixLen-1]
+		if quote != '"' && quote != '\'' {
+			builder.WriteString(s[absIdx : absIdx+prefixLen])
+			pos = absIdx + prefixLen
+			continue
+		}
+
+		// Value starts after the quote
+		valStart := absIdx + prefixLen
+
+		// Find closing quote
+		valEnd := strings.IndexByte(s[valStart:], quote)
+		if valEnd < 0 {
+			builder.WriteString(s[absIdx:])
+			break
+		}
+		valEnd = valStart + valEnd
+		value := s[valStart:valEnd]
+
+		// Only adjust resource paths (those containing "assets/"), not page links.
+		// Pages all move up together, so their relative paths stay the same.
+		// Resources stay in place, so their relative paths need adjustment.
+		if strings.HasPrefix(value, "../") && strings.Contains(value, "assets/") {
+			value = strings.TrimPrefix(value, "../")
+		}
+
+		builder.WriteString(attrPrefix)
+		builder.WriteString(value)
+		builder.WriteByte(quote)
+		pos = valEnd + 1
+	}
+
+	return builder.String()
+}
+
 // isPNG48x48 checks if PNG bytes represent a 48×48 image.
 func isPNG48x48(data []byte) bool {
 	if len(data) < 24 {

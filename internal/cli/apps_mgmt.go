@@ -755,6 +755,7 @@ func newAppsCloneCmd() *cobra.Command {
 		maxDepth         int
 		traversal        string
 		scopePrefix      string
+		scopeAnchor      string
 		subdomains       bool
 		exclude          []string
 		scroll           bool
@@ -768,6 +769,7 @@ func newAppsCloneCmd() *cobra.Command {
 		incremental      bool
 		chromePath       string
 		assetSameDomain  bool
+		assetDomains     []string
 		noSitemap        bool
 		noRobots         bool
 		crawlDelay       int
@@ -817,6 +819,7 @@ Examples:
 				MaxDepth:        maxDepth,
 				Traversal:       traversal,
 				ScopePrefix:     scopePrefix,
+				ScopeAnchor:     scopeAnchor,
 				Exclude:         exclude,
 				Subdomains:      subdomains,
 				Scroll:          scroll,
@@ -836,6 +839,7 @@ Examples:
 				KeepMedia:       keepMedia,
 				SkipExt:         skipExt,
 				AllowDownloads:  allowDownloads,
+				AssetDomains:    assetDomains,
 			}
 			if incremental {
 				v := true
@@ -852,6 +856,10 @@ Examples:
 			if noRobots {
 				v := false
 				opts.RespectRobots = &v
+			}
+			if cmd.Flags().Changed("asset-same-domain") {
+				v := assetSameDomain
+				opts.AssetSameDomain = &v
 			}
 
 			// Respect flags default (non-flag bools are false by default, meaning
@@ -904,6 +912,7 @@ Examples:
 	cmd.Flags().IntVarP(&maxPages, "max-pages", "p", 0, "Maximum pages to clone (0 = unlimited)")
 	cmd.Flags().IntVarP(&maxDepth, "max-depth", "d", 0, "Maximum link depth (0 = unlimited)")
 	cmd.Flags().StringVar(&scopePrefix, "scope-prefix", "", "Only crawl paths starting with this prefix")
+	cmd.Flags().StringVar(&scopeAnchor, "scope-anchor", "", "Only crawl pages with a specific URL fragment/anchor (e.g. 'leaders' for #leaders)")
 	cmd.Flags().StringArrayVar(&exclude, "exclude", nil, "Path prefixes to skip (repeatable)")
 	cmd.Flags().BoolVar(&subdomains, "subdomains", false, "Include subdomains")
 	cmd.Flags().BoolVar(&scroll, "scroll", false, "Auto-scroll each page to trigger lazy loading")
@@ -918,6 +927,7 @@ Examples:
 	cmd.Flags().BoolVar(&refresh, "refresh", false, "Re-render all pages")
 	cmd.Flags().BoolVar(&incremental, "incremental", false, "Use ETag/Last-Modified for incremental updates")
 	cmd.Flags().BoolVar(&assetSameDomain, "asset-same-domain", false, "Only download assets from same domain")
+	cmd.Flags().StringArrayVar(&assetDomains, "asset-domain", nil, "Additional domain to allow assets from (repeatable, e.g. --asset-domain cdn.example.com)")
 	cmd.Flags().BoolVar(&noSitemap, "no-sitemap", false, "Disable sitemap URL discovery")
 	cmd.Flags().StringVar(&chromePath, "chrome", "", "Path to the Chrome/Chromium executable")
 	cmd.Flags().StringVar(&chromePath, "chrome-path", "", "Path to Chrome/Chromium executable (alias for --chrome)")

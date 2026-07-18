@@ -240,6 +240,27 @@ func TestInScope_ListSuffix(t *testing.T) {
 			cfg:      ScopeConfig{ScopePrefix: "/biographies-list"},
 			want:     false,
 		},
+		{
+			name:     "base prefix matches -list path (bi-directional)",
+			seedURL:  "https://www.state.gov/biographies",
+			checkURL: "https://www.state.gov/biographies-list",
+			cfg:      ScopeConfig{ScopePrefix: "/biographies"},
+			want:     true,
+		},
+		{
+			name:     "base prefix matches -list subpage (bi-directional)",
+			seedURL:  "https://www.state.gov/biographies",
+			checkURL: "https://www.state.gov/biographies-list/page/2/",
+			cfg:      ScopeConfig{ScopePrefix: "/biographies"},
+			want:     true,
+		},
+		{
+			name:     "base prefix does not match unrelated -list path",
+			seedURL:  "https://www.state.gov/news",
+			checkURL: "https://www.state.gov/articles-list/page/2/",
+			cfg:      ScopeConfig{ScopePrefix: "/news"},
+			want:     false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -250,6 +271,98 @@ func TestInScope_ListSuffix(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("InScope(%q, %q, %+v) = %v, want %v",
 					tt.seedURL, tt.checkURL, tt.cfg, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMatchesScopePrefix_TrailingSlash(t *testing.T) {
+	tests := []struct {
+		name   string
+		path   string
+		prefix string
+		want   bool
+	}{
+		{
+			name:   "exact match without trailing slash",
+			path:   "/news",
+			prefix: "/news",
+			want:   true,
+		},
+		{
+			name:   "exact match with trailing slash on prefix",
+			path:   "/news",
+			prefix: "/news/",
+			want:   true,
+		},
+		{
+			name:   "exact match with trailing slash on path",
+			path:   "/news/",
+			prefix: "/news",
+			want:   true,
+		},
+		{
+			name:   "exact match with trailing slash on both",
+			path:   "/news/",
+			prefix: "/news/",
+			want:   true,
+		},
+		{
+			name:   "subpage match without trailing slash",
+			path:   "/news/latest",
+			prefix: "/news",
+			want:   true,
+		},
+		{
+			name:   "subpage match with trailing slash on prefix",
+			path:   "/news/latest",
+			prefix: "/news/",
+			want:   true,
+		},
+		{
+			name:   "subpage match with trailing slash on both",
+			path:   "/news/latest/",
+			prefix: "/news/",
+			want:   true,
+		},
+		{
+			name:   "no match for similar prefix without trailing slash",
+			path:   "/news2/latest",
+			prefix: "/news",
+			want:   false,
+		},
+		{
+			name:   "no match for similar prefix with trailing slash",
+			path:   "/news2/latest",
+			prefix: "/news/",
+			want:   false,
+		},
+		{
+			name:   "multi-level prefix with trailing slash",
+			path:   "/About-DLA/Leaders/Biographies/John-Doe",
+			prefix: "/About-DLA/Leaders/Biographies/",
+			want:   true,
+		},
+		{
+			name:   "multi-level exact match with trailing slash",
+			path:   "/About-DLA/Leaders/Biographies/",
+			prefix: "/About-DLA/Leaders/Biographies/",
+			want:   true,
+		},
+		{
+			name:   "root prefix matches everything",
+			path:   "/anything/here",
+			prefix: "/",
+			want:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchesScopePrefix(tt.path, tt.prefix)
+			if got != tt.want {
+				t.Errorf("matchesScopePrefix(%q, %q) = %v, want %v",
+					tt.path, tt.prefix, got, tt.want)
 			}
 		})
 	}

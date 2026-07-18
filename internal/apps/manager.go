@@ -268,6 +268,7 @@ type CloneOptions struct {
 	MaxDepth            int      // 最大链接深度（0 = 无限制）
 	Traversal           string   // 遍历策略：bfs / dfs（空 = 默认bfs）
 	ScopePrefix         string   // 路径前缀限制
+	ScopeAnchor         string   // 锚点限制（只爬取带有特定URL fragment的页面）
 	Exclude             []string // 排除的路径前缀（可重复）
 	Subdomains          bool     // 是否包含子域名
 	Scroll              bool     // 是否滚动加载懒加载内容
@@ -281,6 +282,7 @@ type CloneOptions struct {
 	DedupContent        *bool    // 是否启用内容去重（nil = 默认true）
 	MobileReadable      *bool    // 是否注入移动端CSS（nil = 默认true）
 	AssetSameDomain     *bool    // 仅下载同域资源（nil = 默认true）
+	AssetDomains        []string // 额外允许的资源域名列表
 	CrawlDelay          int      // 爬取延迟（毫秒，0 = 使用robots.txt设定）
 	Incremental         *bool    // 是否启用增量缓存（nil = 默认false）
 	CacheMaxAge         int      // 缓存最长有效时间（秒，默认86400）
@@ -449,6 +451,9 @@ func applyCLIOptions(eco *clone.EnhancedClonerOptions, opts CloneOptions) {
 	if opts.ScopePrefix != "" {
 		eco.ScopePrefix = opts.ScopePrefix
 	}
+	if opts.ScopeAnchor != "" {
+		eco.ScopeAnchor = opts.ScopeAnchor
+	}
 	if opts.CrawlDelay > 0 {
 		eco.CrawlDelay = time.Duration(opts.CrawlDelay) * time.Millisecond
 	}
@@ -469,6 +474,9 @@ func applyCLIOptions(eco *clone.EnhancedClonerOptions, opts CloneOptions) {
 	}
 	if opts.AssetSameDomain != nil {
 		eco.AssetSameDomain = *opts.AssetSameDomain
+	}
+	if len(opts.AssetDomains) > 0 {
+		eco.AssetDomains = opts.AssetDomains
 	}
 	if opts.Incremental != nil {
 		eco.Incremental = *opts.Incremental

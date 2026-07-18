@@ -325,6 +325,12 @@ func (c *WukongConfig) Warnings() []string {
 			"providers["+p.Name+"].base_url"); w != "" {
 			warnings = append(warnings, w)
 		}
+		if p.BaseURL == "" && p.Type != "acp" {
+			warnings = append(warnings,
+				"providers["+p.Name+"].base_url is empty; "+
+					"LLM requests will fail. Set the environment variable "+
+					"or configure base_url directly in config.yaml")
+		}
 	}
 	for _, r := range c.Summon.A2ARemotes {
 		if w := validateURLField(r.ServerURL,

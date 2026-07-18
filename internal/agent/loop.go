@@ -417,14 +417,14 @@ func (l *CoreLoop) Run(
 			Role:      "user",
 			Content:   content,
 		}
-		if err := l.recallStore.StoreMessage(msg); err != nil {
-			util.Logger.Warn("recall: store user message failed",
-				slog.String("error", err.Error()))
-		}
-		// Sync to CortexDB HNSW for semantic search.
 		if l.cortexStore != nil {
 			if err := l.cortexStore.StoreMessage(msg); err != nil {
 				util.Logger.Warn("cortex: store user message failed",
+					slog.String("error", err.Error()))
+			}
+		} else {
+			if err := l.recallStore.StoreMessage(msg); err != nil {
+				util.Logger.Warn("recall: store user message failed",
 					slog.String("error", err.Error()))
 			}
 		}
@@ -454,7 +454,7 @@ func (l *CoreLoop) Run(
 		// and inject it into the message as additional system context.
 		identity := "You are Wukong, an AI coding assistant."
 		wc, wErr := l.memoryFlow.WakeUp(
-			ctx, identity, content, sessionID,
+			ctx, identity, content, sessionID, userID,
 		)
 		if wErr != nil {
 			util.Logger.Warn("memoryflow: wakeup failed",
@@ -486,6 +486,54 @@ func (l *CoreLoop) Run(
 				util.Logger.Debug("memoryflow: message updated with wakeup context",
 					"total_chars", len(message.Content))
 			}
+		}
+	}
+
+	// [Fix 2] Actively search recall history and inject into context.
+	// This ensures cross-session chat history is always available,
+	// complementing the LLM-driven recall_search tool usage.
+	if l.recallStore != nil {
+		content := extractMessageContent(message)
+		var searchResults []recall.SearchResult
+		var searchErr error
+
+		if l.cortexStore != nil {
+			searchResults, searchErr = l.cortexStore.Search(content, userID, 5)
+		} else {
+			searchResults, searchErr = l.recallStore.Search(content, userID, 5)
+		}
+
+		if searchErr != nil {
+			util.Logger.Warn("recall: search failed",
+				"sess", sessionID[:min(8, len(sessionID))],
+				slog.String("error", searchErr.Error()))
+		} else if len(searchResults) > 0 {
+			util.Logger.Info("recall: found relevant history",
+				"sess", sessionID[:min(8, len(sessionID))],
+				"count", len(searchResults))
+
+			var recallCtx strings.Builder
+			recallCtx.WriteString("[Relevant conversation history]\n")
+			for i, result := range searchResults {
+				if result.Preview != "" {
+					fmt.Fprintf(&recallCtx, "%d. %s\n", i+1, result.Preview)
+				}
+			}
+
+			if message.Role == model.RoleUser {
+				origContent := extractMessageContent(message)
+				message = model.Message{
+					Role: "user",
+					Content: fmt.Sprintf("%s\n\n%s",
+						recallCtx.String(), origContent,
+					),
+				}
+				util.Logger.Debug("recall: message updated with search results",
+					"total_chars", len(message.Content))
+			}
+		} else {
+			util.Logger.Debug("recall: no relevant history found",
+				"sess", sessionID[:min(8, len(sessionID))])
 		}
 	}
 
@@ -774,14 +822,14 @@ func (l *CoreLoop) RunStream(
 			Role:      "assistant",
 			Content:   responseText,
 		}
-		if err := l.recallStore.StoreMessage(msg); err != nil {
-			util.Logger.Warn("recall: store assistant message failed",
-				slog.String("error", err.Error()))
-		}
-		// Sync to CortexDB HNSW for semantic search.
 		if l.cortexStore != nil {
 			if err := l.cortexStore.StoreMessage(msg); err != nil {
 				util.Logger.Warn("cortex: store assistant message failed",
+					slog.String("error", err.Error()))
+			}
+		} else {
+			if err := l.recallStore.StoreMessage(msg); err != nil {
+				util.Logger.Warn("recall: store assistant message failed",
 					slog.String("error", err.Error()))
 			}
 		}
@@ -810,15 +858,16 @@ func (l *CoreLoop) RunStream(
 					Role:      "tool_call",
 					Content:   toolContent,
 				}
-				if err := l.recallStore.StoreMessage(toolMsg); err != nil {
-					util.Logger.Debug(
-						"recall: store tool call failed",
-						slog.String("error", err.Error()))
-				}
 				if l.cortexStore != nil {
 					if err := l.cortexStore.StoreMessage(toolMsg); err != nil {
 						util.Logger.Debug(
 							"cortex: store tool call failed",
+							slog.String("error", err.Error()))
+					}
+				} else {
+					if err := l.recallStore.StoreMessage(toolMsg); err != nil {
+						util.Logger.Debug(
+							"recall: store tool call failed",
 							slog.String("error", err.Error()))
 					}
 				}
@@ -832,15 +881,16 @@ func (l *CoreLoop) RunStream(
 					Role:      "tool_response",
 					Content:   choice.Message.Content,
 				}
-				if err := l.recallStore.StoreMessage(toolResp); err != nil {
-					util.Logger.Debug(
-						"recall: store tool response failed",
-						slog.String("error", err.Error()))
-				}
 				if l.cortexStore != nil {
 					if err := l.cortexStore.StoreMessage(toolResp); err != nil {
 						util.Logger.Debug(
 							"cortex: store tool response failed",
+							slog.String("error", err.Error()))
+					}
+				} else {
+					if err := l.recallStore.StoreMessage(toolResp); err != nil {
+						util.Logger.Debug(
+							"recall: store tool response failed",
 							slog.String("error", err.Error()))
 					}
 				}

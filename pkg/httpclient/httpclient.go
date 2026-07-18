@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -55,6 +56,9 @@ type Options struct {
 	MaxIdleConns        int
 	IdleConnTimeout     time.Duration
 	TLSHandshakeTimeout time.Duration
+	ProxyURL            string
+	ProxyPool           []string
+	ProxyRotateEvery    int
 }
 
 func DefaultOptions() Options {
@@ -111,16 +115,36 @@ func New(opts Options) *Client {
 		},
 	}
 
-	client.Client = &http.Client{
-		Timeout: opts.Timeout,
-		Transport: &http.Transport{
-			ForceAttemptHTTP2:   false,
-			DisableKeepAlives:   true,
-			TLSHandshakeTimeout: opts.TLSHandshakeTimeout,
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, network, addr)
-			},
+	transport := &http.Transport{
+		ForceAttemptHTTP2:   false,
+		DisableKeepAlives:   true,
+		TLSHandshakeTimeout: opts.TLSHandshakeTimeout,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
 		},
+	}
+
+	if opts.ProxyURL != "" {
+		proxyURL, err := url.Parse(opts.ProxyURL)
+		if err == nil {
+			transport.Proxy = http.ProxyURL(proxyURL)
+			fmt.Fprintf(os.Stderr, "[httpclient] using proxy: %s\n", opts.ProxyURL)
+		} else {
+			fmt.Fprintf(os.Stderr, "[httpclient] invalid proxy URL: %v\n", err)
+		}
+	} else if len(opts.ProxyPool) > 0 {
+		proxyURL, err := url.Parse(opts.ProxyPool[0])
+		if err == nil {
+			transport.Proxy = http.ProxyURL(proxyURL)
+			fmt.Fprintf(os.Stderr, "[httpclient] using proxy pool (first): %s\n", opts.ProxyPool[0])
+		} else {
+			fmt.Fprintf(os.Stderr, "[httpclient] invalid proxy pool URL: %v\n", err)
+		}
+	}
+
+	client.Client = &http.Client{
+		Timeout:   opts.Timeout,
+		Transport: transport,
 	}
 
 	return client

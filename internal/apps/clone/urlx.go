@@ -15,12 +15,17 @@ import (
 	"golang.org/x/net/publicsuffix"
 )
 
-// Kind classifies a URL as a page or asset.
+// Kind classifies a URL as a page or a specific asset type.
 type URLKind int
 
 const (
 	KindPage  URLKind = iota // HTML page that needs rendering and link rewriting.
-	KindAsset                // Static resource (CSS, image, font, media).
+	KindAsset                // Generic static resource (fallback).
+	KindCSS                  // Stylesheet (.css or <link rel="stylesheet">).
+	KindImage                // Image (<img>, <picture>, CSS url(), etc.).
+	KindFont                 // Web font (.woff, .ttf, etc.).
+	KindJS                   // JavaScript file.
+	KindMedia                // Audio/video/media files.
 )
 
 // reservedPrefix is the directory where all downloaded assets reside.
@@ -28,16 +33,23 @@ const reservedPrefix = "_wukong"
 
 // binaryExts lists extensions that indicate binary/document (non-HTML) content.
 var binaryExts = map[string]bool{
-	".pdf": true, ".doc": true, ".docx": true, ".xlsx": true,
+	".pdf": true, ".doc": true, ".docx": true, ".xls": true, ".xlsx": true,
+	".ppt": true, ".pptx": true, ".pps": true, ".ppsx": true,
+	".rtf": true, ".txt": true, ".csv": true, ".tsv": true,
+	".odt": true, ".ods": true, ".odp": true,
+	".xlsb": true, ".xlsm": true, ".docm": true, ".dotm": true,
 	".zip": true, ".tar": true, ".gz": true, ".bz2": true,
 	".7z": true, ".rar": true, ".exe": true, ".dmg": true,
+	".iso": true, ".img": true, ".msi": true,
 	".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
 	".svg": true, ".ico": true, ".webp": true, ".avif": true,
+	".bmp": true, ".tiff": true, ".tif": true,
 	".css": true, ".js": true, ".json": true, ".xml": true,
 	".woff": true, ".woff2": true, ".ttf": true, ".otf": true,
 	".eot": true, ".mp3": true, ".mp4": true, ".webm": true,
 	".ogg": true, ".wav": true, ".flac": true, ".avi": true,
-	".mov": true, ".m4v": true, ".m4a": true,
+	".mov": true, ".m4v": true, ".m4a": true, ".wmv": true,
+	".flv": true, ".swf": true,
 }
 
 // Normalize converts a URL into a canonical form suitable for deduplication.
@@ -154,10 +166,8 @@ func LocalPath(seedHost, canonicalURL string, kind URLKind) string {
 	switch kind {
 	case KindPage:
 		return localPagePath(seedHost, u)
-	case KindAsset:
-		return localAssetPath(u)
 	default:
-		return localPagePath(seedHost, u)
+		return localAssetPath(u)
 	}
 }
 
@@ -377,6 +387,7 @@ func SameRegistrableDomain(seed, u *url.URL) bool {
 type ScopeConfig struct {
 	AllowSubdomains bool
 	ScopePrefix     string
+	ScopeAnchor     string
 	ExcludePrefixes []string
 }
 
@@ -389,17 +400,33 @@ func InScope(seed, u *url.URL, cfg ScopeConfig) bool {
 		return false
 	}
 
+	// Check scope anchor first (if specified, URL must have matching fragment)
+	if cfg.ScopeAnchor != "" {
+		if u.Fragment == "" {
+			return false
+		}
+		if !strings.EqualFold(u.Fragment, cfg.ScopeAnchor) {
+			return false
+		}
+	}
+
 	if cfg.ScopePrefix != "" {
-		if !matchesScopePrefix(u.Path, cfg.ScopePrefix) {
-			basePrefix := cfg.ScopePrefix
-			if strings.HasSuffix(basePrefix, "-list") {
-				basePrefix = strings.TrimSuffix(basePrefix, "-list")
-				if !matchesScopePrefix(u.Path, basePrefix) {
-					return false
+		matched := false
+		if matchesScopePrefixWithList(u.Path, cfg.ScopePrefix) {
+			matched = true
+		}
+		if !matched && u.Fragment != "" {
+			cleanPrefix := strings.Trim(cfg.ScopePrefix, "/")
+			parts := strings.Split(cleanPrefix, "/")
+			if len(parts) > 0 {
+				lastSegment := strings.ToLower(parts[len(parts)-1])
+				if strings.ToLower(u.Fragment) == lastSegment {
+					matched = true
 				}
-			} else {
-				return false
 			}
+		}
+		if !matched {
+			return false
 		}
 	}
 
@@ -413,12 +440,54 @@ func InScope(seed, u *url.URL, cfg ScopeConfig) bool {
 }
 
 func matchesScopePrefix(path, prefix string) bool {
-	if path == prefix {
+	// Normalize: strip trailing slashes to avoid double-slash issues
+	// when prefix already ends with "/" (e.g. "/about/" + "/" = "/about//").
+	cleanPrefix := strings.TrimRight(prefix, "/")
+	cleanPath := strings.TrimRight(path, "/")
+
+	if cleanPath == cleanPrefix {
 		return true
 	}
-	if strings.HasPrefix(path, prefix+"/") {
+	if cleanPrefix == "" {
+		// Empty prefix matches everything.
 		return true
 	}
+	return strings.HasPrefix(cleanPath, cleanPrefix+"/")
+}
+
+// matchesScopePrefixWithList checks whether a path matches the scope prefix,
+// also considering bi-directional "-list" suffix matching:
+//   - prefix "/biographies-list" matches "/biographies/xxx" (strip -list)
+//   - prefix "/biographies" matches "/biographies-list/..." (add -list)
+//
+// This handles the common pattern where a list page lives at /prefix-list/
+// and detail pages live at /prefix/<slug>.
+func matchesScopePrefixWithList(path, prefix string) bool {
+	// Direct match.
+	if matchesScopePrefix(path, prefix) {
+		return true
+	}
+
+	cleanPrefix := strings.TrimRight(prefix, "/")
+
+	// Direction 1: prefix ends with "-list" → try without "-list".
+	// e.g. prefix="/biographies-list" matches "/biographies/xxx".
+	if strings.HasSuffix(cleanPrefix, "-list") {
+		basePrefix := strings.TrimSuffix(cleanPrefix, "-list")
+		if matchesScopePrefix(path, basePrefix) {
+			return true
+		}
+	}
+
+	// Direction 2: prefix does NOT end with "-list" → try adding "-list".
+	// e.g. prefix="/biographies" matches "/biographies-list/page/2/".
+	if !strings.HasSuffix(cleanPrefix, "-list") {
+		listPrefix := cleanPrefix + "-list"
+		if matchesScopePrefix(path, listPrefix) {
+			return true
+		}
+	}
+
 	return false
 }
 

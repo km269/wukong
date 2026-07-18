@@ -119,7 +119,7 @@
 log_level: "info"                    # debug | info | warn | error
 default_provider: "lmstudio"         # 必须匹配 providers[].name
 lightweight_provider: "lmstudio"     # 后台任务 (空 = default_provider)
-lightweight_model: "gemma-4-e2b-it"  # 后台轻量模型
+lightweight_model: "google/gemma-4-26b-a4b"  # 后台轻量模型
 ```
 
 ---

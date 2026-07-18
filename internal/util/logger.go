@@ -11,6 +11,9 @@ var (
 	// It defaults to JSON format at INFO level for production-friendly
 	// observability. CLI mode may override to text format.
 	Logger *slog.Logger
+
+	// DebugEnabled indicates whether debug-level logging is enabled.
+	DebugEnabled bool
 )
 
 func init() {
@@ -22,16 +25,20 @@ func init() {
 
 // SetDebugMode switches the logger to debug level for verbose output.
 func SetDebugMode() {
+	DebugEnabled = true
 	Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
+	slog.SetDefault(Logger)
 }
 
 // SetQuietMode switches the logger to warn level for minimal output.
 func SetQuietMode() {
+	DebugEnabled = false
 	Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelWarn,
 	}))
+	slog.SetDefault(Logger)
 }
 
 // SetLogLevel sets the global logger to the specified level.
@@ -51,4 +58,5 @@ func SetLogLevel(level string) {
 	Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: lvl,
 	}))
+	slog.SetDefault(Logger)
 }

@@ -149,20 +149,24 @@ func runSession(cmd *cobra.Command, args []string) error {
 		if modelName != "" {
 			parts = append(parts, "model="+modelName)
 		}
-		fmt.Printf("Overrides: %s\n", strings.Join(parts, ", "))
+		if util.DebugEnabled {
+			fmt.Printf("Overrides: %s\n", strings.Join(parts, ", "))
+		}
 	}
 
 	// === Quick pre-load: show session info BEFORE full bootstrap ===
 	// This gives the user immediate feedback while subsystems load.
 	quickCfg := quickLoadConfig(configPath, provider, modelName)
-	fmt.Printf(
-		"Session: %s\nProject: %s\nProvider: %s\nModel: %s\n",
-		sessionID[:8],
-		workingDir,
-		quickCfg.provider,
-		quickCfg.model,
-	)
-	fmt.Println("Initializing subsystems...")
+	if util.DebugEnabled {
+		fmt.Printf(
+			"Session: %s\nProject: %s\nProvider: %s\nModel: %s\n",
+			sessionID[:8],
+			workingDir,
+			quickCfg.provider,
+			quickCfg.model,
+		)
+		fmt.Println("Initializing subsystems...")
+	}
 
 	// Bootstrap the full system
 	wukongCfg, loop, bootstrapState, err := bootstrapSession(
@@ -181,7 +185,9 @@ func runSession(cmd *cobra.Command, args []string) error {
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		sig := <-sigCh
-		fmt.Printf("\nReceived signal %v, shutting down...\n", sig)
+		if util.DebugEnabled {
+			fmt.Printf("\nReceived signal %v, shutting down...\n", sig)
+		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		// shutdownBootstrap is idempotent (sync.Once): the deferred
@@ -206,8 +212,6 @@ func runSession(cmd *cobra.Command, args []string) error {
 		bootstrapState.ProjectMgr.TrackProject(
 			workingDir, sessionID, "")
 	}
-
-	fmt.Println() // blank line after bootstrap logs
 
 	// Start TUI — pass projectMgr for instruction tracking.
 	return tui.StartTUI(

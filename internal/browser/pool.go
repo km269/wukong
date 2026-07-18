@@ -2,6 +2,7 @@ package browser
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"sync"
 	"time"
@@ -272,6 +273,36 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 		return
 	}
 
+	// Extract all links from the rendered DOM using JavaScript.
+	var extractedLinks []string
+	chromedp.Run(tabCtx,
+		chromedp.Evaluate(`
+			(function() {
+				const links = new Set();
+				document.querySelectorAll('a[href]').forEach(a => {
+					const href = a.getAttribute('href');
+					if (href && !href.startsWith('#') && !href.startsWith('javascript:') && 
+						!href.startsWith('mailto:') && !href.startsWith('tel:')) {
+						links.add(a.href);
+					}
+				});
+				document.querySelectorAll('area[href]').forEach(area => {
+					const href = area.getAttribute('href');
+					if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+						links.add(area.href);
+					}
+				});
+				document.querySelectorAll('iframe[src], frame[src]').forEach(f => {
+					const src = f.getAttribute('src');
+					if (src && !src.startsWith('javascript:')) {
+						links.add(f.src);
+					}
+				});
+				return Array.from(links);
+			})()
+		`, &extractedLinks),
+	)
+
 	var cfClearance string
 	var cookies []*network.Cookie
 	if err := chromedp.Run(tabCtx,
@@ -299,6 +330,7 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 		ContentType:         contentType,
 		CloudflareClearance: cfClearance,
 		Referer:             job.referer,
+		ExtractedLinks:      extractedLinks,
 	}}
 }
 
@@ -354,6 +386,136 @@ func (p *Pool) EnableStealth() error {
 
 func (p *Pool) SetBehaviorSimulation(enabled bool) {
 	p.behaviorSimEnabled = enabled
+}
+
+// DownloadAsset downloads an asset using the browser's network stack.
+// It uses a temporary tab to navigate to the asset URL and extracts the response body
+// via CDP Network.getResponseBody.
+func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer string) (*types.AssetDownloadResult, error) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("pool closed")
+	}
+	p.mu.Unlock()
+
+	renderCtx, cancel := context.WithTimeout(ctx, p.opts.RenderTimeout)
+	defer cancel()
+
+	tabCtx, tabCancel := chromedp.NewContext(renderCtx)
+	defer tabCancel()
+
+	var requestID network.RequestID
+	var contentType string
+	var statusCode int
+
+	ua := p.getCurrentUA()
+
+	err := chromedp.Run(tabCtx,
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			headers := network.Headers{
+				"Accept":             "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+				"Accept-Language":    "en-US,en;q=0.9",
+				"Accept-Encoding":    "gzip, deflate, br",
+				"Connection":         "keep-alive",
+				"Sec-Ch-Ua":          ua.SecChUa,
+				"Sec-Ch-Ua-Mobile":   ua.SecChUaMobile,
+				"Sec-Ch-Ua-Platform": ua.SecChUaPlatform,
+				"Sec-Fetch-Dest":     "image",
+				"Sec-Fetch-Mode":     "no-cors",
+				"Sec-Fetch-Site":     "same-origin",
+				"User-Agent":         ua.UserAgent,
+			}
+			if referer != "" {
+				headers["Referer"] = referer
+			}
+			return network.SetExtraHTTPHeaders(headers).Do(ctx)
+		}),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			chromedp.ListenTarget(ctx, func(ev interface{}) {
+				if resp, ok := ev.(*network.EventResponseReceived); ok {
+					if resp.Response.URL == assetURL {
+						requestID = resp.RequestID
+						contentType = resp.Response.MimeType
+						statusCode = int(resp.Response.Status)
+					}
+				}
+			})
+			return nil
+		}),
+		chromedp.Navigate(assetURL),
+		chromedp.WaitReady("body", chromedp.ByQuery),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("navigate: %w", err)
+	}
+
+	var bodyBytes []byte
+	if requestID != "" {
+		err = chromedp.Run(tabCtx,
+			chromedp.ActionFunc(func(ctx context.Context) error {
+				var err error
+				bodyBytes, err = network.GetResponseBody(requestID).Do(ctx)
+				return err
+			}),
+		)
+		if err != nil {
+			bodyBytes = nil
+		}
+	}
+
+	if len(bodyBytes) == 0 {
+		// Fallback: use JavaScript fetch with base64 encoding for binary safety
+		var result struct {
+			Body        string `json:"body"`
+			ContentType string `json:"contentType"`
+			Status      int    `json:"status"`
+		}
+		err = chromedp.Run(tabCtx,
+			chromedp.Evaluate(`
+				(async () => {
+					const res = await fetch(window.location.href, { credentials: 'include' });
+					const buf = await res.arrayBuffer();
+					const bytes = new Uint8Array(buf);
+					let binary = '';
+					for (let i = 0; i < bytes.byteLength; i++) {
+						binary += String.fromCharCode(bytes[i]);
+					}
+					return {
+						body: btoa(binary),
+						contentType: res.headers.get('content-type') || '',
+						status: res.status
+					};
+				})()
+			`, &result),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("fetch asset: %w", err)
+		}
+		if result.Body != "" {
+			bodyBytes, err = base64.StdEncoding.DecodeString(result.Body)
+			if err != nil {
+				return nil, fmt.Errorf("decode base64 from fetch: %w", err)
+			}
+			if contentType == "" {
+				contentType = result.ContentType
+			}
+			if statusCode == 0 {
+				statusCode = result.Status
+			}
+		}
+	}
+
+	if len(bodyBytes) == 0 {
+		return nil, fmt.Errorf("failed to get asset body")
+	}
+
+	return &types.AssetDownloadResult{
+		URL:         assetURL,
+		Body:        bodyBytes,
+		ContentType: contentType,
+		StatusCode:  statusCode,
+	}, nil
 }
 
 func (p *Pool) Close() {

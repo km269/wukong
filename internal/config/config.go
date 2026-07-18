@@ -30,16 +30,22 @@
 //
 // # Environment Variable Expansion
 //
-// API keys and secrets support ${ENV_VAR} syntax for runtime expansion
-// via expandSecrets(). This applies to:
-//   - providers[].api_key
+// API keys, secrets, URLs, and models support ${ENV_VAR} syntax for runtime expansion
+// via expandSecrets(). Bash-style ${VAR:-default} fallback is also supported.
+// This applies to:
+//   - providers[].api_key, base_url, model
 //   - summon.a2a_remotes[].api_key, jwt_secret, oauth_client_secret
 //   - gateway.feishu.app_secret, encrypt_key, verification_token
 //   - observability.langfuse_public_key, secret_key
 //   - artifact.cos_secret_id, cos_secret_key
 //   - acp_server.api_key
-//   - cortex.embedding_api_key
+//   - cortex.embedding_api_key, embedding_base_url, embedding_model
 //   - dify.api_secret
+//   - session.redis_url
+//   - browser.search.searxng.url, api_key
+//   - browser.search.tavily.api_key
+//   - browser.search.google.api_key, cse_id
+//   - browser.search.bing.api_key
 package config
 
 import (
@@ -305,56 +311,99 @@ func NewLoader(configPath string) (*Loader, error) {
 	return l, nil
 }
 
+// expandEnv expands ${ENV_VAR} and ${ENV_VAR:-default} syntax.
+// Unlike os.ExpandEnv, it supports the bash-style ${VAR:-default} fallback.
+func expandEnv(s string) string {
+	return os.Expand(s, func(key string) string {
+		if idx := strings.Index(key, ":-"); idx != -1 {
+			varName := key[:idx]
+			defaultVal := key[idx+2:]
+			if val := os.Getenv(varName); val != "" {
+				return val
+			}
+			return defaultVal
+		}
+		return os.Getenv(key)
+	})
+}
+
 // expandSecrets expands ${ENV_VAR} references in all secret fields
 // that support environment variable injection. This is a security
 // measure that keeps secrets out of config files and version control.
 func (l *Loader) expandSecrets(cfg *WukongConfig) {
-	// Provider API keys.
+	// Provider API keys, base URLs, and models.
 	for i := range cfg.Providers {
-		cfg.Providers[i].APIKey = os.ExpandEnv(cfg.Providers[i].APIKey)
+		cfg.Providers[i].APIKey = expandEnv(cfg.Providers[i].APIKey)
+		cfg.Providers[i].BaseURL = expandEnv(cfg.Providers[i].BaseURL)
+		cfg.Providers[i].Model = expandEnv(cfg.Providers[i].Model)
 	}
 
 	// A2A remote secrets.
 	for i := range cfg.Summon.A2ARemotes {
 		cfg.Summon.A2ARemotes[i].APIKey =
-			os.ExpandEnv(cfg.Summon.A2ARemotes[i].APIKey)
+			expandEnv(cfg.Summon.A2ARemotes[i].APIKey)
 		cfg.Summon.A2ARemotes[i].JWTSecret =
-			os.ExpandEnv(cfg.Summon.A2ARemotes[i].JWTSecret)
+			expandEnv(cfg.Summon.A2ARemotes[i].JWTSecret)
 		cfg.Summon.A2ARemotes[i].OAuthClientSecret =
-			os.ExpandEnv(cfg.Summon.A2ARemotes[i].OAuthClientSecret)
+			expandEnv(cfg.Summon.A2ARemotes[i].OAuthClientSecret)
 	}
 
 	// Gateway Feishu channel secrets.
 	cfg.Gateway.Feishu.AppSecret =
-		os.ExpandEnv(cfg.Gateway.Feishu.AppSecret)
+		expandEnv(cfg.Gateway.Feishu.AppSecret)
 	cfg.Gateway.Feishu.EncryptKey =
-		os.ExpandEnv(cfg.Gateway.Feishu.EncryptKey)
+		expandEnv(cfg.Gateway.Feishu.EncryptKey)
 	cfg.Gateway.Feishu.VerificationToken =
-		os.ExpandEnv(cfg.Gateway.Feishu.VerificationToken)
+		expandEnv(cfg.Gateway.Feishu.VerificationToken)
 
 	// Observability (Langfuse) secrets.
 	cfg.Observability.LangfusePublicKey =
-		os.ExpandEnv(cfg.Observability.LangfusePublicKey)
+		expandEnv(cfg.Observability.LangfusePublicKey)
 	cfg.Observability.LangfuseSecretKey =
-		os.ExpandEnv(cfg.Observability.LangfuseSecretKey)
+		expandEnv(cfg.Observability.LangfuseSecretKey)
 
 	// Artifact COS credentials.
 	cfg.Artifact.COSSecretID =
-		os.ExpandEnv(cfg.Artifact.COSSecretID)
+		expandEnv(cfg.Artifact.COSSecretID)
 	cfg.Artifact.COSSecretKey =
-		os.ExpandEnv(cfg.Artifact.COSSecretKey)
+		expandEnv(cfg.Artifact.COSSecretKey)
 
 	// ACP Server API key.
 	cfg.ACPServer.APIKey =
-		os.ExpandEnv(cfg.ACPServer.APIKey)
+		expandEnv(cfg.ACPServer.APIKey)
 
-	// CortexDB embedding API key.
+	// CortexDB embedding settings.
 	cfg.Cortex.EmbeddingAPIKey =
-		os.ExpandEnv(cfg.Cortex.EmbeddingAPIKey)
+		expandEnv(cfg.Cortex.EmbeddingAPIKey)
+	cfg.Cortex.EmbeddingBaseURL =
+		expandEnv(cfg.Cortex.EmbeddingBaseURL)
+	cfg.Cortex.EmbeddingModel =
+		expandEnv(cfg.Cortex.EmbeddingModel)
+
+	// MemoryFlow model settings.
+	cfg.MemoryFlow.PlannerModel =
+		expandEnv(cfg.MemoryFlow.PlannerModel)
+	cfg.MemoryFlow.ExtractorModel =
+		expandEnv(cfg.MemoryFlow.ExtractorModel)
+
+	// GraphFlow model settings.
+	cfg.GraphFlow.ExtractorModel =
+		expandEnv(cfg.GraphFlow.ExtractorModel)
 
 	// Dify API secret.
 	cfg.Dify.APISecret =
-		os.ExpandEnv(cfg.Dify.APISecret)
+		expandEnv(cfg.Dify.APISecret)
+
+	// Session Redis URL.
+	cfg.Session.RedisURL = expandEnv(cfg.Session.RedisURL)
+
+	// Search provider secrets.
+	cfg.Browser.Search.SearXNG.URL = expandEnv(cfg.Browser.Search.SearXNG.URL)
+	cfg.Browser.Search.SearXNG.APIKey = expandEnv(cfg.Browser.Search.SearXNG.APIKey)
+	cfg.Browser.Search.Tavily.APIKey = expandEnv(cfg.Browser.Search.Tavily.APIKey)
+	cfg.Browser.Search.Google.APIKey = expandEnv(cfg.Browser.Search.Google.APIKey)
+	cfg.Browser.Search.Google.CSEID = expandEnv(cfg.Browser.Search.Google.CSEID)
+	cfg.Browser.Search.Bing.APIKey = expandEnv(cfg.Browser.Search.Bing.APIKey)
 }
 
 // Load parses the configuration into a WukongConfig.

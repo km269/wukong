@@ -212,10 +212,11 @@ func (m *MemoryFlowService) WakeUpWithKnowledgeIndex(
 	identity string,
 	query string,
 	sessionID string,
+	userID string,
 	injector *KnowledgeIndexInjector,
 ) (string, error) {
 	// Get the standard wake-up context (3 layers).
-	wakeCtx, err := m.WakeUp(ctx, identity, query, sessionID)
+	wakeCtx, err := m.WakeUp(ctx, identity, query, sessionID, userID)
 	if err != nil {
 		return "", err
 	}

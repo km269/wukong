@@ -210,7 +210,7 @@ func TestRewriteHTML_LazyLoadIntegration(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var calls []string
 			sink := func(absURL string, kind URLKind) string {
-				if kind == KindAsset {
+				if kind != KindPage {
 					calls = append(calls, absURL)
 					return "local/" + strings.Split(absURL, "/")[len(strings.Split(absURL, "/"))-1]
 				}

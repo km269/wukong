@@ -46,6 +46,9 @@ type CloneDefaults struct {
 	CookieFile           string          `mapstructure:"cookie_file"`
 	UserAgent            string          `mapstructure:"user_agent"`
 	BrowserBackend       BrowserBackendType `mapstructure:"browser_backend"`
+	ProxyEnabled         bool            `mapstructure:"proxy_enabled"`
+	ProxyPool            []string        `mapstructure:"proxy_pool"`
+	ProxyRotateEvery     int             `mapstructure:"proxy_rotate_every"`
 }
 
 // PackDefaults holds default values for app packaging operations.

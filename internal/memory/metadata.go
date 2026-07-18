@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/km269/wukong/internal/util"
@@ -204,19 +205,22 @@ func (m *MetadataManager) BatchGetMetadata(
 	}
 
 	placeholders := make([]string, len(memoryIDs))
-	args := make([]interface{}, len(memoryIDs)+1)
-	args[0] = userID
-	for i, id := range memoryIDs {
-		placeholders[i] = fmt.Sprintf("$%d", i+2)
-		args[i+1] = id
+	for i := range memoryIDs {
+		placeholders[i] = "?"
+	}
+
+	args := make([]interface{}, 0, len(memoryIDs)+1)
+	args = append(args, userID)
+	for _, id := range memoryIDs {
+		args = append(args, id)
 	}
 
 	query := fmt.Sprintf(`
 		SELECT memory_id, user_id, reference_count, importance,
 			last_referenced_at, created_at
 		FROM memory_metadata
-		WHERE user_id = $1 AND memory_id IN (%s)`,
-		fmt.Sprintf("%s", placeholders),
+		WHERE user_id = ? AND memory_id IN (%s)`,
+		strings.Join(placeholders, ", "),
 	)
 
 	rows, err := m.db.QueryContext(ctx, query, args...)
