@@ -360,6 +360,9 @@ func applyPageQuerySuffix(filename, query string) string {
 	base := filename[:len(filename)-len(ext)]
 
 	// Case 1: single page-number param → index_page_N.html
+	// All page-like param names (page, Page, p, pg, pageNum, etc.) are
+	// normalized to "_page_" for readability. In practice, a single site
+	// will use one consistent param name, so collisions are unlikely.
 	if len(values) == 1 {
 		for key := range values {
 			lowerKey := strings.ToLower(key)
