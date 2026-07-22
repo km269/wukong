@@ -8,6 +8,8 @@
 package clone
 
 import (
+	"compress/gzip"
+	"compress/zlib"
 	"context"
 	"fmt"
 	"io"
@@ -267,11 +269,30 @@ func (d *AssetDownloader) tryDownload(ctx context.Context, assetURL string) (*Do
 		}
 	}
 
-	// Read body with limit.
+	// Read body with limit, handling content-encoding decompression.
+	// We manually set Accept-Encoding to mimic real browsers, which means
+	// Go's http.Client won't auto-decompress for us.
+	reader := resp.Body
+	contentEncoding := resp.Header.Get("Content-Encoding")
+	switch contentEncoding {
+	case "gzip":
+		gzReader, gzErr := gzip.NewReader(resp.Body)
+		if gzErr == nil {
+			defer gzReader.Close()
+			reader = gzReader
+		}
+	case "deflate":
+		zlibReader, zlibErr := zlib.NewReader(resp.Body)
+		if zlibErr == nil {
+			defer zlibReader.Close()
+			reader = zlibReader
+		}
+	}
+
 	var body []byte
 	if d.MaxBytes > 0 {
 		// Read up to MaxBytes+1 to detect overflow.
-		limited := io.LimitReader(resp.Body, d.MaxBytes+1)
+		limited := io.LimitReader(reader, d.MaxBytes+1)
 		body, err = io.ReadAll(limited)
 		if err != nil {
 			return nil, &DownloadError{URL: assetURL, Reason: "read", Err: err}
@@ -284,7 +305,7 @@ func (d *AssetDownloader) tryDownload(ctx context.Context, assetURL string) (*Do
 			}
 		}
 	} else {
-		body, err = io.ReadAll(resp.Body)
+		body, err = io.ReadAll(reader)
 		if err != nil {
 			return nil, &DownloadError{URL: assetURL, Reason: "read", Err: err}
 		}
