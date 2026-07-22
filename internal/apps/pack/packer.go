@@ -245,6 +245,10 @@ func copyFile(src, dst string) error {
 // packZIM creates a ZIM archive file (Kiwix compatible) with rich metadata.
 // Includes title extraction, icon embedding, counter statistics,
 // and incremental cluster caching.
+//
+// For cloned apps (sourceDir contains pages/ and assets/ subdirectories),
+// the pages/ and assets/ prefixes are stripped so that URLs inside the
+// ZIM archive match the original website URL structure.
 func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Result, error) {
 	result := &Result{
 		Format:     FormatZIM,
@@ -266,6 +270,51 @@ func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Resu
 	var iconData []byte
 	var warnings []string
 	var htmlFiles []htmlFileEntry
+	var existingURLs = make(map[string]bool)
+
+	// Detect cloned app layout: pages/ directory at the top level.
+	// When pages/ exists, we strip the pages/ prefix (and assets/ prefix if
+	// assets/ also exists) to produce cleaner ZIM URLs that match the
+	// original website URL structure.
+	//
+	// We check for pages/ as the primary signal because even if all asset
+	// downloads failed (empty or missing assets/), the pages directory
+	// still indicates a cloned-app layout.
+	pagesDir := filepath.Join(sourceDir, "pages")
+	assetsDir := filepath.Join(sourceDir, "assets")
+	_, hasPages := os.Stat(pagesDir)
+	_, hasAssets := os.Stat(assetsDir)
+	isClonedLayout := hasPages == nil
+	hasAssetsDir := hasAssets == nil
+
+	// stripPrefix removes the leading pages/ or assets/ prefix from a
+	// relative path when the cloned-app layout is detected.
+	stripPrefix := func(relPath string) string {
+		if !isClonedLayout {
+			return relPath
+		}
+		sep := string(filepath.Separator)
+		if strings.HasPrefix(relPath, "pages"+sep) {
+			return strings.TrimPrefix(relPath, "pages"+sep)
+		}
+		if hasAssetsDir && strings.HasPrefix(relPath, "assets"+sep) {
+			return strings.TrimPrefix(relPath, "assets"+sep)
+		}
+		return relPath
+	}
+
+	// For cloned layout, HTML files need their asset relative paths
+	// adjusted by one level because pages/ is stripped.
+	// We also need to strip the "assets/" prefix from resource paths
+	// if the assets/ directory exists and is flattened into the ZIM root.
+	adjustLevels := 0
+	stripAssetsPrefix := false
+	if isClonedLayout {
+		adjustLevels = 1
+		if hasAssetsDir {
+			stripAssetsPrefix = true
+		}
+	}
 
 	err := filepath.Walk(sourceDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
@@ -281,24 +330,28 @@ func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Resu
 			return nil
 		}
 
+		// Skip reserved internal directories.
+		if strings.HasPrefix(relPath, "_wukong"+string(filepath.Separator)) {
+			return nil
+		}
+
 		data, err := os.ReadFile(path)
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("skip file %s: %v", path, err))
 			return nil
 		}
 
-		url := filepath.ToSlash(relPath)
-
-		if mainPageURL == "" && strings.HasSuffix(url, "/index.html") {
-			mainPageURL = url
-			if t := htmlTitleOfBytes(data); t != "" {
-				mainPageTitle = t
-			}
-		}
+		url := filepath.ToSlash(stripPrefix(relPath))
 
 		mimeType := getMimeType(url)
 		title := url
 		if mimeType == "text/html" {
+			if adjustLevels > 0 {
+				data = adjustHTMLPaths(data, adjustLevels)
+			}
+			if stripAssetsPrefix {
+				data = stripAssetsPrefixFromHTML(data)
+			}
 			if t := htmlTitleOfBytes(data); t != "" {
 				title = t
 			}
@@ -320,6 +373,7 @@ func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Resu
 			warnings = append(warnings, fmt.Sprintf("skip article %s: %v", url, err))
 			return nil
 		}
+		existingURLs[url] = true
 		filesProcessed++
 		return nil
 	})
@@ -333,8 +387,71 @@ func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Resu
 			fmt.Errorf("no files found to pack"))
 	}
 
-	// Create index.html with list of all HTML files and set as main page.
-	if len(htmlFiles) > 0 {
+	// Determine the main page. Priority:
+	//   1. Explicit MainPagePath option (if the file exists)
+	//   2. Root index.html (the website's own homepage)
+	//   3. Auto-generated content index page
+	// We do NOT fall back to a random deep page like "biographies/xxx/index.html"
+	// because that would be a confusing entry point for users.
+	if p.opts.MainPagePath != "" {
+		// Normalize: strip leading / if present
+		candidate := strings.TrimPrefix(p.opts.MainPagePath, "/")
+		for _, entry := range htmlFiles {
+			if entry.url == candidate {
+				mainPageURL = entry.url
+				mainPageTitle = entry.title
+				break
+			}
+		}
+	}
+
+	if mainPageURL == "" {
+		for _, entry := range htmlFiles {
+			if entry.url == "index.html" {
+				mainPageURL = entry.url
+				mainPageTitle = entry.title
+				break
+			}
+		}
+	}
+
+	// Add directory-index redirects for cleaner URL compatibility.
+	// Many websites serve the same content at both:
+	//   /path/to/page/          →  path/to/page/index.html
+	//   /path/to/page           →  path/to/page.html
+	//
+	// Browsers handle this via HTTP redirects, but ZIM files are static
+	// archives with no server-side rewriting. We add explicit redirects
+	// so both URL forms resolve correctly.
+	for _, entry := range htmlFiles {
+		if strings.HasSuffix(entry.url, "/index.html") && entry.url != "index.html" {
+			// e.g. "biographies/biographies-list/index.html"
+			//   → "biographies/biographies-list.html"
+			dirPath := strings.TrimSuffix(entry.url, "/index.html")
+			altURL := dirPath + ".html"
+			if altURL != entry.url && !existingURLs[altURL] {
+				if err := packer.AddRedirect('C', altURL, entry.title, 'C', entry.url); err != nil {
+					warnings = append(warnings,
+						fmt.Sprintf("add redirect %s → %s: %v", altURL, entry.url, err))
+				}
+			}
+		} else if strings.HasSuffix(entry.url, ".html") && !strings.HasSuffix(entry.url, "/index.html") {
+			// Reverse direction: "biographies/biographies-list.html"
+			//   → "biographies/biographies-list/index.html"
+			dirPath := strings.TrimSuffix(entry.url, ".html")
+			altURL := dirPath + "/index.html"
+			if altURL != entry.url && !existingURLs[altURL] {
+				if err := packer.AddRedirect('C', altURL, entry.title, 'C', entry.url); err != nil {
+					warnings = append(warnings,
+						fmt.Sprintf("add redirect %s → %s: %v", altURL, entry.url, err))
+				}
+			}
+		}
+	}
+
+	// Create a content index page only if no natural main page was found.
+	// Otherwise, the website's own index.html would be overwritten.
+	if mainPageURL == "" && len(htmlFiles) > 0 {
 		var indexHTML strings.Builder
 		indexHTML.WriteString(`<!DOCTYPE html>
 <html lang="en">
@@ -846,7 +963,308 @@ func adjustHTMLPaths(data []byte, levels int) []byte {
 		s = replaceOneParentDir(s, `content='`)
 	}
 
+	// Process url() inside style attributes
+	s = adjustStyleURLs(s, levels)
+
 	return []byte(s)
+}
+
+// adjustStyleURLs adjusts url() paths inside HTML style attributes.
+// It reduces leading "../" by the specified number of levels.
+func adjustStyleURLs(s string, levels int) string {
+	if levels <= 0 {
+		return s
+	}
+
+	// Find style="..." and style='...' attributes and process url() inside them
+	result := s
+	for _, attrPrefix := range []string{`style="`, `style='`} {
+		result = processStyleAttr(result, attrPrefix, func(css string) string {
+			return removeParentDirFromCSSURLs(css, levels)
+		})
+	}
+	return result
+}
+
+// processStyleAttr finds style attributes with the given prefix and
+// transforms their content using the provided function.
+func processStyleAttr(s, attrPrefix string, transform func(string) string) string {
+	var builder strings.Builder
+	pos := 0
+	prefixLen := len(attrPrefix)
+	quote := attrPrefix[prefixLen-1]
+
+	for {
+		idx := strings.Index(s[pos:], attrPrefix)
+		if idx < 0 {
+			builder.WriteString(s[pos:])
+			break
+		}
+		absIdx := pos + idx
+		builder.WriteString(s[pos:absIdx])
+
+		valStart := absIdx + prefixLen
+		valEnd := strings.IndexByte(s[valStart:], quote)
+		if valEnd < 0 {
+			builder.WriteString(s[absIdx:])
+			break
+		}
+		valEnd = valStart + valEnd
+		value := s[valStart:valEnd]
+
+		transformed := transform(value)
+
+		builder.WriteString(attrPrefix)
+		builder.WriteString(transformed)
+		builder.WriteByte(quote)
+		pos = valEnd + 1
+	}
+
+	return builder.String()
+}
+
+// removeParentDirFromCSSURLs removes one level of "../" from url() paths
+// in CSS content.
+func removeParentDirFromCSSURLs(css string, levels int) string {
+	result := css
+	for i := 0; i < levels; i++ {
+		result = removeOneParentDirFromCSSURLs(result)
+	}
+	return result
+}
+
+// removeOneParentDirFromCSSURLs removes one leading "../" from each url() in CSS.
+func removeOneParentDirFromCSSURLs(css string) string {
+	var builder strings.Builder
+	pos := 0
+
+	for {
+		idx := strings.Index(css[pos:], "url(")
+		if idx < 0 {
+			builder.WriteString(css[pos:])
+			break
+		}
+		absIdx := pos + idx
+		builder.WriteString(css[pos:absIdx])
+
+		urlStart := absIdx + 4 // len("url(")
+
+		// Skip optional whitespace and quotes
+		quoteChar := byte(0)
+		quoteLen := 0
+		trimmed := 0
+		for urlStart+trimmed < len(css) {
+			c := css[urlStart+trimmed]
+			if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+				trimmed++
+				continue
+			}
+			if c == '"' || c == '\'' {
+				quoteChar = c
+				quoteLen = 1
+				trimmed++
+			}
+			break
+		}
+		urlContentStart := urlStart + trimmed
+
+		// Find end of url
+		var urlEnd int
+		if quoteChar != 0 {
+			urlEnd = strings.IndexByte(css[urlContentStart:], quoteChar)
+			if urlEnd < 0 {
+				builder.WriteString(css[absIdx:])
+				break
+			}
+			urlEnd = urlContentStart + urlEnd
+		} else {
+			urlEnd = strings.IndexAny(css[urlContentStart:], ") \t\n\r")
+			if urlEnd < 0 {
+				builder.WriteString(css[absIdx:])
+				break
+			}
+			urlEnd = urlContentStart + urlEnd
+		}
+
+		urlValue := css[urlContentStart:urlEnd]
+
+		// Only modify relative paths starting with "../"
+		if strings.HasPrefix(urlValue, "../") {
+			urlValue = strings.TrimPrefix(urlValue, "../")
+		}
+
+		// Find closing paren
+		afterURL := urlEnd + quoteLen
+		parenIdx := strings.IndexByte(css[afterURL:], ')')
+		if parenIdx < 0 {
+			builder.WriteString(css[absIdx:])
+			break
+		}
+
+		// Rebuild url()
+		builder.WriteString(css[absIdx:urlContentStart]) // url( + whitespace + opening quote
+		builder.WriteString(urlValue)
+		builder.WriteString(css[urlEnd : afterURL+parenIdx+1]) // closing quote + whitespace + )
+
+		pos = afterURL + parenIdx + 1
+	}
+
+	return builder.String()
+}
+
+// stripAssetsPrefixFromHTML removes the "assets/" prefix from resource
+// paths in HTML attributes. This is used when the assets/ directory
+// is flattened into the ZIM root alongside pages.
+//
+// e.g. "../../assets/css/style.css" -> "../../css/style.css"
+func stripAssetsPrefixFromHTML(data []byte) []byte {
+	s := string(data)
+
+	attrs := []string{
+		`href="`, `href='`,
+		`src="`, `src='`,
+		`srcset="`, `srcset='`,
+		`content="`, `content='`,
+	}
+
+	for _, attrPrefix := range attrs {
+		s = stripAssetsPrefixFromAttr(s, attrPrefix)
+	}
+
+	// Also process url() inside style attributes
+	for _, attrPrefix := range []string{`style="`, `style='`} {
+		s = processStyleAttr(s, attrPrefix, func(css string) string {
+			return stripAssetsPrefixFromCSSURLs(css)
+		})
+	}
+
+	return []byte(s)
+}
+
+// stripAssetsPrefixFromCSSURLs removes the "assets/" prefix from url()
+// paths in CSS content.
+func stripAssetsPrefixFromCSSURLs(css string) string {
+	var builder strings.Builder
+	pos := 0
+
+	for {
+		idx := strings.Index(css[pos:], "url(")
+		if idx < 0 {
+			builder.WriteString(css[pos:])
+			break
+		}
+		absIdx := pos + idx
+		builder.WriteString(css[pos:absIdx])
+
+		urlStart := absIdx + 4
+
+		quoteChar := byte(0)
+		quoteLen := 0
+		trimmed := 0
+		for urlStart+trimmed < len(css) {
+			c := css[urlStart+trimmed]
+			if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+				trimmed++
+				continue
+			}
+			if c == '"' || c == '\'' {
+				quoteChar = c
+				quoteLen = 1
+				trimmed++
+			}
+			break
+		}
+		urlContentStart := urlStart + trimmed
+
+		var urlEnd int
+		if quoteChar != 0 {
+			urlEnd = strings.IndexByte(css[urlContentStart:], quoteChar)
+			if urlEnd < 0 {
+				builder.WriteString(css[absIdx:])
+				break
+			}
+			urlEnd = urlContentStart + urlEnd
+		} else {
+			urlEnd = strings.IndexAny(css[urlContentStart:], ") \t\n\r")
+			if urlEnd < 0 {
+				builder.WriteString(css[absIdx:])
+				break
+			}
+			urlEnd = urlContentStart + urlEnd
+		}
+
+		urlValue := css[urlContentStart:urlEnd]
+
+		// Remove "assets/" prefix if present
+		if strings.Contains(urlValue, "assets/") {
+			urlValue = strings.Replace(urlValue, "assets/", "", 1)
+		}
+
+		// Find closing paren
+		afterURL := urlEnd + quoteLen
+		parenIdx := strings.IndexByte(css[afterURL:], ')')
+		if parenIdx < 0 {
+			builder.WriteString(css[absIdx:])
+			break
+		}
+
+		// Rebuild url()
+		builder.WriteString(css[absIdx:urlContentStart]) // url( + whitespace + opening quote
+		builder.WriteString(urlValue)
+		builder.WriteString(css[urlEnd : afterURL+parenIdx+1]) // closing quote + whitespace + )
+
+		pos = afterURL + parenIdx + 1
+	}
+
+	return builder.String()
+}
+
+// stripAssetsPrefixFromAttr removes the "assets/" prefix from paths
+// in HTML attributes with the given prefix.
+func stripAssetsPrefixFromAttr(s, attrPrefix string) string {
+	var builder strings.Builder
+	pos := 0
+	prefixLen := len(attrPrefix)
+
+	for {
+		idx := strings.Index(s[pos:], attrPrefix)
+		if idx < 0 {
+			builder.WriteString(s[pos:])
+			break
+		}
+		absIdx := pos + idx
+		builder.WriteString(s[pos:absIdx])
+
+		quote := attrPrefix[prefixLen-1]
+		if quote != '"' && quote != '\'' {
+			builder.WriteString(s[absIdx : absIdx+prefixLen])
+			pos = absIdx + prefixLen
+			continue
+		}
+
+		valStart := absIdx + prefixLen
+		valEnd := strings.IndexByte(s[valStart:], quote)
+		if valEnd < 0 {
+			builder.WriteString(s[absIdx:])
+			break
+		}
+		valEnd = valStart + valEnd
+		value := s[valStart:valEnd]
+
+		// Remove "assets/" prefix from all paths that contain it.
+		// Handle both relative paths (../assets/...) and direct paths (assets/...).
+		// Also handles multi-value attributes like srcset with comma-separated URLs.
+		if strings.Contains(value, "assets/") {
+			value = strings.ReplaceAll(value, "assets/", "")
+		}
+
+		builder.WriteString(attrPrefix)
+		builder.WriteString(value)
+		builder.WriteByte(quote)
+		pos = valEnd + 1
+	}
+
+	return builder.String()
 }
 
 // replaceOneParentDir removes one leading "../" from relative paths in HTML
@@ -890,8 +1308,10 @@ func replaceOneParentDir(s, attrPrefix string) string {
 		// Only adjust resource paths (those containing "assets/"), not page links.
 		// Pages all move up together, so their relative paths stay the same.
 		// Resources stay in place, so their relative paths need adjustment.
-		if strings.HasPrefix(value, "../") && strings.Contains(value, "assets/") {
-			value = strings.TrimPrefix(value, "../")
+		// For multi-value attributes like srcset (comma-separated URLs),
+		// we need to process each URL individually.
+		if strings.Contains(value, "assets/") {
+			value = removeOneParentDirFromAssetPaths(value)
 		}
 
 		builder.WriteString(attrPrefix)
@@ -901,6 +1321,55 @@ func replaceOneParentDir(s, attrPrefix string) string {
 	}
 
 	return builder.String()
+}
+
+// removeOneParentDirFromAssetPaths removes one leading "../" from every
+// asset path (paths containing "assets/") in the given attribute value.
+// This handles both single-value attributes (src, href) and multi-value
+// attributes like srcset where URLs are comma-separated.
+//
+// For each URL in the value:
+//   - If the URL starts with "../" and contains "assets/", remove one "../"
+//
+// Examples:
+//
+//	"../../../assets/style.css" → "../../assets/style.css"
+//	"../assets/a.jpg 239w, ../assets/b.jpg 38w" → "assets/a.jpg 239w, assets/b.jpg 38w"
+//	"../../assets/a.jpg, ../../assets/b.jpg" → "../assets/a.jpg, ../assets/b.jpg"
+func removeOneParentDirFromAssetPaths(value string) string {
+	if !strings.Contains(value, "assets/") {
+		return value
+	}
+
+	// Fast path: simple single URL starting with ../
+	if strings.HasPrefix(value, "../") {
+		// Check if there's no comma (single value) - use simple trim
+		if !strings.Contains(value, ",") {
+			return strings.TrimPrefix(value, "../")
+		}
+	}
+
+	// For multi-value attributes like srcset, we need to process each URL.
+	// srcset format: "url1 w1, url2 w2, url3 w3"
+	// We split on commas, process each segment, then rejoin.
+	segments := strings.Split(value, ",")
+	modified := false
+	for i, seg := range segments {
+		// Trim leading whitespace to find the URL start
+		trimmed := strings.TrimLeft(seg, " \t")
+		if strings.HasPrefix(trimmed, "../") && strings.Contains(trimmed, "assets/") {
+			// Reconstruct with original leading whitespace, minus one "../"
+			leading := seg[:len(seg)-len(trimmed)]
+			segments[i] = leading + strings.TrimPrefix(trimmed, "../")
+			modified = true
+		}
+	}
+
+	if !modified {
+		return value
+	}
+
+	return strings.Join(segments, ",")
 }
 
 // isPNG48x48 checks if PNG bytes represent a 48×48 image.

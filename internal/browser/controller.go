@@ -69,15 +69,23 @@ func NewController(cfg *config.BrowserConfig) *Controller {
 // initChromedp initializes the headless Chrome browser context.
 func (c *Controller) initChromedp() {
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", c.cfg.Headless),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("no-sandbox", true),
 		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.Flag("disable-extensions", true),
-		chromedp.Flag("disable-background-networking", true),
 		chromedp.Flag("disable-sync", true),
 		chromedp.Flag("mute-audio", true),
+		chromedp.Flag("start-maximized", true),
+		// Disable IPv6 to avoid connection issues on networks where
+		// IPv6 is restricted.
+		chromedp.Flag("disable-ipv6", true),
 	)
+
+	// Use new headless mode (Chrome 112+) which behaves much closer
+	// to a real browser and is less likely to trigger detection.
+	if c.cfg.Headless {
+		opts = append(opts, chromedp.Flag("headless", "new"))
+	}
 
 	// Stealth mode: add anti-detection flags and viewport sizing.
 	if c.stealth {

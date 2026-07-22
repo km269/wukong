@@ -187,11 +187,14 @@ func localPagePath(seedHost string, u *url.URL) string {
 	}
 
 	// Collapse index.html into the directory itself.
-	if !collapseIndex(&leaf) {
-		// For non-index pages, apply query hash to filename.
-		if u.RawQuery != "" {
-			leaf = applyQueryHash(leaf, u.RawQuery)
-		}
+	collapseIndex(&leaf)
+
+	// Apply query parameter suffix to all pages that have query parameters,
+	// including index pages (e.g. /list/?Page=2 must not collide with /list/).
+	// Uses readable naming for common pagination params, falls back to hash
+	// for complex/unknown query strings.
+	if u.RawQuery != "" {
+		leaf = applyPageQuerySuffix(leaf, u.RawQuery)
 	}
 
 	if strings.EqualFold(u.Host, seedHost) {
@@ -288,6 +291,144 @@ func collapseIndex(leaf *string) bool {
 		return true
 	}
 	return false
+}
+
+// pageParamNames lists common query parameter names used for pagination.
+// When a page URL has only one of these params, we use a readable suffix
+// instead of a hash (e.g. index_page_2.html instead of index__q-xxx.html).
+var pageParamNames = map[string]bool{
+	"page":     true,
+	"Page":     true,
+	"p":        true,
+	"pg":       true,
+	"pagenum":  true,
+	"pageNum":  true,
+	"PageNum":  true,
+	"pageno":   true,
+	"pageNo":   true,
+	"PageNo":   true,
+	"paged":    true,
+	"page_num": true,
+}
+
+// offsetParamNames lists common offset/limit-style pagination params.
+var offsetParamNames = map[string]bool{
+	"offset":    true,
+	"start":     true,
+	"skip":      true,
+	"from":      true,
+	"after":     true,
+	"limit":     true,
+	"size":      true,
+	"count":     true,
+	"per_page":  true,
+	"perPage":   true,
+	"page_size": true,
+	"pageSize":  true,
+}
+
+// cursorParamNames lists common cursor/token/seek-style pagination params.
+var cursorParamNames = map[string]bool{
+	"cursor":       true,
+	"next":         true,
+	"after_id":     true,
+	"afterId":      true,
+	"pageToken":    true,
+	"page_token":   true,
+	"token":        true,
+	"continuation": true,
+	"since":        true,
+	"before":       true,
+	"until":        true,
+	"from":         true,
+	"after":        true,
+}
+
+// applyPageQuerySuffix appends a query parameter suffix to a page filename.
+// For simple pagination URLs with only page-related params, uses readable
+// names (e.g. ?Page=2 → index_page_2.html). For offset/limit pairs, uses
+// offset-based names (e.g. ?offset=50&limit=25 → index_offset_50_25.html).
+// For cursor/token-style params, uses the param name and a short hash.
+// For complex query strings, falls back to a hash-based suffix.
+func applyPageQuerySuffix(filename, query string) string {
+	values, err := url.ParseQuery(query)
+	if err != nil {
+		return applyQueryHash(filename, query)
+	}
+
+	ext := path.Ext(filename)
+	base := filename[:len(filename)-len(ext)]
+
+	// Case 1: single page-number param → index_page_N.html
+	if len(values) == 1 {
+		for key := range values {
+			lowerKey := strings.ToLower(key)
+			if pageParamNames[lowerKey] || pageParamNames[key] {
+				vals := values[key]
+				if len(vals) == 1 && vals[0] != "" {
+					return base + "_page_" + vals[0] + ext
+				}
+			}
+		}
+	}
+
+	// Case 2: offset+limit pair → index_offset_N_M.html
+	// Handles common combinations: offset/limit, start/size, skip/count, etc.
+	if len(values) == 2 {
+		var offsetVal, limitVal string
+		var hasOffset, hasLimit bool
+
+		for key := range values {
+			lowerKey := strings.ToLower(key)
+			vals := values[key]
+			if len(vals) != 1 || vals[0] == "" {
+				continue
+			}
+			if isOffsetParam(lowerKey) {
+				offsetVal = vals[0]
+				hasOffset = true
+			} else if isLimitParam(lowerKey) {
+				limitVal = vals[0]
+				hasLimit = true
+			}
+		}
+
+		if hasOffset && hasLimit {
+			return base + "_offset_" + offsetVal + "_" + limitVal + ext
+		}
+	}
+
+	// Case 3: single cursor/token-style param → index_{param}_{shortHash}.html
+	if len(values) == 1 {
+		for key := range values {
+			lowerKey := strings.ToLower(key)
+			if cursorParamNames[lowerKey] || cursorParamNames[key] {
+				vals := values[key]
+				if len(vals) == 1 && vals[0] != "" {
+					shortHash := sha256Str(vals[0], 6)
+					return base + "_" + lowerKey + "_" + shortHash + ext
+				}
+			}
+		}
+	}
+
+	// Fallback: hash-based suffix for everything else.
+	return applyQueryHash(filename, query)
+}
+
+// isOffsetParam returns true if the query param name is an offset-style
+// pagination parameter (skip, offset, start, from, after, etc.).
+func isOffsetParam(name string) bool {
+	return name == "offset" || name == "start" || name == "skip" ||
+		name == "from" || name == "after" || name == "after_id"
+}
+
+// isLimitParam returns true if the query param name is a limit-style
+// pagination parameter (limit, size, count, per_page, page_size, etc.).
+func isLimitParam(name string) bool {
+	return name == "limit" || name == "size" || name == "count" ||
+		name == "per_page" || name == "perpage" || name == "page_size" ||
+		name == "pagesize" || name == "pageSize"
 }
 
 // applyQueryHash appends a query parameter hash to a filename.

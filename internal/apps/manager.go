@@ -565,6 +565,46 @@ func extractHost(urlStr string) string {
 	return parsed.Host
 }
 
+// deriveMainPageFromSeedURL converts a clone seed URL to the relative
+// main page path expected inside the ZIM archive (pages/ prefix stripped).
+// Examples:
+//
+//	"https://www.state.gov/biographies-list"     → "biographies-list.html"
+//	"https://www.state.gov/biographies-list/"    → "biographies-list/index.html"
+//	"https://www.state.gov/"                     → "index.html"
+//	"https://www.state.gov"                      → "index.html"
+func deriveMainPageFromSeedURL(seedURL string) string {
+	if seedURL == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse(seedURL)
+	if err != nil {
+		return ""
+	}
+
+	path := parsed.Path
+	path = strings.TrimPrefix(path, "/")
+	path = strings.TrimSuffix(path, "/")
+
+	if path == "" {
+		return "index.html"
+	}
+
+	// If the path ends with a known file extension, use it as-is.
+	// (Rare for seed URLs but handle it defensively.)
+	ext := filepath.Ext(path)
+	if ext != "" && len(ext) <= 5 {
+		return path
+	}
+
+	// Path like "biographies/abram-paley" → could be either
+	// "biographies/abram-paley.html" or "biographies/abram-paley/index.html".
+	// We return the .html variant; the packer has redirect logic that
+	// maps both forms to each other, so either works as the main page.
+	return path + ".html"
+}
+
 // PackApp packages an application into the specified format.
 // Supports HTML directory, ZIM archive, self-contained binary, and desktop app.
 func (m *Manager) PackApp(ctx context.Context, appName string, opts PackOptions) (*PackResult, error) {
@@ -601,6 +641,14 @@ func (m *Manager) PackApp(ctx context.Context, appName string, opts PackOptions)
 	packOpts.Creator = opts.Creator
 	if opts.Description != "" {
 		packOpts.AppDescription = opts.Description
+	}
+
+	// For cloned apps, derive the main page from the seed URL so users
+	// land on the page they originally cloned, not a generic content index.
+	if app.Type == AppTypeCloned && app.SourceURL != "" {
+		if mainPath := deriveMainPageFromSeedURL(app.SourceURL); mainPath != "" {
+			packOpts.MainPagePath = mainPath
+		}
 	}
 
 	// 创建打包器

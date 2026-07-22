@@ -246,14 +246,40 @@ func key(namespace byte, url string) string {
 
 // findMainPage locates the main page article index or returns noMainPage.
 // Ensures the main page is a content article (not a redirect), as required by Kiwix.
+// Priority: root index.html > root index > root main > first HTML article.
+// Deep pages like "biographies/xxx/index.html" are never chosen automatically,
+// because they make confusing entry points for users.
 func findMainPage(articles []article) uint32 {
+	var firstHTML uint32 = noMainPage
+
 	for i, a := range articles {
-		if a.ArticleType == ArticleTypeArticle &&
-			(a.URL == "index" || a.URL == "index.html" || a.URL == "main" ||
-				strings.HasSuffix(a.URL, "/index.html")) {
+		if a.ArticleType != ArticleTypeArticle {
+			continue
+		}
+
+		if a.Namespace != NamespaceContent {
+			continue
+		}
+
+		if a.URL == "index.html" {
 			return uint32(i)
 		}
+		if a.URL == "index" {
+			return uint32(i)
+		}
+		if a.URL == "main" {
+			return uint32(i)
+		}
+
+		if firstHTML == noMainPage && strings.HasSuffix(a.URL, ".html") {
+			firstHTML = uint32(i)
+		}
 	}
+
+	if firstHTML != noMainPage {
+		return firstHTML
+	}
+
 	for i, a := range articles {
 		if a.ArticleType == ArticleTypeArticle {
 			return uint32(i)

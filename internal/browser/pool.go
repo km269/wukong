@@ -4,10 +4,16 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net/url"
+	"os"
 	"sync"
 	"time"
 
+	"github.com/chromedp/cdproto/browser"
+	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/io"
 	"github.com/chromedp/cdproto/network"
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 	"github.com/km269/wukong/internal/browser/antibot"
 	"github.com/km269/wukong/internal/browser/behavior"
@@ -76,15 +82,26 @@ func New(opts Options) *Pool {
 	}
 
 	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", opts.Headless),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("no-sandbox", true),
 		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.Flag("disable-extensions", true),
-		chromedp.Flag("disable-background-networking", true),
 		chromedp.Flag("disable-sync", true),
 		chromedp.Flag("mute-audio", true),
+		// Start with a maximized window for more realistic fingerprint
+		chromedp.Flag("start-maximized", true),
+		// Disable IPv6 to avoid connection issues on networks where
+		// IPv6 is restricted (e.g. "access forbidden by access permissions"
+		// errors when connecting to IPv6 addresses like defense.gov CDNs).
+		chromedp.Flag("disable-ipv6", true),
 	)
+
+	// Use new headless mode (Chrome 112+) which behaves much closer
+	// to a real browser and is less likely to trigger detection.
+	// The old --headless flag has many differences from headed Chrome.
+	if opts.Headless {
+		allocOpts = append(allocOpts, chromedp.Flag("headless", "new"))
+	}
 
 	if opts.Proxy != "" {
 		allocOpts = append(allocOpts, chromedp.ProxyServer(opts.Proxy))
@@ -399,20 +416,83 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 	}
 	p.mu.Unlock()
 
-	renderCtx, cancel := context.WithTimeout(ctx, p.opts.RenderTimeout)
-	defer cancel()
-
-	tabCtx, tabCancel := chromedp.NewContext(renderCtx)
+	// Create the tab context from the pool's allocCtx so it shares the same
+	// browser instance as the worker pool. Creating from a non-chromedp context
+	// would spawn a completely new browser instance per call, which is slow
+	// and doesn't inherit any pool-level configuration.
+	tabCtx, tabCancel := chromedp.NewContext(p.allocCtx)
+	tabCtx, tabTimeoutCancel := context.WithTimeout(tabCtx, p.opts.RenderTimeout)
+	defer tabTimeoutCancel()
 	defer tabCancel()
+
+	// Propagate cancellation from the caller's context to the tab context.
+	// This ensures that if the caller cancels ctx, the tab operation also stops.
+	go func() {
+		select {
+		case <-ctx.Done():
+			tabTimeoutCancel()
+			tabCancel()
+		case <-tabCtx.Done():
+		}
+	}()
+
+	// Inject stealth scripts to hide automation indicators.
+	// Without stealth, headless Chrome is easily detected and may be
+	// blocked by anti-bot protections or trigger ERR_BLOCKED_BY_CLIENT.
+	if p.opts.Stealth {
+		stealth.Inject(tabCtx)
+	}
 
 	var requestID network.RequestID
 	var contentType string
 	var statusCode int
+	var navErr error
 
 	ua := p.getCurrentUA()
 
+	// First, navigate to the origin of the asset to establish a proper
+	// browsing context, cookies, and session. Real users never navigate
+	// directly to an image URL as their first request to a domain.
+	// This step helps bypass anti-bot checks that look for direct image
+	// access without a preceding page visit.
+	if parsedURL, err := url.Parse(assetURL); err == nil {
+		origin := parsedURL.Scheme + "://" + parsedURL.Host + "/"
+		// Use a short timeout for the warm-up navigation — if it fails,
+		// we still try the actual asset download.
+		warmupCtx, warmupCancel := context.WithTimeout(tabCtx, 10*time.Second)
+		defer warmupCancel()
+		chromedp.Run(warmupCtx,
+			chromedp.ActionFunc(func(ctx context.Context) error {
+				headers := network.Headers{
+					"Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+					"Accept-Language": "en-US,en;q=0.9",
+					"User-Agent":      ua.UserAgent,
+				}
+				return network.SetExtraHTTPHeaders(headers).Do(ctx)
+			}),
+			chromedp.Navigate(origin),
+		)
+	}
+
 	err := chromedp.Run(tabCtx,
+		// Enable downloads — Chrome may block direct navigation to binary resources
+		// when download restrictions are enabled (download_restrictions=3).
+		// This can cause ERR_BLOCKED_BY_CLIENT for image files.
 		chromedp.ActionFunc(func(ctx context.Context) error {
+			return browser.SetDownloadBehavior(browser.SetDownloadBehaviorBehaviorAllow).Do(ctx)
+		}),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			// Determine Sec-Fetch-Site based on whether referer host matches asset host.
+			secFetchSite := "same-origin"
+			if referer != "" {
+				if refURL, err := url.Parse(referer); err == nil {
+					if assetURLParsed, err2 := url.Parse(assetURL); err2 == nil {
+						if refURL.Host != assetURLParsed.Host {
+							secFetchSite = "cross-site"
+						}
+					}
+				}
+			}
 			headers := network.Headers{
 				"Accept":             "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
 				"Accept-Language":    "en-US,en;q=0.9",
@@ -423,7 +503,7 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 				"Sec-Ch-Ua-Platform": ua.SecChUaPlatform,
 				"Sec-Fetch-Dest":     "image",
 				"Sec-Fetch-Mode":     "no-cors",
-				"Sec-Fetch-Site":     "same-origin",
+				"Sec-Fetch-Site":     secFetchSite,
 				"User-Agent":         ua.UserAgent,
 			}
 			if referer != "" {
@@ -446,12 +526,10 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 		chromedp.Navigate(assetURL),
 		chromedp.WaitReady("body", chromedp.ByQuery),
 	)
-	if err != nil {
-		return nil, fmt.Errorf("navigate: %w", err)
-	}
+	navErr = err
 
 	var bodyBytes []byte
-	if requestID != "" {
+	if navErr == nil && requestID != "" {
 		err = chromedp.Run(tabCtx,
 			chromedp.ActionFunc(func(ctx context.Context) error {
 				var err error
@@ -460,21 +538,149 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 			}),
 		)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer1 direct nav: get response body failed for %s: %v\n", assetURL, err)
 			bodyBytes = nil
+		} else if len(bodyBytes) > 0 {
+			fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer1 direct nav: success for %s (%d bytes)\n", assetURL, len(bodyBytes))
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer1 direct nav: failed for %s (navErr=%v, requestID=%q)\n", assetURL, navErr, requestID)
+	}
+
+	// Fallback 2: Load the asset via an <img> tag in a page context.
+	// Direct navigation to binary resources may trigger ERR_BLOCKED_BY_CLIENT
+	// due to download restrictions, but loading as a subresource (via <img>)
+	// behaves like a normal page load and bypasses those restrictions.
+	if len(bodyBytes) == 0 {
+		fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer2 img tag: trying for %s\n", assetURL)
+		var imgRequestID network.RequestID
+		var imgContentType string
+		var imgStatusCode int
+
+		// Navigate to about:blank first to have a clean page context
+		err := chromedp.Run(tabCtx,
+			chromedp.Navigate("about:blank"),
+			chromedp.WaitReady("body", chromedp.ByQuery),
+		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer2 img tag: navigate to about:blank failed for %s: %v\n", assetURL, err)
+		}
+		if err == nil {
+			// Listen for the image response
+			err = chromedp.Run(tabCtx,
+				chromedp.ActionFunc(func(ctx context.Context) error {
+					chromedp.ListenTarget(ctx, func(ev interface{}) {
+						if resp, ok := ev.(*network.EventResponseReceived); ok {
+							if resp.Response.URL == assetURL {
+								imgRequestID = resp.RequestID
+								imgContentType = resp.Response.MimeType
+								imgStatusCode = int(resp.Response.Status)
+							}
+						}
+					})
+					return nil
+				}),
+				// Create an img element and set its src to trigger the load
+				chromedp.ActionFunc(func(ctx context.Context) error {
+					jsExpr := fmt.Sprintf(`
+						(() => {
+							const img = new Image();
+							img.onload = () => window.__imgLoaded = true;
+							img.onerror = () => window.__imgLoaded = 'error';
+							img.src = %q;
+							document.body.appendChild(img);
+						})()
+					`, assetURL)
+					return chromedp.Evaluate(jsExpr, nil).Do(ctx)
+				}),
+				// Wait for the image to load or fail (polling)
+				chromedp.ActionFunc(func(ctx context.Context) error {
+					deadline := time.Now().Add(15 * time.Second)
+					ticker := time.NewTicker(100 * time.Millisecond)
+					defer ticker.Stop()
+					for time.Now().Before(deadline) {
+						var loaded interface{}
+						chromedp.Evaluate(`window.__imgLoaded`, &loaded).Do(ctx)
+						if loaded != nil {
+							return nil
+						}
+						select {
+						case <-ctx.Done():
+							return ctx.Err()
+						case <-ticker.C:
+						}
+					}
+					return nil
+				}),
+			)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer2 img tag: load image failed for %s: %v\n", assetURL, err)
+			} else if imgRequestID == "" {
+				fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer2 img tag: no request ID captured for %s\n", assetURL)
+			}
+			if err == nil && imgRequestID != "" {
+				var respBody []byte
+				respBody, err = network.GetResponseBody(imgRequestID).Do(tabCtx)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer2 img tag: get response body failed for %s: %v\n", assetURL, err)
+				} else if len(respBody) > 0 {
+					fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer2 img tag: success for %s (%d bytes)\n", assetURL, len(respBody))
+				}
+				if err == nil && len(respBody) > 0 {
+					bodyBytes = respBody
+					contentType = imgContentType
+					statusCode = imgStatusCode
+				}
+			}
 		}
 	}
 
+	// Fallback 3: use JavaScript fetch with base64 encoding for binary safety.
+	// This works even when direct navigation fails (e.g., ERR_BLOCKED_BY_CLIENT)
+	// because fetch() runs in the page context and behaves differently.
 	if len(bodyBytes) == 0 {
-		// Fallback: use JavaScript fetch with base64 encoding for binary safety
+		fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer3 fetch: trying for %s\n", assetURL)
+		// First navigate to the origin of the asset so that fetch() has
+		// a proper same-origin context, reducing CORS issues.
+		if navErr != nil {
+			if parsedURL, err := url.Parse(assetURL); err == nil {
+				origin := parsedURL.Scheme + "://" + parsedURL.Host + "/"
+				navErr2 := chromedp.Run(tabCtx, chromedp.Navigate(origin))
+				if navErr2 != nil {
+					fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer3 fetch: navigate to origin %s failed: %v\n", origin, navErr2)
+				}
+			}
+		}
 		var result struct {
 			Body        string `json:"body"`
 			ContentType string `json:"contentType"`
 			Status      int    `json:"status"`
+			OK          bool   `json:"ok"`
 		}
-		err = chromedp.Run(tabCtx,
-			chromedp.Evaluate(`
-				(async () => {
-					const res = await fetch(window.location.href, { credentials: 'include' });
+		jsExpr := fmt.Sprintf(`
+			(async () => {
+				const url = %q;
+				const ref = %q;
+				try {
+					const controller = new AbortController();
+					const signal = controller.signal;
+					const timeoutId = setTimeout(() => controller.abort(), 15000);
+					const fetchOpts = {
+						signal,
+						credentials: 'include',
+						mode: 'cors',
+						cache: 'force-cache',
+						redirect: 'follow'
+					};
+					if (ref) {
+						fetchOpts.referrer = ref;
+						fetchOpts.referrerPolicy = 'no-referrer-when-downgrade';
+					}
+					const res = await fetch(url, fetchOpts);
+					clearTimeout(timeoutId);
+					if (!res.ok) {
+						return { body: '', contentType: '', status: res.status, ok: false };
+					}
 					const buf = await res.arrayBuffer();
 					const bytes = new Uint8Array(buf);
 					let binary = '';
@@ -484,18 +690,31 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 					return {
 						body: btoa(binary),
 						contentType: res.headers.get('content-type') || '',
-						status: res.status
+						status: res.status,
+						ok: true
 					};
-				})()
-			`, &result),
+				} catch(e) {
+					return { body: '', contentType: '', status: 0, ok: false };
+				}
+			})()
+		`, assetURL, referer)
+		fetchErr := chromedp.Run(tabCtx,
+			chromedp.Evaluate(jsExpr, &result),
 		)
-		if err != nil {
-			return nil, fmt.Errorf("fetch asset: %w", err)
+		if fetchErr != nil {
+			fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer3 fetch: evaluate failed for %s: %v\n", assetURL, fetchErr)
+		} else if !result.OK {
+			fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer3 fetch: fetch not OK for %s (status=%d)\n", assetURL, result.Status)
+		} else if result.Body == "" {
+			fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer3 fetch: empty body for %s\n", assetURL)
 		}
-		if result.Body != "" {
+		if fetchErr == nil && result.OK && result.Body != "" {
 			bodyBytes, err = base64.StdEncoding.DecodeString(result.Body)
 			if err != nil {
-				return nil, fmt.Errorf("decode base64 from fetch: %w", err)
+				fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer3 fetch: base64 decode failed for %s: %v\n", assetURL, err)
+				bodyBytes = nil
+			} else if len(bodyBytes) > 0 {
+				fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer3 fetch: success for %s (%d bytes)\n", assetURL, len(bodyBytes))
 			}
 			if contentType == "" {
 				contentType = result.ContentType
@@ -507,6 +726,82 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 	}
 
 	if len(bodyBytes) == 0 {
+		// Fallback 4: use Network.loadNetworkResource CDP method.
+		// This directly loads the resource through Chrome's network stack,
+		// bypassing page-level restrictions that cause ERR_BLOCKED_BY_CLIENT.
+		// It requires a frame context, so we navigate to about:blank first.
+		fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer4 Network.loadNetworkResource: trying for %s\n", assetURL)
+		var frameID cdp.FrameID
+		err = chromedp.Run(tabCtx,
+			chromedp.Navigate("about:blank"),
+			chromedp.WaitReady("body", chromedp.ByQuery),
+			chromedp.ActionFunc(func(ctx context.Context) error {
+				tree, err := page.GetFrameTree().Do(ctx)
+				if err != nil {
+					return err
+				}
+				frameID = tree.Frame.ID
+				return nil
+			}),
+		)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer4 Network.loadNetworkResource: navigate/get frame failed for %s: %v\n", assetURL, err)
+		}
+		if err == nil && frameID != "" {
+			result, err := network.LoadNetworkResource(assetURL, &network.LoadNetworkResourceOptions{
+				DisableCache:       false,
+				IncludeCredentials: true,
+			}).WithFrameID(frameID).Do(tabCtx)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer4 Network.loadNetworkResource: load failed for %s: %v\n", assetURL, err)
+			} else if !result.Success {
+				fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer4 Network.loadNetworkResource: not successful for %s (httpStatus=%d)\n", assetURL, result.HTTPStatusCode)
+			} else if result.Stream == "" {
+				fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer4 Network.loadNetworkResource: no stream for %s\n", assetURL)
+			}
+			if err == nil && result.Success && result.Stream != "" {
+				// Read the stream content using IO.read
+				var data []byte
+				for {
+					readData, eof, readErr := io.Read(result.Stream).Do(tabCtx)
+					if readErr != nil {
+						break
+					}
+					// Network.loadNetworkResource returns binary data as base64
+					decoded, decodeErr := base64.StdEncoding.DecodeString(readData)
+					if decodeErr == nil && len(decoded) > 0 {
+						data = append(data, decoded...)
+					} else {
+						data = append(data, []byte(readData)...)
+					}
+					if eof {
+						break
+					}
+				}
+				io.Close(result.Stream).Do(tabCtx)
+				if len(data) > 0 {
+					fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer4 Network.loadNetworkResource: success for %s (%d bytes)\n", assetURL, len(data))
+					bodyBytes = data
+					if statusCode == 0 && result.HTTPStatusCode > 0 {
+						statusCode = int(result.HTTPStatusCode)
+					}
+					// Try to extract content-type from headers
+					if contentType == "" && result.Headers != nil {
+						if ct, ok := result.Headers["Content-Type"]; ok {
+							if ctStr, ok := ct.(string); ok {
+								contentType = ctStr
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if len(bodyBytes) == 0 {
+		if navErr != nil {
+			return nil, fmt.Errorf("navigate to asset: %w", navErr)
+		}
 		return nil, fmt.Errorf("failed to get asset body")
 	}
 

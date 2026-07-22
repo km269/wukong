@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -26,6 +27,7 @@ import (
 type AssetDownloader struct {
 	Client      *http.Client
 	UserAgent   string
+	Referer     string   // Default Referer header for asset requests.
 	MaxBytes    int64    // 0 = no limit.
 	Retries     int      // 0 = no retries (single attempt).
 	cfClearance string   // Cloudflare bypass cookie (from Chrome render).
@@ -33,12 +35,21 @@ type AssetDownloader struct {
 	ProxyPool   []string // List of proxy URLs for rotation
 	proxyIndex  int      // Current index in proxy pool
 	proxyMu     sync.Mutex
+
+	// RefererOverrides maps target domain patterns to custom Referer values.
+	// Keys can be exact domains ("media.defense.gov") or suffix patterns
+	// (".defense.gov" matches any subdomain of defense.gov).
+	// When downloading an asset from a matching domain, the corresponding
+	// Referer is used instead of the default Referer.
+	RefererOverrides map[string]string
 }
 
 // DefaultAssetDownloader returns a downloader with sensible defaults.
 func DefaultAssetDownloader() *AssetDownloader {
+	opts := httpclient.DefaultOptions()
+	opts.ForceIPv4 = true
 	return &AssetDownloader{
-		Client:    httpclient.NewDefault().Client,
+		Client:    httpclient.New(opts).Client,
 		UserAgent: httpclient.DefaultOptions().UserAgent,
 		MaxBytes:  50 * 1024 * 1024, // 50 MB.
 		Retries:   3,
@@ -99,6 +110,37 @@ func (d *AssetDownloader) Download(ctx context.Context, assetURL string) (*Downl
 	return nil, lastErr
 }
 
+// getRefererForURL returns the appropriate Referer header for the given
+// asset URL. It checks RefererOverrides for domain-specific overrides first,
+// then falls back to the default Referer, and finally uses the asset's own
+// origin as a last resort.
+func (d *AssetDownloader) getRefererForURL(assetURL string) string {
+	if len(d.RefererOverrides) > 0 {
+		if u, err := url.Parse(assetURL); err == nil {
+			host := u.Host
+			// Try exact match first
+			if ref, ok := d.RefererOverrides[host]; ok {
+				return ref
+			}
+			// Try suffix match (e.g., ".defense.gov" matches "media.defense.gov")
+			for pattern, ref := range d.RefererOverrides {
+				if strings.HasPrefix(pattern, ".") &&
+					strings.HasSuffix(host, pattern) {
+					return ref
+				}
+			}
+		}
+	}
+	if d.Referer != "" {
+		return d.Referer
+	}
+	// Fallback: use the asset's own origin
+	if u, err := url.Parse(assetURL); err == nil {
+		return u.Scheme + "://" + u.Host + "/"
+	}
+	return ""
+}
+
 // tryDownload performs a single download attempt.
 func (d *AssetDownloader) tryDownload(ctx context.Context, assetURL string) (*DownloadResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, assetURL, nil)
@@ -106,19 +148,36 @@ func (d *AssetDownloader) tryDownload(ctx context.Context, assetURL string) (*Do
 		return nil, &DownloadError{URL: assetURL, Reason: "bad_request", Err: err}
 	}
 	req.Header.Set("User-Agent", d.UserAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8,ja;q=0.7")
+	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
 	// Realistic sec-* headers — Cloudflare L3 detection distinguishes
 	// browsers from simple HTTP clients by checking these exact headers.
 	req.Header.Set("sec-ch-ua", `"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"`)
 	req.Header.Set("sec-ch-ua-mobile", "?0")
 	req.Header.Set("sec-ch-ua-platform", `"Windows"`)
-	req.Header.Set("sec-fetch-site", "same-origin")
+	// Additional realistic headers sent by real Chrome browsers
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+	req.Header.Set("DNT", "1")
+	// Determine sec-fetch-site based on whether referer is same-origin.
+	referer := d.getRefererForURL(assetURL)
+	secFetchSite := "same-origin"
+	if referer != "" {
+		if refURL, err := url.Parse(referer); err == nil {
+			if assetURLParsed, err2 := url.Parse(assetURL); err2 == nil {
+				if refURL.Host != assetURLParsed.Host {
+					secFetchSite = "cross-site"
+				}
+			}
+		}
+	}
+	req.Header.Set("sec-fetch-site", secFetchSite)
 	req.Header.Set("sec-fetch-mode", "no-cors")
 	req.Header.Set("sec-fetch-dest", "image")
+	req.Header.Set("sec-fetch-user", "?1")
 	// Same-site Referer — sub-resource load context.
-	if u, err := url.Parse(assetURL); err == nil {
-		req.Header.Set("Referer", u.Scheme+"://"+u.Host+"/")
+	if referer != "" {
+		req.Header.Set("Referer", referer)
 	}
 
 	// Cloudflare bypass: if we have a cf_clearance cookie from Chrome,
@@ -140,6 +199,15 @@ func (d *AssetDownloader) tryDownload(ctx context.Context, assetURL string) (*Do
 		if err == nil {
 			transport := &http.Transport{
 				Proxy: http.ProxyURL(proxyParsed),
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					if network == "tcp" {
+						network = "tcp4"
+					}
+					return (&net.Dialer{
+						Timeout:   30 * time.Second,
+						KeepAlive: 30 * time.Second,
+					}).DialContext(ctx, network, addr)
+				},
 			}
 			client = &http.Client{
 				Transport: transport,
@@ -151,6 +219,15 @@ func (d *AssetDownloader) tryDownload(ctx context.Context, assetURL string) (*Do
 		if err == nil {
 			transport := &http.Transport{
 				Proxy: http.ProxyURL(proxyParsed),
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					if network == "tcp" {
+						network = "tcp4"
+					}
+					return (&net.Dialer{
+						Timeout:   30 * time.Second,
+						KeepAlive: 30 * time.Second,
+					}).DialContext(ctx, network, addr)
+				},
 			}
 			client = &http.Client{
 				Transport: transport,

@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net/url"
 	"os"
 	"strconv"
@@ -87,9 +88,15 @@ func New(opts Options) *Pool {
 		if opts.ChromeBin != "" {
 			l = l.Bin(opts.ChromeBin)
 		}
-		if !opts.Headless {
+		// Use new headless mode (Chrome 112+) which behaves much closer
+		// to a real browser and is less likely to trigger detection.
+		if opts.Headless {
+			l = l.HeadlessNew(true)
+		} else {
 			l = l.Headless(false)
 		}
+		l = l.Set("start-maximized", "")
+		l = l.Set("disable-ipv6", "")
 		if opts.ProfileDir != "" {
 			l = l.UserDataDir(opts.ProfileDir)
 		}
@@ -97,9 +104,10 @@ func New(opts Options) *Pool {
 			l = l.NoSandbox(true)
 		}
 		l = l.Devtools(false)
-		if opts.DisableDownloads {
-			l = l.Set("download_restrictions", "3")
-		}
+		// NOTE: We don't use download_restrictions=3 because it causes
+		// ERR_BLOCKED_BY_CLIENT when navigating directly to binary resources
+		// like images, and PageSetDownloadBehavior can't override it.
+		// Instead, we use PageSetDownloadBehavior on individual pages.
 		if opts.Proxy != "" {
 			l = l.Proxy(opts.Proxy)
 		}
@@ -174,8 +182,10 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 			}
 		}
 		if p.opts.DisableDownloads {
-			proto.BrowserSetDownloadBehavior{
-				Behavior: proto.BrowserSetDownloadBehaviorBehaviorDeny,
+			// Use page-level download behavior instead of browser-level,
+			// so that DownloadAsset pages can override it with allow.
+			proto.PageSetDownloadBehavior{
+				Behavior: proto.PageSetDownloadBehaviorBehaviorDeny,
 			}.Call(page)
 		}
 		w.page = page
@@ -638,11 +648,11 @@ func (p *Pool) SetBehaviorSimulation(enabled bool) {
 }
 
 // DownloadAsset downloads an asset using the browser's network stack.
-// Uses a two-stage strategy:
-//  1. First, try direct page navigation to the asset URL (like typing the
-//     URL into the browser address bar). This bypasses CORS restrictions
-//     because top-level navigation is not subject to CORS.
-//  2. If that fails, fall back to JS fetch for CORS-enabled resources.
+// Uses a multi-layer fallback strategy:
+//  1. Direct page navigation (most effective - top-level nav with correct Sec-Fetch headers)
+//  2. <img> tag on Referer page (realistic subresource load with proper context)
+//  3. CDP Network.loadNetworkResource (direct network stack access)
+//  4. JavaScript fetch() (only works if server sends proper CORS headers)
 func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer string) (*types.AssetDownloadResult, error) {
 	p.mu.Lock()
 	if p.closed {
@@ -651,7 +661,7 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 	}
 	p.mu.Unlock()
 
-	assetCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	assetCtx, cancel := context.WithTimeout(ctx, 80*time.Second)
 	defer cancel()
 
 	page, err := p.browser.Page(proto.TargetCreateTarget{})
@@ -661,6 +671,16 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 	defer page.Close()
 	page = page.Context(assetCtx)
 
+	// Inject stealth scripts to hide automation indicators.
+	if p.opts.Stealth {
+		_, err := proto.PageAddScriptToEvaluateOnNewDocument{
+			Source: stealth.Script,
+		}.Call(page)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset stealth injection warning: %v\n", err)
+		}
+	}
+
 	ua := p.getCurrentUA()
 	if ua != nil {
 		proto.NetworkSetUserAgentOverride{
@@ -668,37 +688,105 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 		}.Call(page)
 	}
 
-	// Stage 1: direct navigation — works for any resource, no CORS issues.
-	// We navigate to the asset URL directly and capture the response body.
-	result, err := p.downloadAssetViaNavigation(page, assetURL, referer)
+	// Enable downloads for asset download pages.
+	proto.PageSetDownloadBehavior{
+		Behavior: proto.PageSetDownloadBehaviorBehaviorAllow,
+	}.Call(page)
+
+	var firstErr error
+
+	// Layer 1: direct navigation (top-level nav, not subject to CORS)
+	// This is currently the most effective approach for anti-bot bypass because:
+	// - Uses correct Sec-Fetch headers for navigation (document/navigate)
+	// - Bypasses CORS restrictions
+	// - Bypasses subresource-level download restrictions
+	fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer1 direct nav: trying for %s\n", assetURL)
+	l1Ctx, l1Cancel := context.WithTimeout(assetCtx, 20*time.Second)
+	l1Page := page.Context(l1Ctx)
+	result, err := p.downloadAssetViaNavigation(l1Page, assetURL, referer, ua)
+	l1Cancel()
 	if err == nil && len(result.Body) > 0 {
+		fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer1 direct nav: success for %s (%d bytes)\n", assetURL, len(result.Body))
 		return result, nil
 	}
+	firstErr = err
+	fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer1 direct nav: failed for %s: %v\n", assetURL, err)
 
-	// Stage 2: JS fetch fallback for CORS-enabled resources.
-	result, err2 := p.downloadAssetViaFetch(page, assetURL, referer)
-	if err2 == nil && len(result.Body) > 0 {
+	// Layer 2: <img> tag on Referer page (realistic browser behavior)
+	// Tries loading the image as a subresource of the Referer page, which
+	// provides the most natural request context (proper Referer, cookies, etc.)
+	if isImageURL(assetURL) && referer != "" {
+		fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer2 img-on-referer: trying for %s\n", assetURL)
+		l2Ctx, l2Cancel := context.WithTimeout(assetCtx, 25*time.Second)
+		l2Page := page.Context(l2Ctx)
+		result, err2 := p.downloadAssetViaImgOnRefererPage(l2Page, assetURL, referer, ua)
+		l2Cancel()
+		if err2 == nil && len(result.Body) > 0 {
+			fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer2 img-on-referer: success for %s (%d bytes)\n", assetURL, len(result.Body))
+			return result, nil
+		}
+		fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer2 img-on-referer: failed for %s: %v\n", assetURL, err2)
+	} else if !isImageURL(assetURL) {
+		fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer2 img-on-referer: skipped for non-image resource %s\n", assetURL)
+	} else {
+		fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer2 img-on-referer: skipped (no referer) for %s\n", assetURL)
+	}
+
+	// Layer 3: Network.loadNetworkResource (CDP direct network load)
+	fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer3 Network.loadNetworkResource: trying for %s\n", assetURL)
+	l3Ctx, l3Cancel := context.WithTimeout(assetCtx, 20*time.Second)
+	l3Page := page.Context(l3Ctx)
+	result, err3 := p.downloadAssetViaLoadNetworkResource(l3Page, assetURL, referer, ua)
+	l3Cancel()
+	if err3 == nil && len(result.Body) > 0 {
+		fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer3 Network.loadNetworkResource: success for %s (%d bytes)\n", assetURL, len(result.Body))
 		return result, nil
 	}
+	fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer3 Network.loadNetworkResource: failed for %s: %v\n", assetURL, err3)
 
-	// Both failed — return the first error.
-	if err != nil {
-		return nil, err
+	// Layer 4: JS fetch
+	fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer4 fetch: trying for %s\n", assetURL)
+	l4Ctx, l4Cancel := context.WithTimeout(assetCtx, 15*time.Second)
+	l4Page := page.Context(l4Ctx)
+	result, err4 := p.downloadAssetViaFetch(l4Page, assetURL, referer)
+	l4Cancel()
+	if err4 == nil && len(result.Body) > 0 {
+		fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer4 fetch: success for %s (%d bytes)\n", assetURL, len(result.Body))
+		return result, nil
 	}
-	return nil, err2
+	fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer4 fetch: failed for %s: %v\n", assetURL, err4)
+
+	// All failed — return the first error.
+	return nil, firstErr
 }
 
 // downloadAssetViaNavigation downloads an asset by directly navigating to it.
 // This bypasses CORS because top-level navigation is not subject to CORS.
 // It works like opening the image URL directly in a browser tab.
-func (p *Pool) downloadAssetViaNavigation(page *rod.Page, assetURL, referer string) (*types.AssetDownloadResult, error) {
-	if referer != "" {
-		proto.NetworkSetExtraHTTPHeaders{
-			Headers: proto.NetworkHeaders{
-				"Referer": gson.New(referer),
-			},
-		}.Call(page)
+func (p *Pool) downloadAssetViaNavigation(page *rod.Page, assetURL, referer string, ua *antibot.UAProfile) (*types.AssetDownloadResult, error) {
+	// Set headers appropriate for top-level navigation (like typing URL in address bar)
+	navHeaders := proto.NetworkHeaders{
+		"Accept":                    gson.New("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+		"Accept-Language":           gson.New("en-US,en;q=0.9"),
+		"Sec-Fetch-Dest":            gson.New("document"),
+		"Sec-Fetch-Mode":            gson.New("navigate"),
+		"Sec-Fetch-Site":            gson.New("none"),
+		"Sec-Fetch-User":            gson.New("?1"),
+		"Upgrade-Insecure-Requests": gson.New("1"),
+		"User-Agent":                gson.New(ua.UserAgent),
 	}
+	if ua.SecChUa != "" {
+		navHeaders["Sec-Ch-Ua"] = gson.New(ua.SecChUa)
+		navHeaders["Sec-Ch-Ua-Mobile"] = gson.New(ua.SecChUaMobile)
+		navHeaders["Sec-Ch-Ua-Platform"] = gson.New(ua.SecChUaPlatform)
+	}
+	if referer != "" {
+		navHeaders["Referer"] = gson.New(referer)
+		navHeaders["Sec-Fetch-Site"] = gson.New("cross-site")
+	}
+	proto.NetworkSetExtraHTTPHeaders{
+		Headers: navHeaders,
+	}.Call(page)
 
 	// Track the response for the asset URL.
 	type respInfo struct {
@@ -715,7 +803,8 @@ func (p *Pool) downloadAssetViaNavigation(page *rod.Page, assetURL, referer stri
 		}
 		respMu.Lock()
 		defer respMu.Unlock()
-		if e.Response.URL == assetURL {
+		// Compare URLs after normalizing to handle encoding differences
+		if normalizeURL(e.Response.URL) == normalizeURL(assetURL) {
 			assetResp = &respInfo{
 				requestID: e.RequestID,
 				status:    int(e.Response.Status),
@@ -749,12 +838,27 @@ func (p *Pool) downloadAssetViaNavigation(page *rod.Page, assetURL, referer stri
 	resp := assetResp
 	respMu.Unlock()
 
-	if resp == nil {
-		return nil, fmt.Errorf("no response captured for %s", assetURL)
+	// Try to get content type and status from the page even if we didn't
+	// capture the response event (e.g. for CSS/JS files rendered as text).
+	contentType := ""
+	statusCode := 0
+	if resp != nil {
+		contentType = resp.mimeType
+		statusCode = resp.status
+	} else {
+		// Fallback: get content type from document
+		ctResult, ctErr := page.Eval(`() => document.contentType`)
+		if ctErr == nil && ctResult != nil && !ctResult.Value.Nil() {
+			contentType = ctResult.Value.String()
+		}
+		// Assume 200 if page loaded successfully and we have content
+		if contentType != "" {
+			statusCode = 200
+		}
 	}
 
-	if resp.status < 200 || resp.status >= 300 {
-		return nil, fmt.Errorf("asset HTTP %d", resp.status)
+	if statusCode != 0 && (statusCode < 200 || statusCode >= 300) {
+		return nil, fmt.Errorf("asset HTTP %d", statusCode)
 	}
 
 	// Try to get the response body via CDP.
@@ -763,14 +867,14 @@ func (p *Pool) downloadAssetViaNavigation(page *rod.Page, assetURL, referer stri
 		return &types.AssetDownloadResult{
 			URL:         assetURL,
 			Body:        body,
-			ContentType: resp.mimeType,
-			StatusCode:  resp.status,
+			ContentType: contentType,
+			StatusCode:  statusCode,
 		}, nil
 	}
 
-	// Fallback: use JS to read the content via canvas for images,
-	// or via XMLHttpRequest with no-cors mode won't work for reading body.
-	// Try extracting from the page if it's rendered as an image.
+	// Fallback: try extracting content from the page DOM.
+	// For images: use canvas to get data URL.
+	// For text resources (CSS, JS, etc.): read text content from pre/body.
 	bodyStr, err := page.Eval(`() => {
 		const img = document.querySelector('img');
 		if (img) {
@@ -787,12 +891,244 @@ func (p *Pool) downloadAssetViaNavigation(page *rod.Page, assetURL, referer stri
 		}
 		const pre = document.querySelector('pre');
 		if (pre) return pre.textContent;
+		if (document.body && document.body.textContent) return document.body.textContent;
 		return null;
 	}`)
 	if err == nil && bodyStr != nil && !bodyStr.Value.Nil() {
 		s := bodyStr.Value.String()
 		if strings.HasPrefix(s, "data:") {
 			// data URL — extract base64 portion
+			if idx := strings.Index(s, "base64,"); idx >= 0 {
+				b64 := s[idx+len("base64,"):]
+				decoded, dErr := base64.StdEncoding.DecodeString(b64)
+				if dErr == nil && len(decoded) > 0 {
+					ct := "image/png"
+					if ci := strings.Index(s, ";base64"); ci >= 0 {
+						if strings.HasPrefix(s, "data:") {
+							ct = s[5:ci]
+						}
+					}
+					if contentType == "" {
+						contentType = ct
+					}
+					return &types.AssetDownloadResult{
+						URL:         assetURL,
+						Body:        decoded,
+						ContentType: contentType,
+						StatusCode:  statusCode,
+					}, nil
+				}
+			}
+		} else if s != "" && contentType != "" && isTextContent(contentType) {
+			// Text content (CSS, JS, etc.)
+			return &types.AssetDownloadResult{
+				URL:         assetURL,
+				Body:        []byte(s),
+				ContentType: contentType,
+				StatusCode:  statusCode,
+			}, nil
+		}
+	}
+
+	if resp == nil {
+		return nil, fmt.Errorf("no response captured for %s", assetURL)
+	}
+	return nil, fmt.Errorf("could not extract asset body from navigation")
+}
+
+// downloadAssetViaImgOnRefererPage loads an image by first navigating to the
+// Referer page, then creating an <img> element on that page. This is the most
+// realistic browser behavior because:
+//   - The image is loaded as a subresource of a real page
+//   - Referer header is naturally set by the browser (not manually spoofed)
+//   - The page context provides proper cookies and session state
+//   - Sec-Fetch headers are naturally correct for an image subresource
+func (p *Pool) downloadAssetViaImgOnRefererPage(page *rod.Page, assetURL, referer string, ua *antibot.UAProfile) (*types.AssetDownloadResult, error) {
+	// Set headers appropriate for page navigation
+	navHeaders := proto.NetworkHeaders{
+		"Accept":                    gson.New("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+		"Accept-Language":           gson.New("en-US,en;q=0.9"),
+		"Sec-Ch-Ua":                 gson.New(ua.SecChUa),
+		"Sec-Ch-Ua-Mobile":          gson.New(ua.SecChUaMobile),
+		"Sec-Ch-Ua-Platform":        gson.New(ua.SecChUaPlatform),
+		"Sec-Fetch-Dest":            gson.New("document"),
+		"Sec-Fetch-Mode":            gson.New("navigate"),
+		"Sec-Fetch-Site":            gson.New("none"),
+		"Sec-Fetch-User":            gson.New("?1"),
+		"Upgrade-Insecure-Requests": gson.New("1"),
+		"User-Agent":                gson.New(ua.UserAgent),
+	}
+	proto.NetworkSetExtraHTTPHeaders{
+		Headers: navHeaders,
+	}.Call(page)
+
+	// Step 1: Navigate to the Referer page to establish proper context
+	fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: navigating to referer page: %s\n", referer)
+	navErr := page.Navigate(referer)
+	if navErr != nil {
+		fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: referer nav error: %v\n", navErr)
+		// If referer page fails to navigate, try about:blank instead
+		if err := page.Navigate("about:blank"); err != nil {
+			return nil, fmt.Errorf("navigate to about:blank fallback: %w", err)
+		}
+		page.WaitLoad()
+	} else {
+		if err := page.WaitLoad(); err != nil {
+			fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: referer waitLoad warning: %v\n", err)
+		}
+		// Add a small human-like delay after page load
+		time.Sleep(time.Duration(800+_randInt(0, 1200)) * time.Millisecond)
+	}
+
+	// Step 2: Track network events for the image
+	type respInfo struct {
+		requestID proto.NetworkRequestID
+		status    int
+		mimeType  string
+	}
+	var assetResp *respInfo
+	var respMu sync.Mutex
+
+	waitResponse := page.EachEvent(func(e *proto.NetworkResponseReceived) {
+		if e.Response == nil {
+			return
+		}
+		respMu.Lock()
+		defer respMu.Unlock()
+		if normalizeURL(e.Response.URL) == normalizeURL(assetURL) {
+			assetResp = &respInfo{
+				requestID: e.RequestID,
+				status:    int(e.Response.Status),
+				mimeType:  e.Response.MIMEType,
+			}
+		}
+	})
+	defer waitResponse()
+
+	// Step 3: Try loading via fetch first (better error info, can bypass some CSP issues)
+	// We try fetch before img because fetch gives us better error details
+	fetchResult, fetchErr := page.Eval(`
+		async (url) => {
+			try {
+				const resp = await fetch(url, {
+					credentials: 'include',
+					mode: 'no-cors',
+					cache: 'force-cache',
+					redirect: 'follow'
+				});
+				// With no-cors mode, we can't read the response body directly,
+				// but we can check if the request succeeded (opaque response)
+				return { ok: true, type: resp.type, status: resp.status };
+			} catch(e) {
+				return { ok: false, error: e.message || String(e) };
+			}
+		}
+	`, assetURL)
+
+	if fetchErr == nil && fetchResult != nil && !fetchResult.Value.Nil() {
+		fetchOK := fetchResult.Value.Get("ok").Bool()
+		if fetchOK {
+			fetchType := fetchResult.Value.Get("type").String()
+			fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: fetch succeeded (type=%s), trying img element for body\n", fetchType)
+		} else {
+			fetchErrMsg := fetchResult.Value.Get("error").String()
+			fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: fetch failed: %s\n", fetchErrMsg)
+		}
+	}
+
+	// Step 4: Create an img element on the page to load the asset
+	// (to get the actual image data via CDP response body)
+	imgResult, imgErr := page.Eval(`
+		(url) => {
+			return new Promise((resolve) => {
+				const img = new Image();
+				img.onload = () => resolve({
+					ok: true,
+					naturalWidth: img.naturalWidth,
+					naturalHeight: img.naturalHeight,
+					complete: img.complete
+				});
+				img.onerror = (e) => resolve({
+					ok: false,
+					errorType: e.type,
+					errorMessage: e.message || 'unknown error',
+					targetSrc: e.target ? e.target.src : null
+				});
+				img.src = url;
+				document.body.appendChild(img);
+				// Timeout after 15s
+				setTimeout(() => {
+					if (!img.complete) {
+						resolve({ ok: false, errorType: 'timeout', errorMessage: 'Image load timed out' });
+					}
+				}, 15000);
+			});
+		}
+	`, assetURL)
+	if imgErr != nil {
+		return nil, fmt.Errorf("create img element: %w", imgErr)
+	}
+
+	// Step 5: Check img load result
+	if imgResult != nil && !imgResult.Value.Nil() {
+		imgOK := imgResult.Value.Get("ok").Bool()
+		if !imgOK {
+			errType := imgResult.Value.Get("errorType").String()
+			errMsg := imgResult.Value.Get("errorMessage").String()
+			fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: img.onerror: type=%s, msg=%s\n", errType, errMsg)
+		}
+	}
+
+	// Wait a bit more for response event to be fully captured
+	time.Sleep(800 * time.Millisecond)
+
+	respMu.Lock()
+	resp := assetResp
+	respMu.Unlock()
+
+	if resp == nil {
+		return nil, fmt.Errorf("no response captured for img load on referer page")
+	}
+
+	if resp.status < 200 || resp.status >= 300 {
+		return nil, fmt.Errorf("img load HTTP %d", resp.status)
+	}
+
+	// Step 6: Get the response body via CDP
+	body, err := page.GetResource(assetURL)
+	if err == nil && len(body) > 0 {
+		return &types.AssetDownloadResult{
+			URL:         assetURL,
+			Body:        body,
+			ContentType: resp.mimeType,
+			StatusCode:  resp.status,
+		}, nil
+	}
+
+	// Fallback: extract via canvas (slightly degraded quality for JPEG, but works)
+	canvasResult, err := page.Eval(`
+		(url) => {
+			const imgs = document.querySelectorAll('img');
+			for (const img of imgs) {
+				if (img.src === url && img.complete && img.naturalWidth > 0) {
+					const canvas = document.createElement('canvas');
+					canvas.width = img.naturalWidth || img.width;
+					canvas.height = img.naturalHeight || img.height;
+					const ctx = canvas.getContext('2d');
+					try {
+						ctx.drawImage(img, 0, 0);
+						return canvas.toDataURL('image/png');
+					} catch(e) {
+						return null;
+					}
+				}
+			}
+			return null;
+		}
+	`, assetURL)
+	if err == nil && canvasResult != nil && !canvasResult.Value.Nil() {
+		s := canvasResult.Value.String()
+		if strings.HasPrefix(s, "data:") {
 			if idx := strings.Index(s, "base64,"); idx >= 0 {
 				b64 := s[idx+len("base64,"):]
 				decoded, dErr := base64.StdEncoding.DecodeString(b64)
@@ -814,7 +1150,220 @@ func (p *Pool) downloadAssetViaNavigation(page *rod.Page, assetURL, referer stri
 		}
 	}
 
-	return nil, fmt.Errorf("could not extract asset body from navigation")
+	return nil, fmt.Errorf("could not get img response body from referer page")
+}
+
+// downloadAssetViaImgTag loads an asset by creating an <img> element in a page.
+// This loads the image as a subresource rather than via top-level navigation,
+// which bypasses download restrictions that cause ERR_BLOCKED_BY_CLIENT.
+func (p *Pool) downloadAssetViaImgTag(page *rod.Page, assetURL, referer string) (*types.AssetDownloadResult, error) {
+	// Navigate to about:blank first to have a clean page context
+	if err := page.Navigate("about:blank"); err != nil {
+		return nil, fmt.Errorf("navigate to about:blank: %w", err)
+	}
+	if err := page.WaitLoad(); err != nil {
+		return nil, fmt.Errorf("wait about:blank load: %w", err)
+	}
+
+	// Track the response for the asset URL
+	type respInfo struct {
+		requestID proto.NetworkRequestID
+		status    int
+		mimeType  string
+	}
+	var assetResp *respInfo
+	var respMu sync.Mutex
+
+	waitNavigation := page.EachEvent(func(e *proto.NetworkResponseReceived) {
+		if e.Response == nil {
+			return
+		}
+		respMu.Lock()
+		defer respMu.Unlock()
+		// Compare URLs after normalizing to handle encoding differences
+		if normalizeURL(e.Response.URL) == normalizeURL(assetURL) {
+			assetResp = &respInfo{
+				requestID: e.RequestID,
+				status:    int(e.Response.Status),
+				mimeType:  e.Response.MIMEType,
+			}
+		}
+	})
+	defer waitNavigation()
+
+	// Create an img element and set its src to trigger the load
+	jsExpr := `
+		(url) => {
+			const img = new Image();
+			img.onload = () => window.__imgLoaded = true;
+			img.onerror = () => window.__imgLoaded = 'error';
+			img.src = url;
+			document.body.appendChild(img);
+		}
+	`
+	_, err := page.Eval(jsExpr, assetURL)
+	if err != nil {
+		return nil, fmt.Errorf("create img element: %w", err)
+	}
+
+	// Wait for the image to load or fail (polling)
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		loadedVal, err := page.Eval(`() => window.__imgLoaded`)
+		if err == nil && loadedVal != nil && !loadedVal.Value.Nil() {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Wait a bit more for response event to be captured
+	time.Sleep(500 * time.Millisecond)
+
+	respMu.Lock()
+	resp := assetResp
+	respMu.Unlock()
+
+	if resp == nil {
+		return nil, fmt.Errorf("no response captured for img load")
+	}
+
+	if resp.status < 200 || resp.status >= 300 {
+		return nil, fmt.Errorf("img load HTTP %d", resp.status)
+	}
+
+	// Get the response body via CDP
+	body, err := page.GetResource(assetURL)
+	if err == nil && len(body) > 0 {
+		return &types.AssetDownloadResult{
+			URL:         assetURL,
+			Body:        body,
+			ContentType: resp.mimeType,
+			StatusCode:  resp.status,
+		}, nil
+	}
+
+	return nil, fmt.Errorf("could not get img response body")
+}
+
+// downloadAssetViaLoadNetworkResource loads an asset using CDP Network.loadNetworkResource.
+// This directly loads the resource through Chrome's network stack,
+// bypassing page-level restrictions that cause ERR_BLOCKED_BY_CLIENT.
+// It navigates to about:blank first to ensure a valid frame context.
+func (p *Pool) downloadAssetViaLoadNetworkResource(page *rod.Page, assetURL, referer string, ua *antibot.UAProfile) (*types.AssetDownloadResult, error) {
+	// Navigate to about:blank first to have a valid frame context
+	if err := page.Navigate("about:blank"); err != nil {
+		return nil, fmt.Errorf("navigate to about:blank: %w", err)
+	}
+	if err := page.WaitLoad(); err != nil {
+		return nil, fmt.Errorf("wait about:blank load: %w", err)
+	}
+
+	// Set headers appropriate for a subresource load
+	extraHeaders := proto.NetworkHeaders{
+		"Accept":          gson.New("image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"),
+		"Accept-Language": gson.New("en-US,en;q=0.9"),
+		"Sec-Fetch-Dest":  gson.New("image"),
+		"Sec-Fetch-Mode":  gson.New("no-cors"),
+		"Sec-Fetch-Site":  gson.New("cross-site"),
+		"User-Agent":      gson.New(ua.UserAgent),
+	}
+	if ua.SecChUa != "" {
+		extraHeaders["Sec-Ch-Ua"] = gson.New(ua.SecChUa)
+		extraHeaders["Sec-Ch-Ua-Mobile"] = gson.New(ua.SecChUaMobile)
+		extraHeaders["Sec-Ch-Ua-Platform"] = gson.New(ua.SecChUaPlatform)
+	}
+	if referer != "" {
+		extraHeaders["Referer"] = gson.New(referer)
+	}
+	proto.NetworkSetExtraHTTPHeaders{
+		Headers: extraHeaders,
+	}.Call(page)
+
+	frameID := page.FrameID
+	if frameID == "" {
+		return nil, fmt.Errorf("no valid frame ID after about:blank navigation")
+	}
+
+	params := proto.NetworkLoadNetworkResource{
+		URL:     assetURL,
+		FrameID: frameID,
+		Options: &proto.NetworkLoadNetworkResourceOptions{
+			DisableCache:       false,
+			IncludeCredentials: true,
+		},
+	}
+
+	result, err := params.Call(page)
+	if err != nil {
+		return nil, fmt.Errorf("Network.loadNetworkResource: %w", err)
+	}
+
+	if result == nil || result.Resource == nil || !result.Resource.Success {
+		if result != nil && result.Resource != nil {
+			status := 0
+			if result.Resource.HTTPStatusCode != nil {
+				status = int(*result.Resource.HTTPStatusCode)
+			}
+			return nil, fmt.Errorf("Network.loadNetworkResource not successful (status: %d, netError: %s)", status, result.Resource.NetErrorName)
+		}
+		return nil, fmt.Errorf("Network.loadNetworkResource returned nil result")
+	}
+
+	resource := result.Resource
+
+	if resource.Stream == "" {
+		return nil, fmt.Errorf("Network.loadNetworkResource no stream")
+	}
+
+	var data []byte
+	for {
+		readParams := proto.IORead{
+			Handle: resource.Stream,
+		}
+		readResult, readErr := readParams.Call(page)
+		if readErr != nil {
+			break
+		}
+		if readResult.Base64Encoded {
+			decoded, decodeErr := base64.StdEncoding.DecodeString(readResult.Data)
+			if decodeErr == nil && len(decoded) > 0 {
+				data = append(data, decoded...)
+			} else {
+				data = append(data, []byte(readResult.Data)...)
+			}
+		} else {
+			data = append(data, []byte(readResult.Data)...)
+		}
+		if readResult.EOF {
+			break
+		}
+	}
+
+	closeParams := proto.IOClose{Handle: resource.Stream}
+	closeParams.Call(page)
+
+	if len(data) == 0 {
+		return nil, fmt.Errorf("Network.loadNetworkResource returned empty data")
+	}
+
+	contentType := ""
+	if resource.Headers != nil {
+		if ct, ok := resource.Headers["Content-Type"]; ok {
+			contentType = ct.String()
+		}
+	}
+
+	statusCode := 0
+	if resource.HTTPStatusCode != nil {
+		statusCode = int(*resource.HTTPStatusCode)
+	}
+
+	return &types.AssetDownloadResult{
+		URL:         assetURL,
+		Body:        data,
+		ContentType: contentType,
+		StatusCode:  statusCode,
+	}, nil
 }
 
 // downloadAssetViaFetch downloads an asset using JavaScript fetch().
@@ -939,4 +1488,57 @@ func isHTMLContentType(ct string) bool {
 		ct = ct[:i]
 	}
 	return ct == "text/html" || ct == "application/xhtml+xml"
+}
+
+// normalizeURL normalizes a URL for comparison purposes by parsing and
+// re-encoding it. This handles differences in percent-encoding (e.g. %20 vs space)
+// that can cause direct string comparison to fail.
+func normalizeURL(u string) string {
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return u
+	}
+	return parsed.String()
+}
+
+// isTextContent returns true if the MIME type represents a text-based resource
+// that can be read as plain text (CSS, JavaScript, JSON, etc.).
+func isTextContent(mimeType string) bool {
+	mt := strings.ToLower(strings.TrimSpace(mimeType))
+	if i := strings.Index(mt, ";"); i >= 0 {
+		mt = mt[:i]
+	}
+	return strings.HasPrefix(mt, "text/") ||
+		strings.HasPrefix(mt, "application/javascript") ||
+		strings.HasPrefix(mt, "application/json") ||
+		strings.HasPrefix(mt, "application/xml") ||
+		strings.HasPrefix(mt, "application/xhtml+xml") ||
+		strings.HasPrefix(mt, "image/svg+xml")
+}
+
+// isImageURL returns true if the URL likely points to an image resource
+// based on file extension.
+func isImageURL(u string) bool {
+	low := strings.ToLower(u)
+	// Remove query string for extension check
+	if i := strings.Index(low, "?"); i >= 0 {
+		low = low[:i]
+	}
+	return strings.HasSuffix(low, ".png") ||
+		strings.HasSuffix(low, ".jpg") ||
+		strings.HasSuffix(low, ".jpeg") ||
+		strings.HasSuffix(low, ".gif") ||
+		strings.HasSuffix(low, ".webp") ||
+		strings.HasSuffix(low, ".svg") ||
+		strings.HasSuffix(low, ".ico") ||
+		strings.HasSuffix(low, ".bmp") ||
+		strings.HasSuffix(low, ".tiff")
+}
+
+// _randInt returns a random integer in [min, max] (inclusive).
+func _randInt(min, max int) int {
+	if min >= max {
+		return min
+	}
+	return min + rand.Intn(max-min+1)
 }

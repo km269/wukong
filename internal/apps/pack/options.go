@@ -36,6 +36,9 @@ type Options struct {
 	Publisher  string // Archive publisher.
 	Date       string // Archive date (YYYY-MM-DD, default today).
 	Title      string // Override title (default from main page <title>).
+	MainPagePath string // Preferred main page relative path (e.g. "biographies-list.html").
+	                   // If set and the file exists, it takes priority over root index.html
+	                   // and the auto-generated content index.
 
 	// Incremental ZIM packing.
 	Incremental bool   // Reuse unchanged clusters from cache.

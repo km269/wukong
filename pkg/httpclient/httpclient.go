@@ -59,6 +59,7 @@ type Options struct {
 	ProxyURL            string
 	ProxyPool           []string
 	ProxyRotateEvery    int
+	ForceIPv4           bool
 }
 
 func DefaultOptions() Options {
@@ -120,7 +121,16 @@ func New(opts Options) *Client {
 		DisableKeepAlives:   true,
 		TLSHandshakeTimeout: opts.TLSHandshakeTimeout,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, network, addr)
+			// When ForceIPv4 is enabled, use "tcp4" network type instead of "tcp"
+			// to avoid IPv6 connection issues (e.g. "access forbidden by access permissions"
+			// errors on Windows when IPv6 is restricted).
+			if opts.ForceIPv4 && network == "tcp" {
+				network = "tcp4"
+			}
+			return (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext(ctx, network, addr)
 		},
 	}
 
@@ -140,6 +150,8 @@ func New(opts Options) *Client {
 		} else {
 			fmt.Fprintf(os.Stderr, "[httpclient] invalid proxy pool URL: %v\n", err)
 		}
+	} else {
+		transport.Proxy = http.ProxyFromEnvironment
 	}
 
 	client.Client = &http.Client{

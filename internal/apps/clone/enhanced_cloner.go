@@ -3,6 +3,14 @@
 // enhanced_cloner.go: Improved clone engine integrating browser pool,
 // frontier-based resume, robots.txt compliance, sitemap discovery,
 // rate limiting, content deduplication, and CSS rewriting.
+//
+// TODO: API endpoint crawling support
+//   - Auto-discover APIs from page JavaScript (fetch/XHR requests)
+//   - Support multiple pagination styles: query-param, path-based,
+//     header-based (Link/X-Total-Count), body-based (POST JSON),
+//     offset/limit, cursor/keyset, seek, token-based
+//   - Save raw API responses and optionally render as static HTML
+//   - Handle auth tokens and rate limiting for APIs
 package clone
 
 import (
@@ -11,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -435,6 +444,28 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	ec.scheme = parsedURL.Scheme
 	ec.host = parsedURL.Host
 	ec.seedURL = seedURL
+
+	// Set the default Referer for asset downloads to the seed URL.
+	// This helps bypass anti-hotlink protection on CDNs and media servers
+	// that check the Referer header (e.g., media.defense.gov).
+	ec.assetDownloader.Referer = seedURL
+
+	// Configure domain-specific Referer overrides for known cross-domain
+	// media/CDN servers that validate the Referer header.
+	// Using the seed URL as the Referer makes requests appear as if
+	// they were triggered by the main site, which many CDNs require.
+	ec.assetDownloader.RefererOverrides = map[string]string{
+		// U.S. Department of Defense media server — strict referer checking
+		"media.defense.gov": seedURL,
+		".defense.gov":      seedURL,
+		// Common CDNs that sometimes check referer
+		".cloudfront.net":  seedURL,
+		".akamai.net":      seedURL,
+		".akamaized.net":   seedURL,
+		".fastly.net":      seedURL,
+		".edgecastcdn.net": seedURL,
+		".hwcdn.net":       seedURL,
+	}
 
 	// Pre-flight Cloudflare detection.
 	// Before starting headless Chrome, check if the site uses Cloudflare
@@ -1209,6 +1240,16 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 		return nil
 	}
 	ec.assetMu.RUnlock()
+
+	// Add a small random delay before each asset download to reduce
+	// the chance of triggering rate limiting. Assume all domains
+	// may have anti-bot protection.
+	delay := time.Duration(300+rand.Intn(700)) * time.Millisecond
+	select {
+	case <-time.After(delay):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 
 	if util.DebugEnabled {
 		fmt.Fprintf(os.Stderr, "[wukong/clone] downloading asset: %s\n", assetURL)
