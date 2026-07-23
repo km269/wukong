@@ -749,4 +749,19 @@ EvolutionPatcher 采用哈希去重机制防止补丁无限增长，最多保留
 
 ---
 
-> **版本**: v0.2.0 | **最后更新**: 2026-07-11 | **文件数**: 30 CLI 文件 + 3 TUI 文件 | **总行数**: ~4500 行
+## 附录
+
+### 相关文档
+
+| 文档 | 说明 |
+|------|------|
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | 系统架构详解 |
+| [CONFIG.md](./CONFIG.md) | 配置参考手册 |
+| [CLONE_GUIDE.md](./CLONE_GUIDE.md) | 网站克隆技术指南 |
+| [ANTIBOT_GUIDE.md](./ANTIBOT_GUIDE.md) | 反反爬技术详解 |
+| [MEMORY_ARCHITECTURE.md](./MEMORY_ARCHITECTURE.md) | 记忆系统架构 |
+| [README.md](../README.md) | 项目主页 |
+
+---
+
+> **版本**: v0.2.0 | **最后更新**: 2026-07-23 | **文件数**: 30 CLI 文件 + 3 TUI 文件 | **总行数**: ~4500 行
