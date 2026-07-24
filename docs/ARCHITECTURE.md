@@ -1,10 +1,10 @@
 # Wukong 系统架构
 
-> Go: 1.26 | 内部包: 30+ | 公共包: 2 | 配置结构体: 34
+> Go: 1.26 | 内部包: 30+ | 公共包: 3 | 配置结构体: 34+
 >
 > 基于 tRPC-Agent-Go v1.10.0 · tRPC-MCP-Go v0.0.16 · tRPC-A2A-Go v0.2.5 · CortexDB v2.25.0 · OKF v0.1
 >
-> CLI: 27 顶层命令 + 55+ 子命令 | 直接依赖: 29 | 间接依赖: 105+
+> CLI: 29 顶层命令 + 60+ 子命令 | 直接依赖: 29 | 间接依赖: 105+
 
 ---
 
@@ -59,7 +59,7 @@ Wukong 的设计围绕七大核心哲学展开，每一项都指导了具体的�
 +======================================================================+
 |                        接入层 (Entry Layer)                           |
 +----------------------------------------------------------------------+
-|  CLI (27cmd+55sub)  |  TUI  |  Gateway:9093  |  A2A:9090  |  ACP:9091 |
+|  CLI (29cmd+60sub)  |  TUI  |  Gateway:9093  |  A2A:9090  |  ACP:9091 |
 |  AG-UI SSE:8080     |  MCP:3400       |  ANP:9092                    |
 +======================================================================+
 |                      编排层 (Orchestration Layer)                     |
@@ -211,11 +211,11 @@ wukong/
 | 目录 | 文件数 | 核心职责 | 关键类型 |
 |------|--------|---------|---------|
 | `internal/agent/` | 21 | CoreLoop 核心编排引擎 | CoreLoop, WorkflowBuilder, Recipe, EvolutionTracker |
-| `internal/apps/` | 31 | 应用管理 (克隆/打包/预览) | Manager, EnhancedCloner, Packer |
+| `internal/apps/` | 31+ | 应用管理 (克隆/打包/预览/MCP) | Manager, EnhancedCloner, Packer, MCPApps |
 | `internal/ard/` | 22 | ARD 发现 + ANP 协议栈 | AICatalog, DIDManager, HTTPSign |
 | `internal/browser/` | 28 | 浏览器控制 + 反反爬 | Backend, Antibot, Stealth, Settle |
-| `internal/cli/` | 30 | CLI 命令 + TUI 界面 | rootCmd, TUI Model |
-| `internal/config/` | 9 | 配置加载 + 验证 | WukongConfig, Loader, Validator |
+| `internal/cli/` | 30+ | CLI 命令 + TUI 界面 | rootCmd, TUI Model |
+| `internal/config/` | 12 | 配置加载 + 验证 | WukongConfig, Loader, Validator |
 | `internal/cortex/` | 14 | CortexDB 记忆栈 | CortexStore, MemoryFlow, GraphFlow |
 | `internal/evolution/` | 7 | 技能进化引擎 | EvolutionEngine, Analyzer, Patcher |
 | `internal/extension/` | 25 | MCP 扩展管理 | Manager, MCP Broker |
@@ -224,7 +224,8 @@ wukong/
 | `internal/summon/` | 9 | 子 Agent 委派 + A2A | A2AClient, MetaProtocol, E2EE |
 | `internal/security/` | 4 | 五层安全防御 | Guard, IgnoreMatcher |
 | `pkg/sandbox/` | 10 | 跨平台 OS 沙箱 | Sandbox, Landlock, Seatbelt, LowIL |
-| `pkg/zim/` | 6 | ZIM 格式读写 | Reader, Writer, Codec |
+| `pkg/zim/` | 8 | ZIM 格式读写 | Reader, Writer, Codec, Verify |
+| `pkg/httpclient/` | 1 | HTTP 客户端封装 | HTTPClient |
 
 ---
 
@@ -322,6 +323,11 @@ type CoreLoop struct {
     memoryFlow     *cortex.MemoryFlowService // 记忆流
     graphFlow      *cortex.GraphFlowService  // 知识图谱 (可选)
     closeFn        func() error          // 关闭函数
+
+    mu     sync.RWMutex
+    closed bool
+    bgWg   sync.WaitGroup // 后台 goroutine 跟踪
+    runWg  sync.WaitGroup // 运行中 RunStream 跟踪
 }
 ```
 
@@ -941,7 +947,7 @@ type CatalogEntry struct {
 | external | 外部 MCP 服务器 | 自定义 MCP 服务 |
 | mcp_broker | MCP Broker 批量管理 | 多个外部 MCP 统一暴露 |
 
-### 13.2 13 个内置扩展
+### 13.2 14 个内置扩展
 
 | 扩展 | 功能 |
 |------|------|
@@ -957,6 +963,8 @@ type CatalogEntry struct {
 | topofmind | 置顶指令 |
 | tutorial | 教程引导 |
 | auto_visualiser | 自动可视化 |
+| computer_controller | Chromedp 浏览器自动化 |
+| agent_tools | 子 Agent 包装工具 |
 
 ### 13.3 MCP Broker
 
@@ -1032,7 +1040,7 @@ Layer 1: OS 权限
 Browser Backend
     ├── Rod (默认)
     │   └── rodbackend.New()
-    │       ├── Headless 模式
+    │       ├── Headless 模式 (new headless)
     │       ├── Worker 池 (标签池)
     │       ├── Stealth 脚本注入
     │       ├── Proxy 支持
@@ -1042,7 +1050,37 @@ Browser Backend
         └── chromedp.New()
 ```
 
-### 15.2 反反爬体系 (10 层)
+### 15.2 Rod Backend 核心实现
+
+`internal/browser/rodbackend/pool.go`
+
+**Chrome 启动标志** (绕过安全浏览限制):
+- `safebrowsing-disable-download-protection`
+- `safebrowsing-disable-extension-blacklist`
+- `safebrowsing-manual-protection-did-opt-out`
+- `disable-features=SafeBrowsing,IsolateOrigins`
+- `disable-background-networking`
+- `disable-component-update`
+- `disable-client-side-phishing-detection`
+
+**Worker Pool 架构**:
+```
+Pool
+├── workers []*worker (标签池)
+│   └── worker { idx, page *rod.Page }
+├── queue chan *renderJob (任务队列)
+├── refererPages map[string]*rod.Page (Referer 页面缓存)
+├── escalator *antibot.Escalator (反反爬升级器)
+└── behaviorSimulator *behavior.Simulator (行为模拟)
+```
+
+**Referer 页面缓存机制**:
+- 缓存已访问的 referer 页面，避免重复导航
+- 使用 `sync.Mutex` 保护并发访问
+- 缓存页面上下文重置为 `context.Background()` 防止取消传播
+- 显著减少 `net::ERR_CONNECTION_CLOSED` 错误
+
+### 15.3 反反爬体系 (10 层)
 
 | 层级 | 组件 | 功能 |
 |------|------|------|
@@ -1057,7 +1095,7 @@ Browser Backend
 | 9 | Settle | 网络空闲等待 |
 | 10 | Proxy Pool | 智能代理池 |
 
-### 15.3 Antibot 升级策略
+### 15.4 Antibot 升级策略
 
 `internal/browser/antibot/escalator.go`
 
@@ -1075,7 +1113,12 @@ passive → gentle → moderate → aggressive → extreme
 - `robots_probe`: robots.txt 检查
 - `waf_probe`: WAF 检测
 
-### 15.4 资源下载策略
+### 15.5 资源下载策略 (4 层回退)
+
+**导航路径 Header 规则**:
+- 所有导航路径 (renderJob, downloadAssetViaNavigation, downloadAssetViaImgOnRefererPage, getOrCreateRefererPage) **不手动设置 Sec-Fetch-\* 头**
+- 使用 Chrome 自动处理 headers + `NetworkSetUserAgentOverride` 设置 UA + 最小化 headers (Accept, Upgrade-Insecure-Requests)
+- `downloadAssetViaLoadNetworkResource` 使用 CDP 的 `Network.loadNetworkResource`，需显式设置 `Sec-Fetch-Dest: image` (CDP 子资源加载例外)
 
 **4 层回退机制**:
 ```
@@ -1089,7 +1132,10 @@ Layer 4: fetch API
     └── 失败 → 彻底失败
 ```
 
-### 15.5 代理池
+**特殊 URL 处理**:
+- `media.defense.gov` 资产 URL 包含 `/300/300/0/` 路径段时，初始下载失败后回退到 `/-1/-1/0/` 全分辨率变体
+
+### 15.6 代理池
 
 `internal/browser/proxy_pool.go`
 
@@ -1098,11 +1144,17 @@ Layer 4: fetch API
 - 自动故障转移
 - 轮询/随机选择策略
 
+### 15.7 响应解压
+
+- 自动处理 gzip/deflate 压缩响应
+- 确保 CSS/JS 文件在保存前被正确解压
+- 避免浏览器渲染时遇到乱码问题
+
 ---
 
 ## 16. Apps 应用管理系统
 
-`internal/apps/` — 31 个文件
+`internal/apps/` — 31+ 个文件
 
 ### 16.1 应用类型
 
@@ -1138,6 +1190,8 @@ Layer 4: fetch API
 4. Cursor/Keyset: `?cursor=abc` → `index_cursor_e861b2.html`
 5. Seek: `?after=2024-01-01` → `index_seek_xxx.html`
 6. Token: `?pageToken=xxx` → `index_token_xxx.html`
+
+> **重要**: 分页 URL 必须生成不同的 PageKey 以避免重复检测。查询参数式分页使用人类可读命名（如 `index_page_2.html`），Cursor/Token 式使用短哈希后缀处理长参数值。
 
 **克隆流水线**:
 ```
@@ -1183,10 +1237,39 @@ Content Dedup (SHA-256 + 硬链接)
 - 增量集群缓存
 
 **核心文件**:
-- `packer.go`: 打包器主逻辑
-- `zim.go`: ZIM 写入器
+- `packer.go`: 打包器主逻辑，支持 HTML/ZIM/Binary/App 四种格式
+- `zim.go`: ZIM 写入器桥接
+- `pkg/zim/zim.go`: ZIM Packer (文章管理、MIME 类型、集群构建)
 - `pkg/zim/reader.go`: ZIM 读取器
-- `pkg/zim/codec.go`: 编解码器
+- `pkg/zim/codec.go`: 编解码器 (zstd/zip 等)
+- `pkg/zim/verify_zim.go`: ZIM 文件校验
+
+**HTML 路径处理流水线**:
+```
+原始 HTML
+    │
+    v
+adjustHTMLPaths (调整资源路径为相对路径)
+    │
+    v
+stripAssetsPrefixFromHTML (剥离 assets/ 前缀)
+    │
+    v
+normalizeAssetCaseInHTML (大小写归一化)
+    │
+    v
+最终 HTML
+```
+
+**大小写归一化 (assetCaseMap)**:
+- Windows 文件系统不区分大小写，但 ZIM 查找区分大小写
+- 预遍历所有资产文件，构建 `lowercase(url) → actual url` 映射
+- `normalizeAssetCaseInHTML` 函数在 HTML 中解析每个相对引用
+  - 相对于页面 URL 解析引用
+  - 在 assetCaseMap 中查找（不区分大小写）
+  - 重写引用以匹配存储的实际大小写
+- 使用 `relSlashPath` 计算前向斜杠相对路径
+- 解决 HTML 引用 "DesktopModules/ArticleCS/Styles/" 但磁盘存储 "DesktopModules/ArticleCS/styles/" 类问题
 
 ### 16.4 预览服务器
 
@@ -1208,7 +1291,7 @@ Content Dedup (SHA-256 + 硬链接)
 
 ## 17. 配置系统
 
-`internal/config/` — 9 个文件
+`internal/config/` — 12 个文件
 
 ### 17.1 7 级加载优先级
 
@@ -1258,7 +1341,7 @@ Content Dedup (SHA-256 + 硬链接)
 | L | Knowledge & Skill Management — Knowledge/OKF/Skill |
 | M | Agent Orchestration — Workflow |
 | N | Observability & Evaluation — Telemetry/Eval |
-| O | Project Directory |
+| O | Apps — Clone/Pack/Sanitize |
 
 ### 17.4 环境变量展开
 
@@ -1291,6 +1374,7 @@ Content Dedup (SHA-256 + 硬链接)
 - workflow.mode 有效性 (10 种模式)
 - anp.port 范围
 - session/memory/recall backend 有效性
+- apps.clone/pack.workers >= 1
 - ... 等等
 
 **非致命警告** (Warnings):
@@ -1381,6 +1465,10 @@ Content Dedup (SHA-256 + 硬链接)
 | 22 | OKF 日志双格式输出 | Markdown 人读，JSON 机读 | 双份维护成本 |
 | 23 | 进化引擎并发安全 | Mutex 保护关键写入 | 写入串行化 |
 | 24 | 4 层资源下载回退 | 提高成功率（HTTP → CDP → img → fetch） | 重试耗时 |
+| 25 | 导航路径不手动设 Sec-Fetch-* | 避免 Chrome 指纹异常 | CDP 子资源加载需显式设置 |
+| 26 | Referer 页面缓存 | 减少重复导航，降低连接关闭错误 | 需正确处理上下文重置 |
+| 27 | ZIM 大小写归一化 | 解决 Windows 不区分大小写导致的 ZIM 查找失败 | 增加打包时间 |
+| 28 | 分页 URL 不同 PageKey | 避免分页页面被误认为重复 | 需维护多种分页模式识别 |
 
 ---
 
@@ -1452,6 +1540,40 @@ Content Dedup (SHA-256 + 硬链接)
         └─ 关闭浏览器池
 ```
 
+### 20.3 ZIM 打包生命周期
+
+```
+开始打包
+    │
+    ├─ 遍历源目录
+    ├─ 构建资产大小写映射 (assetCaseMap)
+    │
+    ├─ 处理每个 HTML 文件
+    │   ├─ adjustHTMLPaths (路径调整)
+    │   ├─ stripAssetsPrefix (剥离前缀)
+    │   └─ normalizeAssetCaseInHTML (大小写归一化)
+    │
+    ├─ 收集所有条目 (文章 + 元数据)
+    ├─ 构建 MIME 类型表
+    ├─ 构建 URL 指针列表 (排序)
+    ├─ 构建集群 (Cluster)
+    │   ├─ 按大小分组条目
+    │   ├─ zstd 压缩每个集群
+    │   └─ 增量缓存避免重复压缩
+    │
+    ├─ 写入 ZIM 文件
+    │   ├─ Header (80 字节)
+    │   ├─ MIME 类型列表
+    │   ├─ URL 指针列表
+    │   ├─ 标题指针列表
+    │   ├─ 集群指针列表
+    │   ├─ 集群数据
+    │   └─ MD5 校验和
+    │
+    └─ 完成
+        └─ 生成打包报告
+```
+
 ---
 
 ## 附录
@@ -1473,3 +1595,4 @@ Content Dedup (SHA-256 + 硬链接)
 - [CortexDB GitHub](https://github.com/liliang-cn/cortexdb)
 - [OKF 规范](https://github.com/google/open-knowledge-format)
 - [RFC 9421 HTTP 消息签名](https://www.rfc-editor.org/rfc/rfc9421)
+- [ZIM 文件格式规范](https://wiki.openzim.org/wiki/ZIM_file_format)
