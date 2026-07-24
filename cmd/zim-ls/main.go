@@ -48,6 +48,38 @@ func listZim(zpath string) {
 	count := r.Count()
 	fmt.Printf("Entries: %d\n\n", count)
 
+	// Aggregate by namespace + mimetype
+	type stat struct {
+		ns       byte
+		mime     string
+		count    int
+		redirect int
+	}
+	stats := map[string]*stat{}
+	for i := uint32(0); i < count; i++ {
+		e, err := r.EntryAt(i)
+		if err != nil {
+			continue
+		}
+		key := fmt.Sprintf("%c|%s", e.Namespace, e.MimeType)
+		s, ok := stats[key]
+		if !ok {
+			s = &stat{ns: e.Namespace, mime: e.MimeType}
+			stats[key] = s
+		}
+		if e.Redirect {
+			s.redirect++
+		} else {
+			s.count++
+		}
+	}
+
+	fmt.Println("--- By Namespace/MIME ---")
+	for _, s := range stats {
+		fmt.Printf("  [%c] mime=%q content=%d redirect=%d\n", s.ns, s.mime, s.count, s.redirect)
+	}
+	fmt.Println()
+
 	// Show all HTML pages
 	fmt.Println("--- HTML Pages ---")
 	pageCount := 0
@@ -65,6 +97,29 @@ func listZim(zpath string) {
 		}
 	}
 	fmt.Printf("Total HTML pages: %d\n\n", pageCount)
+
+	// Show non-HTML content entries (assets)
+	fmt.Println("--- Non-HTML Assets ---")
+	assetCount := 0
+	for i := uint32(0); i < count; i++ {
+		e, err := r.EntryAt(i)
+		if err != nil {
+			continue
+		}
+		if e.Redirect {
+			continue
+		}
+		if strings.Contains(e.MimeType, "text/html") || strings.HasSuffix(e.URL, ".html") {
+			continue
+		}
+		fmt.Printf("  [%s] %s  (mime=%s)\n", string(e.Namespace), e.URL, e.MimeType)
+		assetCount++
+		if assetCount >= 40 {
+			fmt.Println("  ... (truncated)")
+			break
+		}
+	}
+	fmt.Printf("Total non-HTML assets: %d\n\n", assetCount)
 
 	// Show redirects
 	fmt.Println("--- Redirects ---")

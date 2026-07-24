@@ -50,6 +50,10 @@ type Pool struct {
 	behaviorSimulator  *behavior.Simulator
 	escalator          *antibot.Escalator
 	currentUA          *antibot.UAProfile
+
+	refererMu    sync.Mutex
+	refererUseMu sync.Mutex
+	refererPages map[string]*rod.Page
 }
 
 type worker struct {
@@ -97,6 +101,19 @@ func New(opts Options) *Pool {
 		}
 		l = l.Set("start-maximized", "")
 		l = l.Set("disable-ipv6", "")
+		l = l.Set("disable-gpu", "")
+		// Disable Safe Browsing to prevent ERR_BLOCKED_BY_CLIENT
+		// when navigating directly to binary resources (images, etc.).
+		l = l.Set("safebrowsing-disable-download-protection", "")
+		l = l.Set("safebrowsing-disable-extension-blacklist", "")
+		l = l.Set("safebrowsing-manual-protection-did-opt-out", "")
+		l = l.Set("disable-features", "SafeBrowsing,IsolateOrigins")
+		l = l.Set("disable-background-networking", "")
+		l = l.Set("disable-component-update", "")
+		l = l.Set("no-pings", "")
+		l = l.Set("disable-breakpad", "")
+		l = l.Set("disable-client-side-phishing-detection", "")
+		l = l.Set("download-default-directory", "")
 		if opts.ProfileDir != "" {
 			l = l.UserDataDir(opts.ProfileDir)
 		}
@@ -104,10 +121,6 @@ func New(opts Options) *Pool {
 			l = l.NoSandbox(true)
 		}
 		l = l.Devtools(false)
-		// NOTE: We don't use download_restrictions=3 because it causes
-		// ERR_BLOCKED_BY_CLIENT when navigating directly to binary resources
-		// like images, and PageSetDownloadBehavior can't override it.
-		// Instead, we use PageSetDownloadBehavior on individual pages.
 		if opts.Proxy != "" {
 			l = l.Proxy(opts.Proxy)
 		}
@@ -126,6 +139,7 @@ func New(opts Options) *Pool {
 		behaviorSimulator: behavior.New(behavior.DefaultConfig()),
 		escalator:         escalator,
 		currentUA:         currentUA,
+		refererPages:      make(map[string]*rod.Page),
 	}
 
 	for i := 0; i < opts.Workers; i++ {
@@ -228,25 +242,25 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 
 	ua := p.getCurrentUA()
 
-	// Set extra HTTP headers for more realistic browser fingerprint.
+	// Simulate a real browser typing URL in the address bar.
+	// Do NOT set Sec-Fetch-* headers manually — Chrome sets these automatically.
+	// Setting them manually can trigger Chrome's security checks and cause
+	// ERR_BLOCKED_BY_CLIENT. Use the same minimal-header pattern as
+	// downloadAssetViaNavigation for consistency.
+	uaOverride := proto.NetworkSetUserAgentOverride{
+		UserAgent: ua.UserAgent,
+	}
+	if ua.SecChUa != "" {
+		uaOverride.AcceptLanguage = "en-US,en;q=0.9"
+	}
+	uaOverride.Call(page)
+
 	headers := proto.NetworkHeaders{
 		"Accept":                    gson.New("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
-		"Accept-Language":           gson.New("en-US,en;q=0.9"),
-		"Sec-Ch-Ua":                 gson.New(ua.SecChUa),
-		"Sec-Ch-Ua-Mobile":          gson.New(ua.SecChUaMobile),
-		"Sec-Ch-Ua-Platform":        gson.New(ua.SecChUaPlatform),
-		"Sec-Fetch-Dest":            gson.New("document"),
-		"Sec-Fetch-Mode":            gson.New("navigate"),
-		"Sec-Fetch-Site":            gson.New("none"),
-		"Sec-Fetch-User":            gson.New("?1"),
 		"Upgrade-Insecure-Requests": gson.New("1"),
-		"User-Agent":                gson.New(ua.UserAgent),
 	}
 	proto.NetworkSetExtraHTTPHeaders{
 		Headers: headers,
-	}.Call(page)
-	proto.NetworkSetUserAgentOverride{
-		UserAgent: ua.UserAgent,
 	}.Call(page)
 
 	if err := page.Navigate(job.url); err != nil {
@@ -671,6 +685,11 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 	defer page.Close()
 	page = page.Context(assetCtx)
 
+	// Inject cookies from cached referer page if available
+	if referer != "" {
+		p.injectRefererCookies(page, referer)
+	}
+
 	// Inject stealth scripts to hide automation indicators.
 	if p.opts.Stealth {
 		_, err := proto.PageAddScriptToEvaluateOnNewDocument{
@@ -756,6 +775,36 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 	}
 	fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer4 fetch: failed for %s: %v\n", assetURL, err4)
 
+	// Fallback: try full-resolution URL variant for media.defense.gov assets
+	// Sometimes the 300x300 thumbnail endpoint is blocked while full-resolution works
+	if strings.Contains(assetURL, "media.defense.gov") && strings.Contains(assetURL, "/300/300/0/") {
+		fullResURL := strings.Replace(assetURL, "/300/300/0/", "/-1/-1/0/", 1)
+		fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset trying full-resolution variant: %s\n", fullResURL)
+
+		l5Ctx, l5Cancel := context.WithTimeout(assetCtx, 20*time.Second)
+		l5Page := page.Context(l5Ctx)
+		result5, err5 := p.downloadAssetViaNavigation(l5Page, fullResURL, referer, ua)
+		l5Cancel()
+		if err5 == nil && len(result5.Body) > 0 {
+			fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset full-resolution variant success: %s (%d bytes)\n", fullResURL, len(result5.Body))
+			return result5, nil
+		}
+		fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset full-resolution variant failed: %v\n", err5)
+
+		// Also try img-on-referer with full-resolution URL
+		if referer != "" {
+			l5bCtx, l5bCancel := context.WithTimeout(assetCtx, 25*time.Second)
+			l5bPage := page.Context(l5bCtx)
+			result5b, err5b := p.downloadAssetViaImgOnRefererPage(l5bPage, fullResURL, referer, ua)
+			l5bCancel()
+			if err5b == nil && len(result5b.Body) > 0 {
+				fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset full-resolution variant (img-on-referer) success: %s (%d bytes)\n", fullResURL, len(result5b.Body))
+				return result5b, nil
+			}
+			fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset full-resolution variant (img-on-referer) failed: %v\n", err5b)
+		}
+	}
+
 	// All failed — return the first error.
 	return nil, firstErr
 }
@@ -764,28 +813,29 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 // This bypasses CORS because top-level navigation is not subject to CORS.
 // It works like opening the image URL directly in a browser tab.
 func (p *Pool) downloadAssetViaNavigation(page *rod.Page, assetURL, referer string, ua *antibot.UAProfile) (*types.AssetDownloadResult, error) {
-	// Set headers appropriate for top-level navigation (like typing URL in address bar)
-	navHeaders := proto.NetworkHeaders{
-		"Accept":                    gson.New("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
-		"Accept-Language":           gson.New("en-US,en;q=0.9"),
-		"Sec-Fetch-Dest":            gson.New("document"),
-		"Sec-Fetch-Mode":            gson.New("navigate"),
-		"Sec-Fetch-Site":            gson.New("none"),
-		"Sec-Fetch-User":            gson.New("?1"),
-		"Upgrade-Insecure-Requests": gson.New("1"),
-		"User-Agent":                gson.New(ua.UserAgent),
+	// Simulate a real browser typing URL in the address bar.
+	// Do NOT set Sec-Fetch-* headers manually — Chrome sets these automatically.
+	// Setting them manually can trigger Chrome's security checks and cause
+	// ERR_BLOCKED_BY_CLIENT. Real browsers only send basic headers when
+	// navigating via address bar.
+
+	// Set User-Agent override via CDP (this is the correct way to set UA).
+	uaOverride := proto.NetworkSetUserAgentOverride{
+		UserAgent: ua.UserAgent,
 	}
 	if ua.SecChUa != "" {
-		navHeaders["Sec-Ch-Ua"] = gson.New(ua.SecChUa)
-		navHeaders["Sec-Ch-Ua-Mobile"] = gson.New(ua.SecChUaMobile)
-		navHeaders["Sec-Ch-Ua-Platform"] = gson.New(ua.SecChUaPlatform)
+		uaOverride.AcceptLanguage = "en-US,en;q=0.9"
 	}
-	if referer != "" {
-		navHeaders["Referer"] = gson.New(referer)
-		navHeaders["Sec-Fetch-Site"] = gson.New("cross-site")
+	uaOverride.Call(page)
+
+	// Set minimal extra headers that a browser would naturally send.
+	// Note: We intentionally do NOT set Sec-Fetch-* headers here.
+	minimalHeaders := proto.NetworkHeaders{
+		"Accept":                    gson.New("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+		"Upgrade-Insecure-Requests": gson.New("1"),
 	}
 	proto.NetworkSetExtraHTTPHeaders{
-		Headers: navHeaders,
+		Headers: minimalHeaders,
 	}.Call(page)
 
 	// Track the response for the asset URL.
@@ -944,40 +994,62 @@ func (p *Pool) downloadAssetViaNavigation(page *rod.Page, assetURL, referer stri
 //   - The page context provides proper cookies and session state
 //   - Sec-Fetch headers are naturally correct for an image subresource
 func (p *Pool) downloadAssetViaImgOnRefererPage(page *rod.Page, assetURL, referer string, ua *antibot.UAProfile) (*types.AssetDownloadResult, error) {
-	// Set headers appropriate for page navigation
-	navHeaders := proto.NetworkHeaders{
-		"Accept":                    gson.New("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
-		"Accept-Language":           gson.New("en-US,en;q=0.9"),
-		"Sec-Ch-Ua":                 gson.New(ua.SecChUa),
-		"Sec-Ch-Ua-Mobile":          gson.New(ua.SecChUaMobile),
-		"Sec-Ch-Ua-Platform":        gson.New(ua.SecChUaPlatform),
-		"Sec-Fetch-Dest":            gson.New("document"),
-		"Sec-Fetch-Mode":            gson.New("navigate"),
-		"Sec-Fetch-Site":            gson.New("none"),
-		"Sec-Fetch-User":            gson.New("?1"),
-		"Upgrade-Insecure-Requests": gson.New("1"),
-		"User-Agent":                gson.New(ua.UserAgent),
-	}
-	proto.NetworkSetExtraHTTPHeaders{
-		Headers: navHeaders,
-	}.Call(page)
+	// Use cached referer page if available to avoid redundant navigation
+	cachedPage := p.getOrCreateRefererPage(referer, ua)
+	usingCache := cachedPage != nil
+	if usingCache {
+		p.refererUseMu.Lock()
+		page = cachedPage
+		fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: using cached referer page for %s\n", referer)
+		defer p.refererUseMu.Unlock()
 
-	// Step 1: Navigate to the Referer page to establish proper context
-	fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: navigating to referer page: %s\n", referer)
-	navErr := page.Navigate(referer)
-	if navErr != nil {
-		fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: referer nav error: %v\n", navErr)
-		// If referer page fails to navigate, try about:blank instead
-		if err := page.Navigate("about:blank"); err != nil {
-			return nil, fmt.Errorf("navigate to about:blank fallback: %w", err)
-		}
-		page.WaitLoad()
+		// Clean up any previously injected img elements to keep the page state clean
+		page.Eval(`() => {
+			const imgs = document.querySelectorAll('img[data-wukong-injected]');
+			imgs.forEach(img => img.remove());
+		}`)
 	} else {
-		if err := page.WaitLoad(); err != nil {
-			fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: referer waitLoad warning: %v\n", err)
+		// Simulate a real browser typing URL in the address bar.
+		// Do NOT set Sec-Fetch-* headers manually — Chrome sets these automatically.
+		// Setting them manually can trigger Chrome's security checks and cause
+		// ERR_BLOCKED_BY_CLIENT. Use the same minimal-header pattern as
+		// downloadAssetViaNavigation for consistency.
+		uaOverride := proto.NetworkSetUserAgentOverride{
+			UserAgent: ua.UserAgent,
 		}
-		// Add a small human-like delay after page load
-		time.Sleep(time.Duration(800+_randInt(0, 1200)) * time.Millisecond)
+		if ua.SecChUa != "" {
+			uaOverride.AcceptLanguage = "en-US,en;q=0.9"
+		}
+		uaOverride.Call(page)
+
+		minimalHeaders := proto.NetworkHeaders{
+			"Accept":                    gson.New("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+			"Upgrade-Insecure-Requests": gson.New("1"),
+		}
+		proto.NetworkSetExtraHTTPHeaders{
+			Headers: minimalHeaders,
+		}.Call(page)
+
+		// Step 1: Navigate to the Referer page to establish proper context
+		fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: navigating to referer page: %s\n", referer)
+		navErr := page.Navigate(referer)
+		if navErr != nil {
+			fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: referer nav error: %v\n", navErr)
+			// If referer page fails to navigate, try about:blank instead
+			if err := page.Navigate("about:blank"); err != nil {
+				return nil, fmt.Errorf("navigate to about:blank fallback: %w", err)
+			}
+			page.WaitLoad()
+		} else {
+			if err := page.WaitLoad(); err != nil {
+				fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: referer waitLoad warning: %v\n", err)
+			}
+			// Add a small human-like delay after page load
+			time.Sleep(time.Duration(800+_randInt(0, 1200)) * time.Millisecond)
+		}
+
+		// Cache the loaded referer page for future use
+		p.cacheRefererPage(referer, page)
 	}
 
 	// Step 2: Track network events for the image
@@ -1042,6 +1114,7 @@ func (p *Pool) downloadAssetViaImgOnRefererPage(page *rod.Page, assetURL, refere
 		(url) => {
 			return new Promise((resolve) => {
 				const img = new Image();
+				img.setAttribute('data-wukong-injected', 'true');
 				img.onload = () => resolve({
 					ok: true,
 					naturalWidth: img.naturalWidth,
@@ -1056,7 +1129,6 @@ func (p *Pool) downloadAssetViaImgOnRefererPage(page *rod.Page, assetURL, refere
 				});
 				img.src = url;
 				document.body.appendChild(img);
-				// Timeout after 15s
 				setTimeout(() => {
 					if (!img.complete) {
 						resolve({ ok: false, errorType: 'timeout', errorMessage: 'Image load timed out' });
@@ -1476,7 +1548,144 @@ func (p *Pool) Close() {
 		}
 	}
 
+	// Close cached referer pages
+	p.refererMu.Lock()
+	for _, rp := range p.refererPages {
+		if rp != nil {
+			rp.Close()
+		}
+	}
+	p.refererPages = nil
+	p.refererMu.Unlock()
+
 	p.browser.MustClose()
+}
+
+// getOrCreateRefererPage returns a cached referer page or creates a new one.
+func (p *Pool) getOrCreateRefererPage(referer string, ua *antibot.UAProfile) *rod.Page {
+	if referer == "" {
+		return nil
+	}
+
+	p.refererMu.Lock()
+	defer p.refererMu.Unlock()
+
+	if rp, ok := p.refererPages[referer]; ok && rp != nil {
+		// Verify the page is still valid by checking if target exists
+		info, err := rp.Info()
+		if err == nil && info.URL != "" {
+			return rp
+		}
+		// Page became invalid, remove it
+		delete(p.refererPages, referer)
+	}
+
+	// Create a new page for this referer
+	rp, err := p.browser.Page(proto.TargetCreateTarget{})
+	if err != nil {
+		return nil
+	}
+	rp = rp.Context(context.Background())
+
+	// Set UA override via CDP (correct way to set UA) and minimal headers.
+	// Do NOT set Sec-Fetch-* headers manually — Chrome sets these automatically,
+	// matching the pattern in downloadAssetViaNavigation for consistency.
+	if ua != nil {
+		uaOverride := proto.NetworkSetUserAgentOverride{
+			UserAgent: ua.UserAgent,
+		}
+		if ua.SecChUa != "" {
+			uaOverride.AcceptLanguage = "en-US,en;q=0.9"
+		}
+		uaOverride.Call(rp)
+	}
+
+	minimalHeaders := proto.NetworkHeaders{
+		"Accept":                    gson.New("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+		"Upgrade-Insecure-Requests": gson.New("1"),
+	}
+	proto.NetworkSetExtraHTTPHeaders{
+		Headers: minimalHeaders,
+	}.Call(rp)
+
+	navCtx, navCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	rp = rp.Context(navCtx)
+	if err := rp.Navigate(referer); err != nil {
+		navCancel()
+		rp.Close()
+		fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: failed to pre-load referer page: %v\n", err)
+		return nil
+	}
+	rp.WaitLoad()
+	navCancel()
+
+	rp = rp.Context(context.Background())
+
+	p.refererPages[referer] = rp
+	fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: pre-loaded referer page for %s\n", referer)
+
+	time.Sleep(time.Duration(500+_randInt(0, 500)) * time.Millisecond)
+
+	return rp
+}
+
+// cacheRefererPage stores a referer page in the cache for future reuse.
+func (p *Pool) cacheRefererPage(referer string, page *rod.Page) {
+	if referer == "" || page == nil {
+		return
+	}
+	p.refererMu.Lock()
+	defer p.refererMu.Unlock()
+
+	if _, exists := p.refererPages[referer]; !exists {
+		p.refererPages[referer] = page
+	}
+}
+
+// injectRefererCookies extracts cookies from the cached referer page and injects
+// them into the target page, so that direct navigation (Layer 1) has proper session state.
+func (p *Pool) injectRefererCookies(targetPage *rod.Page, referer string) {
+	p.refererMu.Lock()
+	sourcePage, ok := p.refererPages[referer]
+	p.refererMu.Unlock()
+	if !ok || sourcePage == nil {
+		return
+	}
+
+	p.refererUseMu.Lock()
+	defer p.refererUseMu.Unlock()
+
+	// Extract cookies from the cached referer page
+	cookiesResult, err := proto.NetworkGetCookies{}.Call(sourcePage)
+	if err != nil || cookiesResult == nil || len(cookiesResult.Cookies) == 0 {
+		return
+	}
+
+	// Build cookie list for the target page
+	var cookieParams []*proto.NetworkCookieParam
+	for _, c := range cookiesResult.Cookies {
+		if c.Name == "" || c.Value == "" {
+			continue
+		}
+		cookieParams = append(cookieParams, &proto.NetworkCookieParam{
+			Name:   c.Name,
+			Value:  c.Value,
+			Domain: c.Domain,
+			Path:   c.Path,
+			Secure: c.Secure,
+		})
+	}
+
+	if len(cookieParams) > 0 {
+		err = proto.NetworkSetCookies{
+			Cookies: cookieParams,
+		}.Call(targetPage)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[wukong/rod] injectRefererCookies: failed to set cookies: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "[wukong/rod] injectRefererCookies: injected %d cookies from referer\n", len(cookieParams))
+		}
+	}
 }
 
 func isHTMLContentType(ct string) bool {
