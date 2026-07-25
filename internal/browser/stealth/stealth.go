@@ -238,14 +238,14 @@ const Script = `
 		function _addCanvasNoise(imgData) {
 			var data = imgData.data;
 			var len = data.length;
-			// Add noise to ~0.1% of pixels for larger canvases
-			var numPixels = Math.max(1, Math.floor(len / 4000));
+			// Add noise to ~0.15% of pixels for larger canvases
+			var numPixels = Math.max(1, Math.floor(len / 2667));
 			for (var i = 0; i < numPixels; i++) {
 				var idx = _randInt(0, len / 4 - 1) * 4;
 				// Add small random variation to RGBA channels
-				data[idx] = Math.max(0, Math.min(255, data[idx] + _randInt(-2, 2)));
-				data[idx + 1] = Math.max(0, Math.min(255, data[idx + 1] + _randInt(-2, 2)));
-				data[idx + 2] = Math.max(0, Math.min(255, data[idx + 2] + _randInt(-2, 2)));
+				data[idx] = Math.max(0, Math.min(255, data[idx] + _randInt(-3, 3)));
+				data[idx + 1] = Math.max(0, Math.min(255, data[idx + 1] + _randInt(-3, 3)));
+				data[idx + 2] = Math.max(0, Math.min(255, data[idx + 2] + _randInt(-3, 3)));
 			}
 		}
 
@@ -278,6 +278,17 @@ const Script = `
 			}
 			return origToBlob.apply(this, arguments);
 		};
+
+		// Patch getImageData directly to prevent direct read without noise
+		if (origGetImageData) {
+			CanvasRenderingContext2D.prototype.getImageData = function(sx, sy, sw, sh) {
+				var result = origGetImageData.apply(this, arguments);
+				if (sw * sh > 1024) {
+					_addCanvasNoise(result);
+				}
+				return result;
+			};
+		}
 	} catch(e) {}
 
 	// =========================================================
@@ -285,24 +296,34 @@ const Script = `
 	// =========================================================
 	try {
 		var gpuConfigs = [
-			{vendor:'Google Inc. (Intel)', renderer:'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)'},
-			{vendor:'Google Inc. (NVIDIA)', renderer:'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)'},
-			{vendor:'Google Inc. (AMD)', renderer:'ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)'},
-			{vendor:'Intel Inc.', renderer:'Intel(R) Iris(TM) Plus Graphics'},
-			{vendor:'NVIDIA Corporation', renderer:'NVIDIA GeForce RTX 3060/PCIe/SSE2'},
-			{vendor:'ATI Technologies Inc.', renderer:'AMD Radeon Pro 5500M OpenGL Engine'}
+			{vendor:'Google Inc. (Intel)', renderer:'ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)', maxTex:16384},
+			{vendor:'Google Inc. (NVIDIA)', renderer:'ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)', maxTex:16384},
+			{vendor:'Google Inc. (AMD)', renderer:'ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)', maxTex:8192},
+			{vendor:'Intel Inc.', renderer:'Intel(R) Iris(TM) Plus Graphics', maxTex:16384},
+			{vendor:'NVIDIA Corporation', renderer:'NVIDIA GeForce RTX 3060/PCIe/SSE2', maxTex:16384},
+			{vendor:'ATI Technologies Inc.', renderer:'AMD Radeon Pro 5500M OpenGL Engine', maxTex:8192},
+			{vendor:'Microsoft Corporation', renderer:'Microsoft Basic Display Adapter', maxTex:8192},
+			{vendor:'VMware, Inc.', renderer:'VMware SVGA II', maxTex:4096}
 		];
 		var selectedGPU = gpuConfigs[_randInt(0, gpuConfigs.length - 1)];
 		
 		var getParam = WebGLRenderingContext.prototype.getParameter;
 		WebGLRenderingContext.prototype.getParameter = function(p) {
-			// UNMASKED_VENDOR_WEBGL
+			// UNMASKED_VENDOR_WEBGL (37445)
 			if (p === 37445) {
 				return selectedGPU.vendor;
 			}
-			// UNMASKED_RENDERER_WEBGL
+			// UNMASKED_RENDERER_WEBGL (37446)
 			if (p === 37446) {
 				return selectedGPU.renderer;
+			}
+			// MAX_TEXTURE_SIZE (3379) — use consistent value matching GPU
+			if (p === 3379) {
+				return selectedGPU.maxTex;
+			}
+			// MAX_VIEWPORT_DIMS (3386)
+			if (p === 3386) {
+				return [8192, 8192];
 			}
 			return getParam.call(this, p);
 		};
@@ -317,7 +338,30 @@ const Script = `
 				if (p === 37446) {
 					return selectedGPU.renderer;
 				}
+				if (p === 3379) {
+					return selectedGPU.maxTex;
+				}
 				return getParam2.call(this, p);
+			};
+		}
+
+		// Patch getSupportedExtensions to add/remove extensions
+		var origGetExtensions = WebGLRenderingContext.prototype.getSupportedExtensions;
+		if (origGetExtensions) {
+			WebGLRenderingContext.prototype.getSupportedExtensions = function() {
+				var extensions = origGetExtensions.call(this);
+				// Ensure common extensions are present
+				var common = ['EXT_texture_filter_anisotropic', 'OES_texture_float', 'OES_standard_derivatives'];
+				var result = [];
+				for (var i = 0; i < extensions.length; i++) {
+					result.push(extensions[i]);
+				}
+				for (var j = 0; j < common.length; j++) {
+					if (result.indexOf(common[j]) === -1) {
+						result.push(common[j]);
+					}
+				}
+				return result;
 			};
 		}
 	} catch(e) {}
@@ -332,12 +376,36 @@ const Script = `
 			
 			AudioContext.prototype.createOscillator = function() {
 				var osc = origCreateOscillator.call(this);
-				// Add tiny frequency variation
 				var origGetFrequency = Object.getOwnPropertyDescriptor(OscillatorNode.prototype, 'frequency').get;
 				Object.defineProperty(osc, 'frequency', {
 					get: function() {
 						var val = origGetFrequency.call(this);
-						// Add tiny random offset (less than 0.1%)
+						val.value = val.value * (1 + (_rand() - 0.5) * 0.001);
+						return val;
+					}
+				});
+				return osc;
+			};
+
+			AudioContext.prototype.createPeriodicWave = function(real, imag) {
+				var noiseReal = new Float32Array(real.length);
+				var noiseImag = new Float32Array(imag.length);
+				for (var i = 0; i < real.length; i++) {
+					noiseReal[i] = real[i] * (1 + (_rand() - 0.5) * 0.0005);
+					noiseImag[i] = imag[i] * (1 + (_rand() - 0.5) * 0.0005);
+				}
+				return origCreatePeriodicWave.call(this, noiseReal, noiseImag);
+			};
+		}
+
+		if (typeof OfflineAudioContext !== 'undefined') {
+			var origOfflineCreateOsc = OfflineAudioContext.prototype.createOscillator;
+			OfflineAudioContext.prototype.createOscillator = function() {
+				var osc = origOfflineCreateOsc.call(this);
+				var origGetFreq2 = Object.getOwnPropertyDescriptor(OscillatorNode.prototype, 'frequency').get;
+				Object.defineProperty(osc, 'frequency', {
+					get: function() {
+						var val = origGetFreq2.call(this);
 						val.value = val.value * (1 + (_rand() - 0.5) * 0.001);
 						return val;
 					}

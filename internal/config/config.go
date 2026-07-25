@@ -227,6 +227,10 @@ type WukongConfig struct {
 	// as an MCP Server for ACP agents.
 	ACPMCP ACPMCPConfig `mapstructure:"acp_mcp"`
 
+	// MCPServer configures the standalone MCP server that exposes
+	// Wukong extensions via the MCP JSON-RPC 2.0 protocol.
+	MCPServer MCPServerConfig `mapstructure:"mcp_server"`
+
 	// Telemetry configures OpenTelemetry observability.
 	Telemetry TelemetryConfig `mapstructure:"telemetry"`
 

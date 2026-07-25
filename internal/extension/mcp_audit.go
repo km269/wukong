@@ -97,12 +97,15 @@ type MCPHealthChecker struct {
 	totalCalls int64
 	errorCalls int64
 	auditor    *ToolAuditLogger
+	recent     []ToolAuditEntry
+	maxRecent  int
 }
 
 func NewMCPHealthChecker(auditor *ToolAuditLogger) *MCPHealthChecker {
 	return &MCPHealthChecker{
 		startTime: time.Now(),
 		auditor:   auditor,
+		maxRecent: 10,
 	}
 }
 
@@ -115,11 +118,28 @@ func (h *MCPHealthChecker) RecordCall(isError bool) {
 	}
 }
 
+// RecordEntry appends an audit entry to the health checker's
+// bounded ring buffer so that the /health endpoint can surface
+// the most recent invocations even before the audit logger is
+// flushed or queried separately.
+func (h *MCPHealthChecker) RecordEntry(entry ToolAuditEntry) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.recent) >= h.maxRecent {
+		h.recent = h.recent[1:]
+	}
+	h.recent = append(h.recent, entry)
+}
+
 func (h *MCPHealthChecker) Status(running bool, toolCount int) MCPHealthStatus {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	recent := h.auditor.Recent(10)
+	recent := make([]ToolAuditEntry, len(h.recent))
+	copy(recent, h.recent)
+	if len(recent) == 0 && h.auditor != nil {
+		recent = h.auditor.Recent(h.maxRecent)
+	}
 	return MCPHealthStatus{
 		Running:     running,
 		ToolCount:   toolCount,

@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/km269/wukong/internal/config"
@@ -28,7 +29,7 @@ type Guard struct {
 
 	// Runtime state
 	approvedCommands map[string]bool
-	blockedCount     int
+	blockedCount     atomic.Int64
 
 	// IgnoreMatcher provides file-access blacklisting via
 	// .wukongignore (gitignore-compatible syntax).
@@ -39,10 +40,10 @@ type Guard struct {
 func NewGuard(cfg *config.SecurityConfig) *Guard {
 	if cfg == nil {
 		cfg = &config.SecurityConfig{
-			DefaultTimeout:        30 * time.Second,
-			MaxTimeout:            300 * time.Second,
+			DefaultTimeout:         30 * time.Second,
+			MaxTimeout:             300 * time.Second,
 			BlockDangerousCommands: true,
-			PermissionMode:        config.PermissionSmart,
+			PermissionMode:         config.PermissionSmart,
 		}
 	}
 	if cfg.PermissionMode == "" {
@@ -164,29 +165,26 @@ func (g *Guard) isHighRiskOperation(toolName string, argsJSON []byte) bool {
 	// High-risk tool categories (case-insensitive).
 	toolLower := strings.ToLower(toolName)
 	highRiskTools := map[string]bool{
-		"bash":               true,
-		"execute_command":    true,
-		"run_command":        true,
-		"shell":              true,
-		"terminal":           true,
-		"command":            true,
-		"developer_command_execute": true,
-		"developer_file_write":     true,
-		"developer_file_replace":   true,
-		"file_delete":              true,
+		"bash":                                   true,
+		"execute_command":                        true,
+		"run_command":                            true,
+		"shell":                                  true,
+		"terminal":                               true,
+		"command":                                true,
+		"developer_command_execute":              true,
+		"developer_file_write":                   true,
+		"developer_file_replace":                 true,
+		"file_write":                             true,
+		"file_delete":                            true,
 		"computer_controller_browser_navigate":   true,
 		"computer_controller_browser_screenshot": true,
 		"computer_controller_browser_click":      true,
 		"computer_controller_browser_fill":       true,
 		"computer_controller_web_fetch":          true,
-		"apps_create":        true,
-		"apps_deploy":        true,
-		// code_execute runs arbitrary JS in a sandboxed goja VM.
-		// While goja provides strong isolation, the tool exposes
-		// all other tool metadata via __tools and could be used
-		// for tool enumeration or ReDoS attacks.
-		"code_execute":        true,
-		"code_discover_tools": true,
+		"apps_create":                            true,
+		"apps_deploy":                            true,
+		"code_execute":                           true,
+		"code_discover_tools":                    true,
 	}
 
 	if highRiskTools[toolLower] {
@@ -250,10 +248,10 @@ func (g *Guard) ValidateCommand(command string) error {
 }
 
 // incrementBlockedCount atomically increments the blocked command counter.
+// Uses atomic to avoid RWMutex re-entrancy deadlock when called from
+// methods that already hold g.mu.RLock (e.g. ScanExtension).
 func (g *Guard) incrementBlockedCount() {
-	g.mu.Lock()
-	g.blockedCount++
-	g.mu.Unlock()
+	g.blockedCount.Add(1)
 }
 
 // GetTimeout returns the appropriate timeout for a tool execution.
@@ -384,9 +382,7 @@ func (g *Guard) IsApproved(command string) bool {
 
 // GetBlockedCount returns the number of blocked commands.
 func (g *Guard) GetBlockedCount() int {
-	g.mu.RLock()
-	defer g.mu.RUnlock()
-	return g.blockedCount
+	return int(g.blockedCount.Load())
 }
 
 // CheckFilePath validates a file path against the .wukongignore

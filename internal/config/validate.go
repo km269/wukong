@@ -316,6 +316,15 @@ func (c *WukongConfig) Validate() error {
 		}
 	}
 
+	// Validate MCP server config (only when enabled).
+	if c.MCPServer.Enabled {
+		if c.MCPServer.Address == "" {
+			return fmt.Errorf(
+				"mcp_server.address is required when mcp_server.enabled is true",
+			)
+		}
+	}
+
 	return nil
 }
 

@@ -114,6 +114,14 @@ func runShutdown(
 		}
 		fmt.Println("  ACP MCP bridge stopped")
 	}
+	if state.MCPServer != nil {
+		if err := state.MCPServer.Shutdown(ctx); err != nil {
+			util.Logger.Warn("MCP server stop error",
+				slog.String("error", err.Error()))
+			errs = append(errs, err)
+		}
+		fmt.Println("  MCP server stopped")
+	}
 	if state.ARDRegistry != nil {
 		if err := state.ARDRegistry.Shutdown(ctx); err != nil {
 			util.Logger.Warn("ARD registry stop error",

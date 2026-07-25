@@ -48,21 +48,32 @@ func TestScriptContainsKeySpoofs(t *testing.T) {
 		"screen, 'colorDepth'",
 
 		// Canvas fingerprinting.
+		"_addCanvasNoise",
 		"HTMLCanvasElement.prototype.toDataURL",
-		"getImageData",
+		"HTMLCanvasElement.prototype.toBlob",
+		"CanvasRenderingContext2D.prototype.getImageData",
 		"putImageData",
 
 		// WebGL spoofing.
 		"WebGLRenderingContext.prototype.getParameter",
+		"WebGL2RenderingContext.prototype.getParameter",
 		"UNMASKED_VENDOR_WEBGL",
-		"Intel",
+		"MAX_TEXTURE_SIZE",
+		"Microsoft Corporation",
+		"getSupportedExtensions",
+		"EXT_texture_filter_anisotropic",
+
+		// AudioContext fingerprinting.
+		"AudioContext.prototype.createOscillator",
+		"AudioContext.prototype.createPeriodicWave",
+		"OfflineAudioContext",
 
 		// IntersectionObserver protection.
 		"IntersectionObserver.prototype.observe",
 
 		// Battery API spoofing.
 		"navigator.getBattery",
-		"0.76",
+		"batteryLevel",
 	}
 
 	for _, check := range checks {

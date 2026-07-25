@@ -228,6 +228,7 @@ type BootstrapState struct {
 	AGUIServer    *server.AGUIServer
 	ACPServer     *server.ACPServer
 	ACPMCPBridge  *extension.ACPMCPBridge
+	MCPServer     *extension.MCPServer
 	ARDRegistry   *ard.RegistryServer
 	ANPServer     *http.Server
 	ANPMeta       *summon.MetaProtocol
@@ -445,6 +446,7 @@ func bootstrapSession(
 
 	// Initialize ACP MCP Bridge — exposes Wukong extensions as
 	// an MCP Server for ACP agents to discover and call tools.
+	var acpMCPBridge *extension.ACPMCPBridge
 	acpMCPBridge, acpMCPErr := extension.NewACPMCPBridge(
 		extMgr, &wukongCfg.ACPMCP,
 	)
@@ -455,9 +457,30 @@ func bootstrapSession(
 		if err := acpMCPBridge.Start(); err != nil {
 			util.Logger.Warn("acp mcp bridge start failed",
 				"error", err.Error())
+			acpMCPBridge = nil
 		} else {
 			// Set MCP address on factory for ACP providers.
 			factory.SetACPMCPAddr(acpMCPBridge.ACPMCPAddr())
+		}
+	}
+
+	// Initialize standalone MCP Server — exposes Wukong extensions
+	// as a standards-compliant MCP JSON-RPC 2.0 endpoint for external
+	// MCP clients (e.g. Claude Desktop, Cursor, etc.).
+	var mcpServer *extension.MCPServer
+	if wukongCfg.MCPServer.Enabled {
+		addr := wukongCfg.MCPServer.Address
+		if addr == "" {
+			addr = ":9091"
+		}
+		mcpServer = extension.NewMCPServer(extMgr, addr)
+		if err := mcpServer.Start(); err != nil {
+			util.Logger.Warn("mcp server start failed",
+				"error", err.Error())
+			mcpServer = nil
+		} else {
+			util.Logger.Info("mcp server started",
+				slog.String("address", addr))
 		}
 	}
 
@@ -1026,6 +1049,8 @@ func bootstrapSession(
 		KnowledgeMgr: knowledgeMgr,
 		ProjectMgr:   projectMgr,
 		ARDRegistry:  ardRegistryServer,
+		ACPMCPBridge: acpMCPBridge,
+		MCPServer:    mcpServer,
 		// Wire a real DB ping so the health DBChecker is no longer a
 		// no-op. dbPool is the shared SQLite pool created above.
 		DBPing: func(ctx context.Context) error {

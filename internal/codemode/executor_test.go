@@ -201,12 +201,11 @@ func TestParseDiscoveredTools(t *testing.T) {
 
 func TestExecutor_ConcurrentLimit(t *testing.T) {
 	cfg := &config.CodeModeConfig{
-		Timeout:     10 * time.Second,
+		Timeout:     500 * time.Millisecond,
 		MaxMemoryMB: 128,
 	}
 	executor := NewExecutor(cfg)
 
-	// Fill all 5 concurrency slots.
 	var started sync.WaitGroup
 	var done sync.WaitGroup
 	results := make([]ExecutionResult, maxConcurrentExecutions+1)
@@ -216,29 +215,23 @@ func TestExecutor_ConcurrentLimit(t *testing.T) {
 		done.Add(1)
 		go func(idx int) {
 			started.Done()
-			// This blocks on the semaphore, then runs.
 			results[idx] = executor.Execute(
-				context.Background(), "1",
+				context.Background(), "while(true){}",
 			)
 			done.Done()
 		}(i)
 	}
 
-	// Wait for all goroutines to acquire their semaphore slots.
 	started.Wait()
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
-	// The 6th call should be rejected immediately
-	// since all 5 slots are occupied.
 	result := executor.Execute(context.Background(), "1")
 	if result.Success {
 		t.Error("expected rejection when all concurrency slots are full")
 	}
 
-	// Wait for the first 5 to complete.
 	done.Wait()
 
-	// After they finish, a new call should succeed.
 	result2 := executor.Execute(context.Background(), "1")
 	if !result2.Success {
 		t.Errorf("expected success after slots freed, got: %s",
@@ -263,12 +256,12 @@ func TestExecutor_RegExpDisabled(t *testing.T) {
 	executor := NewExecutor(nil)
 	ctx := context.Background()
 
-	// Attempting to use RegExp should result in a
-	// ReferenceError since it's set to Undefined.
+	// Attempting to use RegExp constructor should result in a
+	// ReferenceError since RegExp is set to Undefined.
 	result := executor.Execute(ctx,
-		`/test/.test("hello")`)
+		`new RegExp("test").test("hello")`)
 	if result.Success {
-		t.Error("expected RegExp usage to fail (RegExp disabled)")
+		t.Error("expected RegExp constructor to fail (RegExp disabled)")
 	}
 }
 

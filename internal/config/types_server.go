@@ -50,6 +50,13 @@ type ACPMCPConfig struct {
 	Path    string `mapstructure:"path"`
 }
 
+// MCPServerConfig configures the standalone MCP server that exposes
+// Wukong extensions as a standards-compliant MCP server (JSON-RPC 2.0).
+type MCPServerConfig struct {
+	Enabled bool   `mapstructure:"enabled"`
+	Address string `mapstructure:"address"`
+}
+
 // GatewayConfig embeds the gateway package's GatewayConfig.
 // The concrete type lives in internal/gateway/config.go.
 type GatewayConfig = gateway.GatewayConfig
