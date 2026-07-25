@@ -35,6 +35,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -51,21 +52,19 @@ type ACPServer struct {
 	runner  runner.Runner
 	agent   agent.Agent
 	path    string
+	secCfg  ServerSecurityConfig
 	mu      sync.RWMutex
 	running bool
-	server  *http.Server // set after Start, used for graceful Shutdown
+	server  *http.Server
 }
 
 // ACPServerConfig configures the ACP server.
 type ACPServerConfig struct {
-	// Runner is the agent runner for processing messages.
-	Runner runner.Runner
-	// Agent is the agent instance for tool discovery.
-	Agent agent.Agent
-	// Path is the HTTP path prefix for ACP endpoints.
-	Path string
-	// EnableStreaming enables SSE streaming responses.
+	Runner          runner.Runner
+	Agent           agent.Agent
+	Path            string
 	EnableStreaming bool
+	Security        ServerSecurityConfig
 }
 
 // NewACPServer creates an ACP protocol server.
@@ -82,6 +81,7 @@ func NewACPServer(cfg *ACPServerConfig) (*ACPServer, error) {
 		runner: cfg.Runner,
 		agent:  cfg.Agent,
 		path:   path,
+		secCfg: cfg.Security,
 	}, nil
 }
 
@@ -110,22 +110,39 @@ func (s *ACPServer) Handler() http.Handler {
 	return mux
 }
 
-// Start begins listening on the given address. Uses *http.Server
-// internally so that Stop() can perform graceful shutdown.
+// Start begins listening on the given address with optional TLS,
+// authentication, and rate limiting from the security config.
 func (s *ACPServer) Start(addr string) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	handler := s.Handler()
+	securedHandler, tlsCfg := ApplySecurity(handler, s.secCfg)
+
 	s.server = &http.Server{
-		Addr:    addr,
-		Handler: s.Handler(),
+		Addr:         addr,
+		Handler:      securedHandler,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
+
+	if tlsCfg != nil {
+		s.server.TLSConfig = tlsCfg
+	}
+
 	s.running = true
-	s.mu.Unlock()
 
 	slog.Info("ACP server starting",
 		"address", addr,
 		"path", s.path,
+		"tls", tlsCfg != nil,
+		"auth", s.secCfg.Auth.Type,
 	)
 
+	if tlsCfg != nil {
+		return s.server.ListenAndServeTLS("", "")
+	}
 	return s.server.ListenAndServe()
 }
 
@@ -172,14 +189,14 @@ type ACPToolsListResponse struct {
 
 // ACPToolCallRequest is the request body for tools/call.
 type ACPToolCallRequest struct {
-	Name      string                 `json:"name"`
+	Name      string         `json:"name"`
 	Arguments map[string]any `json:"arguments"`
 }
 
 // ACPSSEEvent represents a single SSE event.
 type ACPSSEEvent struct {
-	EventType string      `json:"event"`
-	Data      any `json:"data"`
+	EventType string `json:"event"`
+	Data      any    `json:"data"`
 }
 
 // ==========================================================================

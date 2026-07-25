@@ -198,6 +198,18 @@ func (p *SmartProxyPool) GetHealthyCount() int {
 	return count
 }
 
+func (p *SmartProxyPool) RotatedIndex() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.currentIndex
+}
+
+func (p *SmartProxyPool) Count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.proxies)
+}
+
 func (p *SmartProxyPool) Close() {
 	if p.healthCheckTicker != nil {
 		p.healthCheckTicker.Stop()

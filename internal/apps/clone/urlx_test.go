@@ -1,7 +1,9 @@
 package clone
 
 import (
+	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -737,6 +739,210 @@ func TestPagination_FallbackToHash(t *testing.T) {
 			}
 			if !strings.HasSuffix(got, ".html") {
 				t.Errorf("LocalPath(%q) = %q, want .html suffix", tt.url, got)
+			}
+		})
+	}
+}
+
+func TestPagination_MultipleStyles(t *testing.T) {
+	seedHost := "www.dla.mil"
+
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{
+			name: "path-based page/2 (dla.mil style)",
+			url:  "https://www.dla.mil/biographies-list/page/2/",
+			want: "biographies-list/page/2/index.html",
+		},
+		{
+			name: "path-based page/3 (dla.mil style)",
+			url:  "https://www.dla.mil/biographies-list/page/3/",
+			want: "biographies-list/page/3/index.html",
+		},
+		{
+			name: "path-based page/10 (gap filling target)",
+			url:  "https://www.dla.mil/biographies-list/page/10/",
+			want: "biographies-list/page/10/index.html",
+		},
+		{
+			name: "query-param page=2",
+			url:  "https://www.dla.mil/list/?page=2",
+			want: "list/index_page_2.html",
+		},
+		{
+			name: "query-param Page=5",
+			url:  "https://www.dla.mil/list/?Page=5",
+			want: "list/index_page_5.html",
+		},
+		{
+			name: "offset pagination offset=50&limit=25",
+			url:  "https://www.dla.mil/list/?offset=50&limit=25",
+			want: "list/index_offset_50_25.html",
+		},
+		{
+			name: "offset pagination offset=100&limit=25",
+			url:  "https://www.dla.mil/list/?offset=100&limit=25",
+			want: "list/index_offset_100_25.html",
+		},
+		{
+			name: "cursor-based pagination",
+			url:  "https://www.dla.mil/list/?cursor=eyJpZCI6IjEyMzQ1In0",
+			want: "list/index_cursor_0d1db6.html",
+		},
+		{
+			name: "seek-based pagination",
+			url:  "https://www.dla.mil/list/?seek=2024-01-15T10:30:00Z",
+			want: "list/index__q-007570.html",
+		},
+		{
+			name: "token-based pagination",
+			url:  "https://www.dla.mil/list/?page_token=abc123",
+			want: "list/index_page_token_6ca13d.html",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := LocalPath(seedHost, tt.url, KindPage)
+			got = strings.ReplaceAll(got, "\\", "/")
+			if got != tt.want {
+				t.Errorf("LocalPath(%q) = %q, want %q", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPagination_PathRegexMatching(t *testing.T) {
+	pageRe := regexp.MustCompile(`^(.+)/page/(\d+)/?$`)
+
+	tests := []struct {
+		name     string
+		path     string
+		wantOK   bool
+		wantBase string
+		wantPage int
+	}{
+		{
+			name:     "dla.mil biographies page 2",
+			path:     "/biographies-list/page/2/",
+			wantOK:   true,
+			wantBase: "/biographies-list",
+			wantPage: 2,
+		},
+		{
+			name:     "dla.mil biographies page 3",
+			path:     "/biographies-list/page/3/",
+			wantOK:   true,
+			wantBase: "/biographies-list",
+			wantPage: 3,
+		},
+		{
+			name:     "dla.mil articles page 10",
+			path:     "/articles-list/page/10/",
+			wantOK:   true,
+			wantBase: "/articles-list",
+			wantPage: 10,
+		},
+		{
+			name:     "no trailing slash",
+			path:     "/list/page/5",
+			wantOK:   true,
+			wantBase: "/list",
+			wantPage: 5,
+		},
+		{
+			name:     "deeper path",
+			path:     "/category/news/page/7/",
+			wantOK:   true,
+			wantBase: "/category/news",
+			wantPage: 7,
+		},
+		{
+			name:   "not a pagination URL",
+			path:   "/about/",
+			wantOK: false,
+		},
+		{
+			name:   "page without number",
+			path:   "/list/page/latest/",
+			wantOK: false,
+		},
+		{
+			name:   "page number in middle",
+			path:   "/page/2/list/",
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := pageRe.FindStringSubmatch(tt.path)
+			if tt.wantOK {
+				if m == nil {
+					t.Errorf("regex did not match %q, expected match with base=%q page=%d", tt.path, tt.wantBase, tt.wantPage)
+					return
+				}
+				if m[1] != tt.wantBase {
+					t.Errorf("base path = %q, want %q", m[1], tt.wantBase)
+				}
+				var pageNum int
+				fmt.Sscanf(m[2], "%d", &pageNum)
+				if pageNum != tt.wantPage {
+					t.Errorf("page number = %d, want %d", pageNum, tt.wantPage)
+				}
+			} else {
+				if m != nil {
+					t.Errorf("regex matched %q unexpectedly, got %v", tt.path, m)
+				}
+			}
+		})
+	}
+}
+
+func TestPagination_RegexReplaceSafety(t *testing.T) {
+	pageRe := regexp.MustCompile(`^(.+)/page/(\d+)/?$`)
+
+	tests := []struct {
+		name     string
+		path     string
+		newPage  int
+		expected string
+	}{
+		{
+			name:     "normal replacement page 2 to 5",
+			path:     "/biographies-list/page/2/",
+			newPage:  5,
+			expected: "/biographies-list/page/5/",
+		},
+		{
+			name:     "no trailing slash",
+			path:     "/list/page/3",
+			newPage:  8,
+			expected: "/list/page/8",
+		},
+		{
+			name:     "dollar sign in path",
+			path:     "/path/with$/page/1/",
+			newPage:  3,
+			expected: "/path/with$/page/3/",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := pageRe.FindStringSubmatch(tt.path)
+			if m == nil {
+				t.Fatalf("regex did not match %q", tt.path)
+			}
+			newPath := fmt.Sprintf("%s/page/%d", m[1], tt.newPage)
+			if strings.HasSuffix(tt.path, "/") {
+				newPath += "/"
+			}
+			if newPath != tt.expected {
+				t.Errorf("got %q, want %q", newPath, tt.expected)
 			}
 		})
 	}

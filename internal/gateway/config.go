@@ -46,6 +46,15 @@ type GatewayConfig struct {
 
 	// Feishu contains the Feishu/Lark channel configuration.
 	Feishu FeishuChannelConfig `mapstructure:"feishu"`
+
+	// Slack contains the Slack channel configuration.
+	Slack SlackChannelConfig `mapstructure:"slack"`
+
+	// Discord contains the Discord channel configuration.
+	Discord DiscordChannelConfig `mapstructure:"discord"`
+
+	// WebChat contains the web-based chat channel configuration.
+	WebChat WebChatChannelConfig `mapstructure:"web_chat"`
 }
 
 // FeishuChannelConfig defines settings for the Feishu/Lark channel,
@@ -102,6 +111,36 @@ type FeishuChannelConfig struct {
 	EnableFileReceive bool `mapstructure:"enable_file_receive"`
 }
 
+// SlackChannelConfig defines settings for the Slack channel.
+type SlackChannelConfig struct {
+	Enabled           bool   `mapstructure:"enabled"`
+	AppToken          string `mapstructure:"app_token"`
+	BotToken          string `mapstructure:"bot_token"`
+	VerificationToken string `mapstructure:"verification_token"`
+	SigningSecret     string `mapstructure:"signing_secret"`
+	APIBase           string `mapstructure:"api_base"`
+}
+
+// DiscordChannelConfig defines settings for the Discord channel.
+type DiscordChannelConfig struct {
+	Enabled   bool   `mapstructure:"enabled"`
+	BotToken  string `mapstructure:"bot_token"`
+	ServerID  string `mapstructure:"server_id"`
+	ChannelID string `mapstructure:"channel_id"`
+	APIBase   string `mapstructure:"api_base"`
+}
+
+// WebChatChannelConfig defines settings for the web-based chat channel.
+type WebChatChannelConfig struct {
+	Enabled        bool          `mapstructure:"enabled"`
+	Address        string        `mapstructure:"address"`
+	Path           string        `mapstructure:"path"`
+	MaxSessions    int           `mapstructure:"max_sessions"`
+	SessionTimeout time.Duration `mapstructure:"session_timeout"`
+	CertFile       string        `mapstructure:"cert_file"`
+	KeyFile        string        `mapstructure:"key_file"`
+}
+
 // SetDefaults registers the gateway's viper defaults. It is invoked
 // by the central config loader's setGatewayDefaults.
 func SetDefaults(v *viper.Viper) {
@@ -121,4 +160,21 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("gateway.feishu.stream_card_update_interval", "500ms")
 	v.SetDefault("gateway.feishu.max_message_length", 4096)
 	v.SetDefault("gateway.feishu.enable_file_receive", false)
+
+	// Slack channel
+	v.SetDefault("gateway.slack.enabled", false)
+	v.SetDefault("gateway.slack.api_base",
+		"https://slack.com/api")
+
+	// Discord channel
+	v.SetDefault("gateway.discord.enabled", false)
+	v.SetDefault("gateway.discord.api_base",
+		"https://discord.com/api/v10")
+
+	// Web Chat channel
+	v.SetDefault("gateway.web_chat.enabled", false)
+	v.SetDefault("gateway.web_chat.address", ":8080")
+	v.SetDefault("gateway.web_chat.path", "/chat")
+	v.SetDefault("gateway.web_chat.max_sessions", 100)
+	v.SetDefault("gateway.web_chat.session_timeout", "30m")
 }

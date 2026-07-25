@@ -2,14 +2,15 @@ package httpclient
 
 import (
 	"context"
-	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/km269/wukong/pkg/logutil"
 )
 
 type Client struct {
@@ -18,6 +19,8 @@ type Client struct {
 	userAgent string
 	metrics   *metrics
 	mu        sync.RWMutex
+	dnsCache  *DNSCache
+	limiter   *RateLimiter
 }
 
 type metrics struct {
@@ -60,6 +63,11 @@ type Options struct {
 	ProxyPool           []string
 	ProxyRotateEvery    int
 	ForceIPv4           bool
+	EnableDNSCache      bool
+	DNSCacheTTL         time.Duration
+	EnableRateLimit     bool
+	RateLimitPerSecond  float64
+	RateLimitBurst      int
 }
 
 func DefaultOptions() Options {
@@ -97,9 +105,78 @@ func New(opts Options) *Client {
 		opts.TLSHandshakeTimeout = DefaultOptions().TLSHandshakeTimeout
 	}
 
+	transport := &http.Transport{
+		ForceAttemptHTTP2:     true,
+		DisableKeepAlives:     false,
+		MaxIdleConns:          opts.MaxIdleConns,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       opts.IdleConnTimeout,
+		TLSHandshakeTimeout:   opts.TLSHandshakeTimeout,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
+	var dnsCache *DNSCache
+	if opts.EnableDNSCache {
+		dnsCache = NewDNSCache(opts.DNSCacheTTL)
+		transport.DialContext = dnsCache.DialContext(&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		})
+	} else {
+		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if opts.ForceIPv4 && network == "tcp" {
+				network = "tcp4"
+			}
+			return (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext(ctx, network, addr)
+		}
+	}
+
+	var limiter *RateLimiter
+	if opts.EnableRateLimit {
+		perSecond := opts.RateLimitPerSecond
+		if perSecond <= 0 {
+			perSecond = 10.0
+		}
+		burst := opts.RateLimitBurst
+		if burst <= 0 {
+			burst = 20
+		}
+		limiter = NewRateLimiter(perSecond, burst)
+	}
+
+	if opts.ProxyURL != "" {
+		proxyURL, err := url.Parse(opts.ProxyURL)
+		if err == nil {
+			transport.Proxy = http.ProxyURL(proxyURL)
+			logutil.Info("[httpclient] using proxy", "proxy", opts.ProxyURL)
+		} else {
+			logutil.Error("[httpclient] invalid proxy URL", "error", err)
+		}
+	} else if len(opts.ProxyPool) > 0 {
+		proxyURL, err := url.Parse(opts.ProxyPool[0])
+		if err == nil {
+			transport.Proxy = http.ProxyURL(proxyURL)
+			logutil.Info("[httpclient] using proxy pool", "proxy", opts.ProxyPool[0])
+		} else {
+			logutil.Error("[httpclient] invalid proxy pool URL", "error", err)
+		}
+	} else {
+		transport.Proxy = http.ProxyFromEnvironment
+	}
+
+	var httpTransport http.RoundTripper = transport
+	if limiter != nil {
+		httpTransport = limiter.RoundTripper(transport)
+	}
+
 	client := &Client{
 		opts:      opts,
 		userAgent: opts.UserAgent,
+		dnsCache:  dnsCache,
+		limiter:   limiter,
 		metrics: &metrics{
 			totalRequests:     0,
 			totalRetries:      0,
@@ -116,47 +193,9 @@ func New(opts Options) *Client {
 		},
 	}
 
-	transport := &http.Transport{
-		ForceAttemptHTTP2:   false,
-		DisableKeepAlives:   true,
-		TLSHandshakeTimeout: opts.TLSHandshakeTimeout,
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// When ForceIPv4 is enabled, use "tcp4" network type instead of "tcp"
-			// to avoid IPv6 connection issues (e.g. "access forbidden by access permissions"
-			// errors on Windows when IPv6 is restricted).
-			if opts.ForceIPv4 && network == "tcp" {
-				network = "tcp4"
-			}
-			return (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext(ctx, network, addr)
-		},
-	}
-
-	if opts.ProxyURL != "" {
-		proxyURL, err := url.Parse(opts.ProxyURL)
-		if err == nil {
-			transport.Proxy = http.ProxyURL(proxyURL)
-			fmt.Fprintf(os.Stderr, "[httpclient] using proxy: %s\n", opts.ProxyURL)
-		} else {
-			fmt.Fprintf(os.Stderr, "[httpclient] invalid proxy URL: %v\n", err)
-		}
-	} else if len(opts.ProxyPool) > 0 {
-		proxyURL, err := url.Parse(opts.ProxyPool[0])
-		if err == nil {
-			transport.Proxy = http.ProxyURL(proxyURL)
-			fmt.Fprintf(os.Stderr, "[httpclient] using proxy pool (first): %s\n", opts.ProxyPool[0])
-		} else {
-			fmt.Fprintf(os.Stderr, "[httpclient] invalid proxy pool URL: %v\n", err)
-		}
-	} else {
-		transport.Proxy = http.ProxyFromEnvironment
-	}
-
 	client.Client = &http.Client{
 		Timeout:   opts.Timeout,
-		Transport: transport,
+		Transport: httpTransport,
 	}
 
 	return client
@@ -231,15 +270,24 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		if err != nil {
 			lastErr = err
 			errorCategory := c.categorizeError(err)
-			fmt.Fprintf(os.Stderr, "[httpclient] [%s] request failed (attempt %d/%d) %s %s: %v\n",
-				errorCategory, attempt+1, c.opts.MaxRetries+1, req.Method, req.URL, err)
+			logutil.Error("[httpclient] request failed",
+				slog.String("category", string(errorCategory)),
+				slog.Int("attempt", attempt+1),
+				slog.Int("max_retries", c.opts.MaxRetries+1),
+				slog.String("method", req.Method),
+				slog.String("url", req.URL.String()),
+				slog.String("error", err.Error()),
+			)
 
 			if attempt < c.opts.MaxRetries && c.shouldRetry(err) {
 				c.mu.Lock()
 				c.metrics.totalRetries++
 				c.mu.Unlock()
 				delay := time.Duration(attempt+1) * c.opts.RetryDelay
-				fmt.Fprintf(os.Stderr, "[httpclient] retrying %s in %v...\n", req.URL, delay)
+				logutil.Debug("[httpclient] retrying",
+					slog.String("url", req.URL.String()),
+					slog.Duration("delay", delay),
+				)
 				time.Sleep(delay)
 				continue
 			}
@@ -264,8 +312,12 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 			c.metrics.serverErrors++
 			c.mu.Unlock()
 			delay := time.Duration(attempt+1) * c.opts.RetryDelay
-			fmt.Fprintf(os.Stderr, "[httpclient] server error %d (attempt %d/%d), retrying %s in %v...\n",
-				resp.StatusCode, attempt+1, c.opts.MaxRetries+1, req.URL, delay)
+			logutil.Warn("[httpclient] server error, retrying",
+				slog.Int("status", resp.StatusCode),
+				slog.Int("attempt", attempt+1),
+				slog.String("url", req.URL.String()),
+				slog.Duration("delay", delay),
+			)
 			time.Sleep(delay)
 			continue
 		}
@@ -274,7 +326,11 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 			c.mu.Lock()
 			c.metrics.clientErrors++
 			c.mu.Unlock()
-			fmt.Fprintf(os.Stderr, "[httpclient] client error %d: %s %s\n", resp.StatusCode, req.Method, req.URL)
+			logutil.Warn("[httpclient] client error",
+				slog.Int("status", resp.StatusCode),
+				slog.String("method", req.Method),
+				slog.String("url", req.URL.String()),
+			)
 		}
 
 		return resp, nil
@@ -415,29 +471,19 @@ func (c *Client) Metrics() map[string]interface{} {
 
 func (c *Client) PrintMetrics() {
 	m := c.Metrics()
-	fmt.Fprintf(os.Stderr, "[httpclient] Metrics:\n")
-	fmt.Fprintf(os.Stderr, "  Total Requests: %d\n", m["total_requests"])
-	fmt.Fprintf(os.Stderr, "  Total Retries: %d\n", m["total_retries"])
-	fmt.Fprintf(os.Stderr, "  Success Count: %d\n", m["success_count"])
-	fmt.Fprintf(os.Stderr, "  Failure Count: %d\n", m["failure_count"])
-	fmt.Fprintf(os.Stderr, "  Success Rate: %.2f%%\n", m["success_rate"])
-	fmt.Fprintf(os.Stderr, "  Avg Latency: %dms\n", m["avg_latency_ms"])
-	fmt.Fprintf(os.Stderr, "\n  Error Distribution:\n")
-	fmt.Fprintf(os.Stderr, "    Network Errors: %d\n", m["network_errors"])
-	fmt.Fprintf(os.Stderr, "    Timeout Errors: %d\n", m["timeout_errors"])
-	fmt.Fprintf(os.Stderr, "    TLS Errors: %d\n", m["tls_errors"])
-	fmt.Fprintf(os.Stderr, "    Server Errors: %d\n", m["server_errors"])
-	fmt.Fprintf(os.Stderr, "    Client Errors: %d\n", m["client_errors"])
-	if m["last_error"] != "" {
-		fmt.Fprintf(os.Stderr, "\n  Last Error: %s\n", m["last_error"])
-		fmt.Fprintf(os.Stderr, "  Last Error Time: %s\n", m["last_error_time"])
-	}
-	if urls, ok := m["request_count_by_url"].(map[string]int64); ok && len(urls) > 0 {
-		fmt.Fprintf(os.Stderr, "\n  Requests by URL:\n")
-		for url, count := range urls {
-			fmt.Fprintf(os.Stderr, "    %s: %d\n", url, count)
-		}
-	}
+	logutil.Info("[httpclient] metrics",
+		slog.Int64("total_requests", m["total_requests"].(int64)),
+		slog.Int64("total_retries", m["total_retries"].(int64)),
+		slog.Int64("success_count", m["success_count"].(int64)),
+		slog.Int64("failure_count", m["failure_count"].(int64)),
+		slog.Float64("success_rate", m["success_rate"].(float64)),
+		slog.Int64("avg_latency_ms", m["avg_latency_ms"].(int64)),
+		slog.Int64("network_errors", m["network_errors"].(int64)),
+		slog.Int64("timeout_errors", m["timeout_errors"].(int64)),
+		slog.Int64("tls_errors", m["tls_errors"].(int64)),
+		slog.Int64("server_errors", m["server_errors"].(int64)),
+		slog.Int64("client_errors", m["client_errors"].(int64)),
+	)
 }
 
 func max(a, b int64) int64 {

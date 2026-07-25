@@ -23,6 +23,7 @@ import (
 	"github.com/km269/wukong/internal/browser/types"
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/pkg/httpclient"
+	"github.com/km269/wukong/pkg/logutil"
 )
 
 // Controller provides web content tools with dual backend support.
@@ -121,11 +122,9 @@ func (c *Controller) initChromedp() {
 	// Inject stealth script if enabled.
 	if c.stealth {
 		if err := stealth.Inject(ctx); err != nil {
-			fmt.Fprintf(os.Stderr,
-				"[wukong/browser] stealth injection failed: %v\n", err)
+			logutil.Error("[wukong/browser] stealth injection failed", "error", err)
 		} else {
-			fmt.Fprintf(os.Stderr,
-				"[wukong/browser] stealth mode enabled\n")
+			logutil.Info("[wukong/browser] stealth mode enabled")
 		}
 	}
 }
@@ -148,7 +147,7 @@ func (c *Controller) EnableStealth() error {
 		return fmt.Errorf("enable stealth: %w", err)
 	}
 	c.stealth = true
-	fmt.Fprintf(os.Stderr, "[wukong/browser] stealth dynamically enabled\n")
+	logutil.Info("[wukong/browser] stealth dynamically enabled")
 	return nil
 }
 

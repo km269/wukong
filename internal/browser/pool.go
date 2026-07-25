@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"net/url"
-	"os"
 	"sync"
 	"time"
 
@@ -21,6 +21,7 @@ import (
 	"github.com/km269/wukong/internal/browser/stealth"
 	"github.com/km269/wukong/internal/browser/types"
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/pkg/logutil"
 )
 
 type Options struct {
@@ -125,6 +126,14 @@ func New(opts Options) *Pool {
 		)
 	}
 
+	initialEscalator := antibot.NewEscalator(antibot.DefaultEscalatorConfig())
+
+	if tlsFlags := initialEscalator.TLSFlags(); len(tlsFlags) > 0 {
+		for _, f := range tlsFlags {
+			allocOpts = append(allocOpts, chromedp.Flag(f.Name, f.Value))
+		}
+	}
+
 	if opts.ChromeBin != "" {
 		allocOpts = append(allocOpts, chromedp.ExecPath(opts.ChromeBin))
 	}
@@ -196,22 +205,14 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 			headers := network.Headers{
 				"Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
 				"Accept-Language":           "en-US,en;q=0.9",
-				"Accept-Encoding":           "gzip, deflate, br",
-				"Connection":                "keep-alive",
 				"Sec-Ch-Ua":                 ua.SecChUa,
 				"Sec-Ch-Ua-Mobile":          ua.SecChUaMobile,
 				"Sec-Ch-Ua-Platform":        ua.SecChUaPlatform,
-				"Sec-Fetch-Dest":            "document",
-				"Sec-Fetch-Mode":            "navigate",
-				"Sec-Fetch-Site":            "none",
-				"Sec-Fetch-User":            "?1",
 				"Upgrade-Insecure-Requests": "1",
 				"User-Agent":                ua.UserAgent,
 			}
 			if job.referer != "" {
 				headers["Referer"] = job.referer
-				headers["Sec-Fetch-Site"] = "same-origin"
-				headers["Sec-Fetch-User"] = "?1"
 			}
 			return network.SetExtraHTTPHeaders(headers).Do(ctx)
 		}),
@@ -482,28 +483,12 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 			return browser.SetDownloadBehavior(browser.SetDownloadBehaviorBehaviorAllow).Do(ctx)
 		}),
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			// Determine Sec-Fetch-Site based on whether referer host matches asset host.
-			secFetchSite := "same-origin"
-			if referer != "" {
-				if refURL, err := url.Parse(referer); err == nil {
-					if assetURLParsed, err2 := url.Parse(assetURL); err2 == nil {
-						if refURL.Host != assetURLParsed.Host {
-							secFetchSite = "cross-site"
-						}
-					}
-				}
-			}
 			headers := network.Headers{
 				"Accept":             "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
 				"Accept-Language":    "en-US,en;q=0.9",
-				"Accept-Encoding":    "gzip, deflate, br",
-				"Connection":         "keep-alive",
 				"Sec-Ch-Ua":          ua.SecChUa,
 				"Sec-Ch-Ua-Mobile":   ua.SecChUaMobile,
 				"Sec-Ch-Ua-Platform": ua.SecChUaPlatform,
-				"Sec-Fetch-Dest":     "image",
-				"Sec-Fetch-Mode":     "no-cors",
-				"Sec-Fetch-Site":     secFetchSite,
 				"User-Agent":         ua.UserAgent,
 			}
 			if referer != "" {
@@ -538,13 +523,13 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 			}),
 		)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer1 direct nav: get response body failed for %s: %v\n", assetURL, err)
+			logutil.Error("DownloadAsset layer1 direct nav: get response body failed", slog.String("asset_url", assetURL), slog.Any("error", err))
 			bodyBytes = nil
 		} else if len(bodyBytes) > 0 {
-			fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer1 direct nav: success for %s (%d bytes)\n", assetURL, len(bodyBytes))
+			logutil.Info("DownloadAsset layer1 direct nav: success", slog.String("asset_url", assetURL), slog.Int("bytes", len(bodyBytes)))
 		}
 	} else {
-		fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer1 direct nav: failed for %s (navErr=%v, requestID=%q)\n", assetURL, navErr, requestID)
+		logutil.Error("DownloadAsset layer1 direct nav: failed", slog.String("asset_url", assetURL), slog.Any("nav_error", navErr), slog.String("request_id", string(requestID)))
 	}
 
 	// Fallback 2: Load the asset via an <img> tag in a page context.
@@ -552,7 +537,7 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 	// due to download restrictions, but loading as a subresource (via <img>)
 	// behaves like a normal page load and bypasses those restrictions.
 	if len(bodyBytes) == 0 {
-		fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer2 img tag: trying for %s\n", assetURL)
+		logutil.Info("DownloadAsset layer2 img tag: trying", slog.String("asset_url", assetURL))
 		var imgRequestID network.RequestID
 		var imgContentType string
 		var imgStatusCode int
@@ -563,7 +548,7 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 			chromedp.WaitReady("body", chromedp.ByQuery),
 		)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer2 img tag: navigate to about:blank failed for %s: %v\n", assetURL, err)
+			logutil.Error("DownloadAsset layer2 img tag: navigate to about:blank failed", slog.String("asset_url", assetURL), slog.Any("error", err))
 		}
 		if err == nil {
 			// Listen for the image response
@@ -614,17 +599,17 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 				}),
 			)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer2 img tag: load image failed for %s: %v\n", assetURL, err)
+				logutil.Error("DownloadAsset layer2 img tag: load image failed", slog.String("asset_url", assetURL), slog.Any("error", err))
 			} else if imgRequestID == "" {
-				fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer2 img tag: no request ID captured for %s\n", assetURL)
+				logutil.Warn("DownloadAsset layer2 img tag: no request ID captured", slog.String("asset_url", assetURL))
 			}
 			if err == nil && imgRequestID != "" {
 				var respBody []byte
 				respBody, err = network.GetResponseBody(imgRequestID).Do(tabCtx)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer2 img tag: get response body failed for %s: %v\n", assetURL, err)
+					logutil.Error("DownloadAsset layer2 img tag: get response body failed", slog.String("asset_url", assetURL), slog.Any("error", err))
 				} else if len(respBody) > 0 {
-					fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer2 img tag: success for %s (%d bytes)\n", assetURL, len(respBody))
+					logutil.Info("DownloadAsset layer2 img tag: success", slog.String("asset_url", assetURL), slog.Int("bytes", len(respBody)))
 				}
 				if err == nil && len(respBody) > 0 {
 					bodyBytes = respBody
@@ -639,7 +624,7 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 	// This works even when direct navigation fails (e.g., ERR_BLOCKED_BY_CLIENT)
 	// because fetch() runs in the page context and behaves differently.
 	if len(bodyBytes) == 0 {
-		fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer3 fetch: trying for %s\n", assetURL)
+		logutil.Info("DownloadAsset layer3 fetch: trying", slog.String("asset_url", assetURL))
 		// First navigate to the origin of the asset so that fetch() has
 		// a proper same-origin context, reducing CORS issues.
 		if navErr != nil {
@@ -647,7 +632,7 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 				origin := parsedURL.Scheme + "://" + parsedURL.Host + "/"
 				navErr2 := chromedp.Run(tabCtx, chromedp.Navigate(origin))
 				if navErr2 != nil {
-					fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer3 fetch: navigate to origin %s failed: %v\n", origin, navErr2)
+					logutil.Error("DownloadAsset layer3 fetch: navigate to origin failed", slog.String("origin", origin), slog.Any("error", navErr2))
 				}
 			}
 		}
@@ -702,19 +687,19 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 			chromedp.Evaluate(jsExpr, &result),
 		)
 		if fetchErr != nil {
-			fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer3 fetch: evaluate failed for %s: %v\n", assetURL, fetchErr)
+			logutil.Error("DownloadAsset layer3 fetch: evaluate failed", slog.String("asset_url", assetURL), slog.Any("error", fetchErr))
 		} else if !result.OK {
-			fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer3 fetch: fetch not OK for %s (status=%d)\n", assetURL, result.Status)
+			logutil.Warn("DownloadAsset layer3 fetch: fetch not OK", slog.String("asset_url", assetURL), slog.Int("status", result.Status))
 		} else if result.Body == "" {
-			fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer3 fetch: empty body for %s\n", assetURL)
+			logutil.Warn("DownloadAsset layer3 fetch: empty body", slog.String("asset_url", assetURL))
 		}
 		if fetchErr == nil && result.OK && result.Body != "" {
 			bodyBytes, err = base64.StdEncoding.DecodeString(result.Body)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer3 fetch: base64 decode failed for %s: %v\n", assetURL, err)
+				logutil.Error("DownloadAsset layer3 fetch: base64 decode failed", slog.String("asset_url", assetURL), slog.Any("error", err))
 				bodyBytes = nil
 			} else if len(bodyBytes) > 0 {
-				fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer3 fetch: success for %s (%d bytes)\n", assetURL, len(bodyBytes))
+				logutil.Info("DownloadAsset layer3 fetch: success", slog.String("asset_url", assetURL), slog.Int("bytes", len(bodyBytes)))
 			}
 			if contentType == "" {
 				contentType = result.ContentType
@@ -730,7 +715,7 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 		// This directly loads the resource through Chrome's network stack,
 		// bypassing page-level restrictions that cause ERR_BLOCKED_BY_CLIENT.
 		// It requires a frame context, so we navigate to about:blank first.
-		fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer4 Network.loadNetworkResource: trying for %s\n", assetURL)
+		logutil.Info("DownloadAsset layer4 Network.loadNetworkResource: trying", slog.String("asset_url", assetURL))
 		var frameID cdp.FrameID
 		err = chromedp.Run(tabCtx,
 			chromedp.Navigate("about:blank"),
@@ -745,7 +730,7 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 			}),
 		)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer4 Network.loadNetworkResource: navigate/get frame failed for %s: %v\n", assetURL, err)
+			logutil.Error("DownloadAsset layer4 Network.loadNetworkResource: navigate/get frame failed", slog.String("asset_url", assetURL), slog.Any("error", err))
 		}
 		if err == nil && frameID != "" {
 			result, err := network.LoadNetworkResource(assetURL, &network.LoadNetworkResourceOptions{
@@ -753,11 +738,11 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 				IncludeCredentials: true,
 			}).WithFrameID(frameID).Do(tabCtx)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer4 Network.loadNetworkResource: load failed for %s: %v\n", assetURL, err)
+				logutil.Error("DownloadAsset layer4 Network.loadNetworkResource: load failed", slog.String("asset_url", assetURL), slog.Any("error", err))
 			} else if !result.Success {
-				fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer4 Network.loadNetworkResource: not successful for %s (httpStatus=%d)\n", assetURL, result.HTTPStatusCode)
+				logutil.Warn("DownloadAsset layer4 Network.loadNetworkResource: not successful", slog.String("asset_url", assetURL), slog.Float64("http_status", result.HTTPStatusCode))
 			} else if result.Stream == "" {
-				fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer4 Network.loadNetworkResource: no stream for %s\n", assetURL)
+				logutil.Warn("DownloadAsset layer4 Network.loadNetworkResource: no stream", slog.String("asset_url", assetURL))
 			}
 			if err == nil && result.Success && result.Stream != "" {
 				// Read the stream content using IO.read
@@ -780,7 +765,7 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 				}
 				io.Close(result.Stream).Do(tabCtx)
 				if len(data) > 0 {
-					fmt.Fprintf(os.Stderr, "[wukong/browser] DownloadAsset layer4 Network.loadNetworkResource: success for %s (%d bytes)\n", assetURL, len(data))
+					logutil.Info("DownloadAsset layer4 Network.loadNetworkResource: success", slog.String("asset_url", assetURL), slog.Int("bytes", len(data)))
 					bodyBytes = data
 					if statusCode == 0 && result.HTTPStatusCode > 0 {
 						statusCode = int(result.HTTPStatusCode)

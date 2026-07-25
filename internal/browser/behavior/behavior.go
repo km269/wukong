@@ -198,7 +198,6 @@ func (s *Simulator) SimulateTyping(ctx context.Context, browser BrowserControlle
 
 // SimulateClick simulates a human-like click with pre and post movement.
 func (s *Simulator) SimulateClick(ctx context.Context, browser BrowserController, target Point) error {
-	// Move to target with natural movement
 	start := Point{float64(s.rng.Intn(200)), float64(s.rng.Intn(200))}
 	path := s.MouseMove(start, target, 0)
 	duration := s.MouseMoveDuration(start, target)
@@ -221,24 +220,100 @@ func (s *Simulator) SimulateClick(ctx context.Context, browser BrowserController
 		}
 	}
 
-	// Random pause before click
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-time.After(s.RandomPause(100*time.Millisecond, 300*time.Millisecond)):
 	}
 
-	// Click
 	if err := browser.Click(ctx); err != nil {
 		return fmt.Errorf("click: %w", err)
 	}
 
-	// Random pause after click
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-time.After(s.RandomPause(200*time.Millisecond, 500*time.Millisecond)):
 	}
 
+	return nil
+}
+
+// SimulateRandomHover moves to a random position and hovers briefly.
+func (s *Simulator) SimulateRandomHover(ctx context.Context, browser BrowserController, viewportWidth, viewportHeight float64) error {
+	target := Point{
+		X: s.rng.Float64()*viewportWidth*0.8 + viewportWidth*0.1,
+		Y: s.rng.Float64()*viewportHeight*0.8 + viewportHeight*0.1,
+	}
+
+	path := s.MouseMove(Point{X: 0, Y: 0}, target, 0)
+	duration := s.MouseMoveDuration(Point{X: 0, Y: 0}, target)
+	stepDuration := duration / time.Duration(len(path))
+
+	for _, p := range path {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if err := browser.MoveMouse(ctx, p.X, p.Y); err != nil {
+			return fmt.Errorf("hover move: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(stepDuration):
+		}
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(s.RandomPause(200*time.Millisecond, 800*time.Millisecond)):
+	}
+
+	return nil
+}
+
+// SimulatePageExploration performs random scrolls and hover patterns
+// to mimic a human exploring a page before interacting.
+func (s *Simulator) SimulatePageExploration(ctx context.Context, browser BrowserController, viewportHeight float64) error {
+	scrollCount := 1 + s.rng.Intn(3)
+	for i := 0; i < scrollCount; i++ {
+		scrollDelta := float64(s.rng.Intn(300) - 50)
+		scrollDuration := s.ScrollDuration(0, scrollDelta)
+		if err := browser.Scroll(ctx, 0, scrollDelta); err != nil {
+			return fmt.Errorf("scroll %d: %w", i, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(scrollDuration):
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(s.RandomPause(200*time.Millisecond, 600*time.Millisecond)):
+		}
+	}
+
+	hoverCount := s.rng.Intn(2)
+	for i := 0; i < hoverCount; i++ {
+		if err := s.SimulateRandomHover(ctx, browser, 1920, viewportHeight); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// SimulateReadingPause simulates a pause as if the user is reading content.
+func (s *Simulator) SimulateReadingPause(ctx context.Context) error {
+	duration := s.RandomPause(1*time.Second, 4*time.Second)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(duration):
+	}
 	return nil
 }

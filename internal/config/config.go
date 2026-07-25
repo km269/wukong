@@ -371,9 +371,9 @@ func (l *Loader) expandSecrets(cfg *WukongConfig) {
 	cfg.Artifact.COSSecretKey =
 		expandEnv(cfg.Artifact.COSSecretKey)
 
-	// ACP Server API key.
-	cfg.ACPServer.APIKey =
-		expandEnv(cfg.ACPServer.APIKey)
+	// ACP Server API key (nested under Security.Auth).
+	cfg.ACPServer.Security.Auth.APIKey =
+		expandEnv(cfg.ACPServer.Security.Auth.APIKey)
 
 	// CortexDB embedding settings.
 	cfg.Cortex.EmbeddingAPIKey =

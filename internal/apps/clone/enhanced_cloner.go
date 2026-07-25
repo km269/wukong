@@ -19,11 +19,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +38,7 @@ import (
 	"github.com/km269/wukong/internal/browser/types"
 	"github.com/km269/wukong/internal/util"
 	"github.com/km269/wukong/pkg/httpclient"
+	"github.com/km269/wukong/pkg/logutil"
 	"golang.org/x/net/html"
 )
 
@@ -385,7 +389,7 @@ type assetJob struct {
 // NewEnhancedCloner creates a new enhanced cloning engine.
 func NewEnhancedCloner(opts EnhancedClonerOptions) *EnhancedCloner {
 	if util.DebugEnabled {
-		fmt.Fprintf(os.Stderr, "[DEBUG] NewEnhancedCloner called\n")
+		logutil.Debug("NewEnhancedCloner called")
 	}
 	if opts.Workers <= 0 {
 		opts.Workers = 4
@@ -410,7 +414,7 @@ func NewEnhancedCloner(opts EnhancedClonerOptions) *EnhancedCloner {
 	if opts.ProxyEnabled && len(opts.ProxyPool) > 0 {
 		dl.ProxyPool = opts.ProxyPool
 		if util.DebugEnabled {
-			fmt.Fprintf(os.Stderr, "[wukong/clone] asset downloader using proxy pool (%d proxies)\n", len(opts.ProxyPool))
+			logutil.Debug("asset downloader using proxy pool", slog.Int("proxy_count", len(opts.ProxyPool)))
 		}
 	}
 
@@ -472,11 +476,11 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	// anti-bot protection. If so, enable Stealth pre-emptively so the
 	// first page load is already stealth-protected.
 	if util.DebugEnabled {
-		fmt.Fprintf(os.Stderr, "[DEBUG] Starting preflight Cloudflare check...\n")
+		logutil.Debug("Starting preflight Cloudflare check...")
 	}
 	ec.preflightCloudflareCheck()
 	if util.DebugEnabled {
-		fmt.Fprintf(os.Stderr, "[DEBUG] Preflight Cloudflare check completed\n")
+		logutil.Debug("Preflight Cloudflare check completed")
 	}
 
 	// Multi-dimensional anti-bot probing.
@@ -484,11 +488,11 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	// and rate limits to build an anti-bot profile and adjust strategy.
 	if ec.opts.AntibotEnabled && !ec.opts.Stealth {
 		if util.DebugEnabled {
-			fmt.Fprintf(os.Stderr, "[DEBUG] Starting antibot probe...\n")
+			logutil.Debug("Starting antibot probe...")
 		}
 		ec.runAntibotProbe(ctx)
 		if util.DebugEnabled {
-			fmt.Fprintf(os.Stderr, "[DEBUG] Antibot probe completed\n")
+			logutil.Debug("Antibot probe completed")
 		}
 	}
 
@@ -535,13 +539,10 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	if ec.opts.CookieFile != "" {
 		sess, err := NewCloneSession(ec.opts.CookieFile)
 		if err != nil {
-			fmt.Fprintf(os.Stderr,
-				"[wukong/session] cookie load failed: %v\n", err)
+			logutil.Error("cookie load failed", slog.Any("error", err))
 		} else {
 			cloneSess = sess
-			fmt.Fprintf(os.Stderr,
-				"[wukong/session] cookies loaded from %s\n",
-				ec.opts.CookieFile)
+			logutil.Info("cookies loaded", slog.String("path", ec.opts.CookieFile))
 		}
 	}
 
@@ -589,7 +590,7 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 		if err := ec.front.load(statePath); err == nil {
 			seenCount := ec.front.seenCount()
 			if seenCount > 0 {
-				fmt.Fprintf(os.Stderr, "  Resuming previous crawl (%d pages seen) ...\n", seenCount)
+				logutil.Info("resuming previous crawl", slog.Int("pages_seen", seenCount))
 			}
 		}
 	}
@@ -602,9 +603,9 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 		}
 		proxy = browser.GlobalProxyPool().GetProxy()
 	}
-	fmt.Fprintf(os.Stderr, "  Launching browser (%s) ...\n", ec.opts.BrowserBackend)
+	logutil.Info("Launching browser...", slog.String("browser", string(ec.opts.BrowserBackend)))
 	if util.DebugEnabled {
-		fmt.Fprintf(os.Stderr, "[DEBUG] Creating browser backend...\n")
+		logutil.Debug("Creating browser backend...")
 	}
 	browserBackend := browser.NewBackend(ec.opts.BrowserBackend, browser.BackendOptions{
 		Headless:         ec.opts.Headless,
@@ -620,7 +621,7 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	})
 	ec.browserPool = browserBackend
 	defer browserBackend.Close()
-	fmt.Fprintf(os.Stderr, "  Browser ready. Starting crawl ...\n")
+	logutil.Info("Browser ready. Starting crawl...")
 
 	// Enable human-like behavior simulation if configured
 	if ec.opts.BehaviorSimulation {
@@ -726,8 +727,7 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	// Save session cookies for authenticated cloning.
 	if cloneSess != nil {
 		if err := cloneSess.Save(); err != nil {
-			fmt.Fprintf(os.Stderr,
-				"[wukong/session] cookie save failed: %v\n", err)
+			logutil.Error("cookie save failed", slog.Any("error", err))
 		}
 	}
 
@@ -882,7 +882,7 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 
 	// Render page in headless Chrome.
 	if util.DebugEnabled {
-		fmt.Fprintf(os.Stderr, "[wukong/clone] rendering %s ...\n", pageURL)
+		logutil.Debug("rendering...", slog.String("url", pageURL))
 	}
 	renderResult, err := ec.browserPool.RenderWithReferer(ctx, pageURL, referer)
 	if err != nil {
@@ -897,7 +897,7 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 		// Check if the error indicates anti-bot blocking.
 		if reason, _ := ec.antibot.CheckError(err); reason != antibot.ReasonNone {
 			retry, delay, _, msg := ec.antibot.Escalate(pageURL, reason, 0)
-			fmt.Fprintf(os.Stderr, "[wukong/antibot] %s\n", msg)
+			logutil.Warn("anti-bot event", slog.String("message", msg))
 			ec.applyAntiBotLevel()
 			if retry {
 				select {
@@ -923,9 +923,7 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 	if renderResult.CloudflareClearance != "" {
 		ec.cfClearance = renderResult.CloudflareClearance
 		ec.assetDownloader.cfClearance = renderResult.CloudflareClearance
-		fmt.Fprintf(os.Stderr,
-			"[wukong/antibot] cf_clearance obtained — "+
-				"Cloudflare bypass active for subsequent requests\n")
+		logutil.Info("cf_clearance obtained — Cloudflare bypass active for subsequent requests")
 	}
 
 	// Save assets collected from the browser's network stack during rendering.
@@ -942,7 +940,7 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 			}
 		}
 		if util.DebugEnabled && saved > 0 {
-			fmt.Fprintf(os.Stderr, "[wukong/clone] saved %d assets from browser cache\n", saved)
+			logutil.Info("saved assets from browser cache", slog.Int("saved", saved))
 		}
 	}
 
@@ -950,7 +948,7 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 	abReason, abDesc := ec.antibot.CheckResponse(
 		200, nil, renderResult.HTML)
 	if abReason != antibot.ReasonNone {
-		fmt.Fprintf(os.Stderr, "[wukong/antibot] %s at %s\n", abDesc, pageURL)
+		logutil.Warn("anti-bot detected", slog.String("description", abDesc), slog.String("url", pageURL))
 
 		// Cloudflare Turnstile: in non-headless + stealth mode,
 		// Chrome can auto-solve simple Turnstile challenges
@@ -959,10 +957,7 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 		// (Scrapling's solve_cloudflare=True approach.)
 		if abReason == antibot.ReasonCloudflare {
 			if !ec.opts.Headless && ec.opts.Stealth {
-				fmt.Fprintf(os.Stderr,
-					"[wukong/antibot] Turnstile detected — "+
-						"attempting auto-solve (non-headless+"+
-						"stealth, extended settle)...\n")
+				logutil.Warn("Turnstile detected — attempting auto-solve (non-headless+stealth, extended settle)")
 				ec.browserPool.SetSettle(10 * time.Second)
 				rr2, rErr := ec.browserPool.RenderWithReferer(ctx, pageURL, referer)
 				ec.browserPool.SetSettle(ec.opts.Settle)
@@ -971,16 +966,12 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 						200, nil, rr2.HTML)
 					if ab2 == antibot.ReasonNone {
 						// Challenge passed — use re-rendered page.
-						fmt.Fprintf(os.Stderr,
-							"[wukong/antibot] Turnstile solved! "+
-								"continuing with real page.\n")
+						logutil.Info("Turnstile solved! continuing with real page")
 						renderResult = rr2
 						goto processContent
 					}
 				}
-				fmt.Fprintf(os.Stderr,
-					"[wukong/antibot] Turnstile auto-solve failed. "+
-						"Try manually in visible Chrome.\n")
+				logutil.Warn("Turnstile auto-solve failed. Try manually in visible Chrome")
 			}
 			ec.opts.AntibotAutoEscalate = false
 			result.Error = "Cloudflare Turnstile blocked — " +
@@ -995,7 +986,7 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 		ec.applyAntiBotLevel()
 
 		if retry {
-			fmt.Fprintf(os.Stderr, "[wukong/antibot] %s\n", msg)
+			logutil.Warn("anti-bot event", slog.String("message", msg))
 			select {
 			case <-time.After(delay):
 				ec.enqueuePageWithReferer(pageURL, depth, referer, inScope)
@@ -1027,10 +1018,7 @@ processContent:
 	// antibot check found no blocking, the site is likely a SPA that
 	// needs more settle time for async-loaded content.
 	if len(cleanHTML) < 300 && abReason == antibot.ReasonNone {
-		fmt.Fprintf(os.Stderr,
-			"[wukong/sanitize] %s: %d bytes — SPA? "+
-				"re-rendering with extended settle (5s)...\n",
-			pageURL, len(cleanHTML))
+		logutil.Info("SPA salvage: re-rendering with extended settle", slog.String("url", pageURL), slog.Int("current_bytes", len(cleanHTML)))
 
 		// Temporarily increase settle and re-render.
 		ec.browserPool.SetSettle(5 * time.Second)
@@ -1040,9 +1028,7 @@ processContent:
 			cleanHTML2, _ := sanitize.CleanHTMLWithOptions(
 				renderResult2.HTML, cleanOpts)
 			if len(cleanHTML2) > len(cleanHTML) {
-				fmt.Fprintf(os.Stderr,
-					"[wukong/sanitize] SPA re-render: %d → %d bytes\n",
-					len(cleanHTML), len(cleanHTML2))
+				logutil.Info("SPA re-render result", slog.Int("original_bytes", len(cleanHTML)), slog.Int("rendered_bytes", len(cleanHTML2)))
 				cleanHTML = cleanHTML2
 				renderResult = renderResult2
 			}
@@ -1070,18 +1056,16 @@ processContent:
 	// This captures dynamically generated links that static HTML parsing may miss.
 	if len(renderResult.ExtractedLinks) > 0 {
 		if util.DebugEnabled {
-			fmt.Fprintf(os.Stderr, "\n[wukong/clone] browser extracted %d links from %s\n",
-				len(renderResult.ExtractedLinks), pageURL)
+			logutil.Debug("browser extracted links", slog.Int("link_count", len(renderResult.ExtractedLinks)), slog.String("url", pageURL))
 		}
 		browserLinks := ec.processBrowserExtractedLinks(
 			renderResult.ExtractedLinks, pageURL, depth, inScope)
 		result.LinksFound += browserLinks
 		if util.DebugEnabled {
-			fmt.Fprintf(os.Stderr, "[wukong/clone] %d new pages enqueued from browser links\n",
-				browserLinks)
+			logutil.Debug("new pages enqueued from browser links", slog.Int("browser", browserLinks))
 		}
 	} else if util.DebugEnabled {
-		fmt.Fprintf(os.Stderr, "\n[wukong/clone] browser extracted 0 links from %s\n", pageURL)
+		logutil.Debug("browser extracted 0 links", slog.String("url", pageURL))
 	}
 
 	contentBytes := []byte(rewrittenHTML)
@@ -1120,9 +1104,9 @@ processContent:
 	ec.statsMu.RUnlock()
 	seenCount := ec.front.seenCount()
 	pending := seenCount - cloned - failed
-	fmt.Fprintf(os.Stderr, "\r  [wukong/clone] %d pages cloned, %d pending, %d failed ...", cloned, pending, failed)
+	logutil.Info("clone progress", slog.Int("cloned", cloned), slog.Int("pending", pending), slog.Int("failed", failed))
 	if util.DebugEnabled {
-		fmt.Fprintf(os.Stderr, "\n  saved %s (%d bytes)", pageURL, result.Size)
+		logutil.Debug("page saved", slog.String("url", pageURL), slog.Int64("size_bytes", result.Size))
 	}
 
 	// Save to incremental cache for future runs.
@@ -1252,7 +1236,7 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 	}
 
 	if util.DebugEnabled {
-		fmt.Fprintf(os.Stderr, "[wukong/clone] downloading asset: %s\n", assetURL)
+		logutil.Debug("downloading asset:", slog.String("url", assetURL))
 	}
 
 	var body []byte
@@ -1267,7 +1251,7 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 		isCSS = assetResult.IsCSS
 	} else {
 		if util.DebugEnabled {
-			fmt.Fprintf(os.Stderr, "[wukong/clone] HTTP asset download failed: %s - %v\n", assetURL, httpErr)
+			logutil.Debug("HTTP asset download failed", slog.String("url", assetURL), slog.Any("error", httpErr))
 		}
 
 		// Check if we should try browser fallback.
@@ -1296,7 +1280,7 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 
 		if shouldFallback && ec.browserPool != nil {
 			if util.DebugEnabled {
-				fmt.Fprintf(os.Stderr, "[wukong/clone] falling back to browser download for: %s\n", assetURL)
+				logutil.Debug("falling back to browser download", slog.String("url", assetURL))
 			}
 			browserResult, browserErr := ec.browserPool.DownloadAsset(ctx, assetURL, ec.seedURL)
 			if browserErr == nil && len(browserResult.Body) > 0 {
@@ -1305,11 +1289,11 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 				isCSS = isCSSContentType(contentType) ||
 					strings.HasSuffix(strings.ToLower(assetURL), ".css")
 				if util.DebugEnabled {
-					fmt.Fprintf(os.Stderr, "[wukong/clone] browser download succeeded for: %s (%d bytes)\n", assetURL, len(body))
+					logutil.Debug("browser download succeeded", slog.String("url", assetURL), slog.Int("bytes", len(body)))
 				}
 			} else {
 				if util.DebugEnabled {
-					fmt.Fprintf(os.Stderr, "[wukong/clone] browser download also failed: %s - %v\n", assetURL, browserErr)
+					logutil.Debug("browser download also failed", slog.String("url", assetURL), slog.Any("error", browserErr))
 				}
 			}
 		}
@@ -1327,9 +1311,7 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 					isSameLevel := ec.antibot.Escalator.RetryCount(assetURL) > 0
 
 					if atMax && isSameLevel {
-						fmt.Fprintf(os.Stderr,
-							"[wukong/antibot] asset %s: %s. already at max level (%s), skipping retry\n",
-							assetURL, desc, ec.antibot.Level())
+						logutil.Warn("asset anti-bot: already at max level, skipping retry", slog.String("url", assetURL), slog.String("description", desc), slog.Int("level", int(ec.antibot.Level())))
 						ec.front.markVisited(key)
 						return httpErr
 					}
@@ -1337,9 +1319,7 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 					retry, delay, _, msg := ec.antibot.Escalate(
 						assetURL, reason, de.StatusCode)
 					ec.applyAntiBotLevel()
-					fmt.Fprintf(os.Stderr,
-						"[wukong/antibot] asset %s: %s. %s\n",
-						assetURL, desc, msg)
+					logutil.Warn("asset anti-bot escalation", slog.String("url", assetURL), slog.String("description", desc), slog.String("reason", msg))
 					if retry {
 						time.Sleep(delay)
 						ec.wg.Add(1)
@@ -1389,12 +1369,12 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 	if err := os.WriteFile(fullPath, data, 0644); err != nil {
 		ec.front.markVisited(key)
 		if util.DebugEnabled {
-			fmt.Fprintf(os.Stderr, "[wukong/clone] asset write failed: %s - %v\n", assetURL, err)
+			logutil.Debug("asset write failed", slog.String("url", assetURL), slog.Any("error", err))
 		}
 		return err
 	}
 	if util.DebugEnabled {
-		fmt.Fprintf(os.Stderr, "[wukong/clone] asset saved: %s -> %s (%d bytes)\n", assetURL, fullPath, len(data))
+		logutil.Debug("asset saved", slog.String("url", assetURL), slog.String("path", fullPath), slog.Int("bytes", len(data)))
 	}
 
 	if len(discoveredAssets) > 0 {
@@ -1410,7 +1390,7 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 				}
 			}
 			if util.DebugEnabled {
-				fmt.Fprintf(os.Stderr, "[wukong/clone] CSS processed: %s, discovered %d assets\n", assetURL, len(discoveredAssets))
+				logutil.Debug("CSS processed, discovered assets", slog.String("url", assetURL), slog.Int("discovered_count", len(discoveredAssets)))
 			}
 		}()
 	}
@@ -1523,18 +1503,18 @@ func (ec *EnhancedCloner) rewriteAndDiscover(htmlStr, pageURL, pageMirrorPath st
 				if ec.front.offer(key) {
 					ec.enqueueAssetNonBlocking(absURL)
 					if util.DebugEnabled {
-						fmt.Fprintf(os.Stderr, "[wukong/clone] enqueued asset: %s\n", absURL)
+						logutil.Debug("enqueued asset:", slog.String("url", absURL))
 					}
 				} else {
 					if util.DebugEnabled {
-						fmt.Fprintf(os.Stderr, "[wukong/clone] asset already seen: %s\n", absURL)
+						logutil.Debug("asset already seen:", slog.String("url", absURL))
 					}
 				}
 				targetPath = filepath.ToSlash(filepath.Join("assets",
 					LocalPath(ec.host, absURL, kind)))
 			} else {
 				if util.DebugEnabled {
-					fmt.Fprintf(os.Stderr, "[wukong/clone] asset rejected by policy: %s\n", absURL)
+					logutil.Debug("asset rejected by policy:", slog.String("url", absURL))
 				}
 				return ""
 			}
@@ -1606,7 +1586,7 @@ func (ec *EnhancedCloner) processBrowserExtractedLinks(
 		}
 
 		if util.DebugEnabled && count < 20 {
-			fmt.Fprintf(os.Stderr, "[wukong/clone] browser link candidate: %s\n", absURL)
+			logutil.Info("browser link candidate:", slog.String("url", absURL))
 		}
 
 		// Use enqueuePageWithReferer which handles all checks (scope, dedup, limits).
@@ -1623,8 +1603,7 @@ func (ec *EnhancedCloner) processBrowserExtractedLinks(
 	}
 
 	if util.DebugEnabled {
-		fmt.Fprintf(os.Stderr, "[wukong/clone] browser links: %d total candidates, %d new pages enqueued\n",
-			len(seenInBatch), count)
+		logutil.Debug("browser links summary", slog.Int("candidates", len(seenInBatch)), slog.Int("new_pages", count))
 	}
 
 	// Smart pagination detection: find pagination patterns in the links
@@ -1671,7 +1650,7 @@ func (ec *EnhancedCloner) detectAndGeneratePagination(
 	basePath := baseParsed.Path
 
 	if util.DebugEnabled {
-		fmt.Fprintf(os.Stderr, "[wukong/clone/pagination] detecting patterns for base path: %s\n", basePath)
+		logutil.Debug("detecting patterns for base path:", slog.String("path", basePath))
 	}
 
 	for _, link := range links {
@@ -1704,26 +1683,144 @@ func (ec *EnhancedCloner) detectAndGeneratePagination(
 			key := u.Host + u.Path + "?" + param
 			pageGroups[key] = append(pageGroups[key], pageInfo{url: u, pageNum: pageNum})
 			if util.DebugEnabled {
-				fmt.Fprintf(os.Stderr, "[wukong/clone/pagination] found page link: %s (param=%s, num=%d)\n",
-					link, param, pageNum)
+				logutil.Debug("found page link", slog.String("link", link), slog.String("param", param), slog.Int("page_num", pageNum))
 			}
 			break
 		}
 	}
 
-	count := 0
+	// Path-based pagination detection: detect patterns like
+	// /base/path/page/2/, /base/path/page/3/, etc.
+	// These are filtered out by the u.Path != basePath check above,
+	// so we need a separate detection pass.
+	type pathPageInfo struct {
+		url     *url.URL
+		pageNum int
+	}
+	pathPageGroups := make(map[string][]pathPageInfo)
 
-	// For each group, find min/max page and generate missing pages.
+	pageRe := regexp.MustCompile(`^(.+)/page/(\d+)/?$`)
+	for _, link := range links {
+		u, err := url.Parse(link)
+		if err != nil {
+			continue
+		}
+		if !SameSite(seed, u, ec.opts.Subdomains) {
+			continue
+		}
+		if !LikelyPage(link) {
+			continue
+		}
+
+		m := pageRe.FindStringSubmatch(u.Path)
+		if m == nil {
+			continue
+		}
+
+		basePathPrefix := m[1]
+		var pageNum int
+		if _, err := fmt.Sscanf(m[2], "%d", &pageNum); err != nil {
+			continue
+		}
+
+		key := u.Host + basePathPrefix + "/page/"
+		pathPageGroups[key] = append(pathPageGroups[key], pathPageInfo{url: u, pageNum: pageNum})
+		if util.DebugEnabled {
+			logutil.Debug("found path-based page link", slog.String("link", link), slog.String("base", basePathPrefix), slog.Int("page_num", pageNum))
+		}
+	}
+
+	// Offset/limit pagination detection: detect patterns like
+	// /list/?offset=0&limit=25, /list/?offset=50&limit=25, etc.
+	// Group by same path, detect offset param, calculate step size,
+	// and generate missing pages.
+	type offsetPageInfo struct {
+		url       *url.URL
+		offsetVal int
+		paramName string
+	}
+	offsetGroups := make(map[string][]offsetPageInfo)
+
+	offsetParamNames := []string{"offset", "start", "skip", "from", "after"}
+	for _, link := range links {
+		u, err := url.Parse(link)
+		if err != nil {
+			continue
+		}
+		if !SameSite(seed, u, ec.opts.Subdomains) {
+			continue
+		}
+		if !LikelyPage(link) {
+			continue
+		}
+		if u.Path != basePath {
+			continue
+		}
+
+		for _, param := range offsetParamNames {
+			val := u.Query().Get(param)
+			if val == "" {
+				continue
+			}
+			var offsetVal int
+			if _, err := fmt.Sscanf(val, "%d", &offsetVal); err != nil {
+				continue
+			}
+			key := u.Host + u.Path + "?" + param
+			offsetGroups[key] = append(offsetGroups[key], offsetPageInfo{url: u, offsetVal: offsetVal, paramName: param})
+			break
+		}
+	}
+
+	// Cursor/seek/token pagination: links with these non-sequential params
+	// cannot be auto-generated, but we ensure existing ones are enqueued
+	// so they're not lost.
+	cursorParamNames := []string{"cursor", "seek", "token", "page_token", "next_cursor", "next_token", "cursor_marker"}
+	for _, link := range links {
+		u, err := url.Parse(link)
+		if err != nil {
+			continue
+		}
+		if !SameSite(seed, u, ec.opts.Subdomains) {
+			continue
+		}
+
+		hasCursorParam := false
+		for _, param := range cursorParamNames {
+			if u.Query().Get(param) != "" {
+				hasCursorParam = true
+				break
+			}
+		}
+		if !hasCursorParam {
+			continue
+		}
+
+		canonURL, err := Normalize(ec.seedURL, link)
+		if err != nil {
+			continue
+		}
+		key := PageKey(ec.host, canonURL)
+		if ec.front.offer(key) {
+			ec.front.mu.Lock()
+			delete(ec.front.seen, key)
+			ec.front.mu.Unlock()
+			ec.enqueuePageWithReferer(link, depth+1, pageURL, false)
+		}
+	}
+
+	count := 0
+	const maxPagesPerGroup = 100
+
+	// For query-param groups, find min/max page and generate missing pages.
 	for groupKey, pages := range pageGroups {
 		if len(pages) < 2 {
 			if util.DebugEnabled {
-				fmt.Fprintf(os.Stderr, "[wukong/clone/pagination] group %s has only %d page(s), skipping\n",
-					groupKey, len(pages))
+				logutil.Debug("group has only one page, skipping", slog.String("group", groupKey), slog.Int("page_count", len(pages)))
 			}
-			continue // Need at least 2 pages to detect a pattern.
+			continue
 		}
 
-		// Find min and max page numbers.
 		minPage := pages[0].pageNum
 		maxPage := pages[0].pageNum
 		for _, p := range pages {
@@ -1735,25 +1832,23 @@ func (ec *EnhancedCloner) detectAndGeneratePagination(
 			}
 		}
 
-		if util.DebugEnabled {
-			fmt.Fprintf(os.Stderr, "[wukong/clone/pagination] group %s: %d pages, range %d-%d\n",
-				groupKey, len(pages), minPage, maxPage)
+		if maxPage-minPage > maxPagesPerGroup {
+			maxPage = minPage + maxPagesPerGroup
 		}
 
-		// Extract the parameter name from the group key.
-		// Key format: "host/path?param"
+		if util.DebugEnabled {
+			logutil.Debug("group pages range", slog.String("group", groupKey), slog.Int("page_count", len(pages)), slog.Int("min_page", minPage), slog.Int("max_page", maxPage))
+		}
+
 		paramIdx := strings.LastIndex(groupKey, "?")
 		if paramIdx < 0 {
 			continue
 		}
 		paramName := groupKey[paramIdx+1:]
 
-		// Use the first page's URL as a template.
 		templateURL := pages[0].url
 
-		// Generate all pages from minPage to maxPage.
 		for pageNum := minPage; pageNum <= maxPage; pageNum++ {
-			// Create a copy of the template URL.
 			newURL := *templateURL
 			q := newURL.Query()
 			q.Set(paramName, fmt.Sprintf("%d", pageNum))
@@ -1761,7 +1856,6 @@ func (ec *EnhancedCloner) detectAndGeneratePagination(
 
 			absURL := newURL.String()
 
-			// Check scope.
 			linkInScope := false
 			if ec.opts.ScopePrefix != "" {
 				if matchesScopePrefix(newURL.Path, ec.opts.ScopePrefix) {
@@ -1776,7 +1870,6 @@ func (ec *EnhancedCloner) detectAndGeneratePagination(
 				continue
 			}
 
-			// Enqueue the page.
 			canonURL, err := Normalize(ec.seedURL, absURL)
 			if err != nil {
 				continue
@@ -1792,10 +1885,171 @@ func (ec *EnhancedCloner) detectAndGeneratePagination(
 		}
 	}
 
+	// For path-based groups, find min/max page and generate missing pages.
+	for groupKey, pages := range pathPageGroups {
+		if len(pages) < 2 {
+			if util.DebugEnabled {
+				logutil.Debug("path-based group has only one page, skipping", slog.String("group", groupKey), slog.Int("page_count", len(pages)))
+			}
+			continue
+		}
+
+		minPage := pages[0].pageNum
+		maxPage := pages[0].pageNum
+		for _, p := range pages {
+			if p.pageNum < minPage {
+				minPage = p.pageNum
+			}
+			if p.pageNum > maxPage {
+				maxPage = p.pageNum
+			}
+		}
+
+		if maxPage-minPage > maxPagesPerGroup {
+			maxPage = minPage + maxPagesPerGroup
+		}
+
+		if util.DebugEnabled {
+			logutil.Debug("path-based group pages range", slog.String("group", groupKey), slog.Int("page_count", len(pages)), slog.Int("min_page", minPage), slog.Int("max_page", maxPage))
+		}
+
+		templateURL := pages[0].url
+		m := pageRe.FindStringSubmatch(templateURL.Path)
+		if m == nil {
+			continue
+		}
+		basePathPrefix := m[1]
+		hasTrailingSlash := strings.HasSuffix(templateURL.Path, "/")
+
+		for pageNum := minPage; pageNum <= maxPage; pageNum++ {
+			newPath := fmt.Sprintf("%s/page/%d", basePathPrefix, pageNum)
+			if hasTrailingSlash {
+				newPath += "/"
+			}
+
+			newURL := *templateURL
+			newURL.Path = newPath
+			newURL.RawQuery = ""
+
+			absURL := newURL.String()
+
+			linkInScope := false
+			if ec.opts.ScopePrefix != "" {
+				if matchesScopePrefix(newURL.Path, ec.opts.ScopePrefix) {
+					linkInScope = true
+				}
+			}
+			if ec.opts.ScopePrefix == "" && ec.opts.ScopeAnchor == "" {
+				linkInScope = true
+			}
+
+			if !linkInScope {
+				continue
+			}
+
+			canonURL, err := Normalize(ec.seedURL, absURL)
+			if err != nil {
+				continue
+			}
+			key := PageKey(ec.host, canonURL)
+			if ec.front.offer(key) {
+				ec.front.mu.Lock()
+				delete(ec.front.seen, key)
+				ec.front.mu.Unlock()
+				ec.enqueuePageWithReferer(absURL, depth+1, pageURL, true)
+				count++
+			}
+		}
+	}
+
+	// For offset-based groups, calculate step size and generate missing pages.
+	for groupKey, pages := range offsetGroups {
+		if len(pages) < 2 {
+			if util.DebugEnabled {
+				logutil.Debug("offset group has only one page, skipping", slog.String("group", groupKey), slog.Int("page_count", len(pages)))
+			}
+			continue
+		}
+
+		// Sort offsets to calculate step.
+		offsets := make([]int, len(pages))
+		for i, p := range pages {
+			offsets[i] = p.offsetVal
+		}
+		sort.Ints(offsets)
+
+		// Calculate step from the smallest non-zero difference.
+		step := offsets[1] - offsets[0]
+		for i := 1; i < len(offsets)-1; i++ {
+			diff := offsets[i+1] - offsets[i]
+			if diff > 0 && diff < step {
+				step = diff
+			}
+		}
+		if step <= 0 {
+			continue
+		}
+
+		minOffset := offsets[0]
+		maxOffset := offsets[len(offsets)-1]
+		span := maxOffset - minOffset
+		if span/step > maxPagesPerGroup {
+			maxOffset = minOffset + step*maxPagesPerGroup
+		}
+
+		paramIdx := strings.LastIndex(groupKey, "?")
+		if paramIdx < 0 {
+			continue
+		}
+		paramName := groupKey[paramIdx+1:]
+
+		templateURL := pages[0].url
+
+		for offsetVal := minOffset; offsetVal <= maxOffset; offsetVal += step {
+			newURL := *templateURL
+			q := newURL.Query()
+			q.Set(paramName, fmt.Sprintf("%d", offsetVal))
+			newURL.RawQuery = q.Encode()
+
+			absURL := newURL.String()
+
+			linkInScope := false
+			if ec.opts.ScopePrefix != "" {
+				if matchesScopePrefix(newURL.Path, ec.opts.ScopePrefix) {
+					linkInScope = true
+				}
+			}
+			if ec.opts.ScopePrefix == "" && ec.opts.ScopeAnchor == "" {
+				linkInScope = true
+			}
+
+			if !linkInScope {
+				continue
+			}
+
+			canonURL, err := Normalize(ec.seedURL, absURL)
+			if err != nil {
+				continue
+			}
+			key := PageKey(ec.host, canonURL)
+			if ec.front.offer(key) {
+				ec.front.mu.Lock()
+				delete(ec.front.seen, key)
+				ec.front.mu.Unlock()
+				ec.enqueuePageWithReferer(absURL, depth+1, pageURL, true)
+				count++
+			}
+		}
+
+		if util.DebugEnabled {
+			logutil.Debug("offset group generated pages", slog.String("group", groupKey), slog.Int("step", step), slog.Int("count", count))
+		}
+	}
+
 	if count > 0 {
-		fmt.Fprintf(os.Stderr, "\n[wukong/clone] pagination: generated %d additional pages from pattern detection\n", count)
+		logutil.Info("pagination: generated additional pages from pattern detection", slog.Int("count", count))
 	} else if util.DebugEnabled {
-		fmt.Fprintf(os.Stderr, "[wukong/clone/pagination] no new pages generated\n")
+		logutil.Debug("no new pages generated")
 	}
 
 	return count
@@ -1874,7 +2128,7 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 	parsed, err := url.Parse(pageURL)
 	if err != nil {
 		if util.DebugEnabled {
-			fmt.Fprintf(os.Stderr, "[wukong/clone] enqueue rejected (parse error): %s\n", pageURL)
+			logutil.Debug("enqueue rejected (parse error):", slog.String("url", pageURL))
 		}
 		return
 	}
@@ -1882,7 +2136,7 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 	// Only HTTP(S).
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		if util.DebugEnabled {
-			fmt.Fprintf(os.Stderr, "[wukong/clone] enqueue rejected (non-http): %s\n", pageURL)
+			logutil.Debug("enqueue rejected (non-http):", slog.String("url", pageURL))
 		}
 		return
 	}
@@ -1895,7 +2149,7 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 	// The seed URL is always allowed.
 	if !isSeedURL && !LikelyPage(pageURL) {
 		if util.DebugEnabled {
-			fmt.Fprintf(os.Stderr, "[wukong/clone] enqueue rejected (not a page): %s\n", pageURL)
+			logutil.Debug("enqueue rejected (not a page):", slog.String("url", pageURL))
 		}
 		return
 	}
@@ -1903,10 +2157,7 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 	if isSeedURL {
 		if ec.opts.ScopePrefix != "" && !matchesScopePrefix(parsed.Path, ec.opts.ScopePrefix) {
 			scopeRootURL := fmt.Sprintf("%s://%s%s", parsed.Scheme, parsed.Host, ec.opts.ScopePrefix)
-			fmt.Fprintf(os.Stderr,
-				"[wukong/clone] warning: seed URL %q does not match scope-prefix %q — "+
-					"automatically adding %q as an additional starting point\n",
-				pageURL, ec.opts.ScopePrefix, scopeRootURL)
+			logutil.Warn("seed URL does not match scope-prefix, automatically adding as additional starting point", slog.String("seed_url", pageURL), slog.String("scope_prefix", ec.opts.ScopePrefix), slog.String("scope_root", scopeRootURL))
 			ec.enqueuePageWithReferer(scopeRootURL, 0, "", true)
 		}
 	}
@@ -1952,8 +2203,7 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 	if ec.opts.ScopePrefix != "" || ec.opts.ScopeAnchor != "" {
 		if !scopeMatched {
 			if util.DebugEnabled {
-				fmt.Fprintf(os.Stderr, "[wukong/clone] out of scope, skipping: %s (path=%s, fragment=%s)\n",
-					pageURL, parsed.Path, parsed.Fragment)
+				logutil.Debug("out of scope, skipping", slog.String("url", pageURL), slog.String("path", parsed.Path), slog.String("fragment", parsed.Fragment))
 			}
 			return
 		}
@@ -1962,7 +2212,7 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 	if !isSeedURL {
 		if seed != nil && !SameSite(seed, parsed, ec.opts.Subdomains) {
 			if util.DebugEnabled {
-				fmt.Fprintf(os.Stderr, "[wukong/clone] enqueue rejected (cross-site): %s\n", pageURL)
+				logutil.Debug("enqueue rejected (cross-site):", slog.String("url", pageURL))
 			}
 			return
 		}
@@ -1972,7 +2222,7 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 	canonURL, err := Normalize(ec.seedURL, pageURL)
 	if err != nil {
 		if util.DebugEnabled {
-			fmt.Fprintf(os.Stderr, "[wukong/clone] enqueue rejected (normalize error): %s - %v\n", pageURL, err)
+			logutil.Debug("enqueue rejected (normalize error)", slog.String("url", pageURL), slog.Any("error", err))
 		}
 		return
 	}
@@ -1981,7 +2231,7 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 	// Check MaxDepth.
 	if ec.opts.MaxDepth > 0 && depth > ec.opts.MaxDepth {
 		if util.DebugEnabled {
-			fmt.Fprintf(os.Stderr, "[wukong/clone] enqueue rejected (max depth %d): %s\n", depth, pageURL)
+			logutil.Debug("enqueue rejected (max depth):", slog.Int("depth", depth), slog.String("url", pageURL))
 		}
 		return
 	}
@@ -1992,7 +2242,7 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 		if ec.enqueuedPages >= ec.opts.MaxPages {
 			ec.enqueuedMu.Unlock()
 			if util.DebugEnabled {
-				fmt.Fprintf(os.Stderr, "[wukong/clone] enqueue rejected (max pages): %s\n", pageURL)
+				logutil.Debug("enqueue rejected (max pages):", slog.String("url", pageURL))
 			}
 			return
 		}
@@ -2002,7 +2252,7 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 	// Offer to frontier for dedup.
 	if !ec.front.offer(key) {
 		if util.DebugEnabled {
-			fmt.Fprintf(os.Stderr, "[wukong/clone] enqueue rejected (already seen): %s\n", pageURL)
+			logutil.Debug("enqueue rejected (already seen):", slog.String("url", pageURL))
 		}
 		return // Already seen.
 	}
@@ -2014,7 +2264,7 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 	ec.wg.Add(1)
 
 	if util.DebugEnabled {
-		fmt.Fprintf(os.Stderr, "[wukong/clone] enqueued page (depth=%d): %s\n", depth, canonURL)
+		logutil.Debug("enqueued page (depth=):", slog.Int("depth", depth), slog.String("url", canonURL))
 	}
 
 	// BFS vs DFS: enqueue to channel (FIFO) or push to stack (LIFO).
@@ -2121,70 +2371,57 @@ func (ec *EnhancedCloner) preflightCloudflareCheck() {
 	// Read response body to check for Turnstile markers.
 	body, rErr := io.ReadAll(io.LimitReader(resp.Body, 8192))
 	if rErr != nil || len(body) == 0 {
-		fmt.Fprintf(os.Stderr,
-			"[wukong/antibot] Cloudflare detected on %s — "+
-				"stealth enabled pre-emptively\n", ec.host)
+		logutil.Warn("Cloudflare detected — stealth enabled pre-emptively", slog.String("host", ec.host))
 		return
 	}
 
 	if antibot.HasTurnstileMarkers(string(body)) {
-		// Turnstile is a JS-interactive challenge. Headless Chrome
-		// cannot solve it. Disable auto-escalation NOW so we don't
-		// waste ~10s on doomed retries.
 		ec.opts.AntibotAutoEscalate = false
 		ec.preflightTurnstile = true
-		fmt.Fprintf(os.Stderr,
-			"[wukong/antibot] Cloudflare Turnstile detected "+
-				"on %s — headless Chrome cannot solve "+
-				"interactive challenges. Stealth enabled, "+
-				"auto-retry disabled (Tip: use a non-"+
-				"Cloudflare mirror or real browser profile).\n",
-			ec.host)
+		logutil.Warn("Cloudflare Turnstile detected — headless Chrome cannot solve interactive challenges, stealth enabled, auto-retry disabled", slog.String("host", ec.host))
 		return
 	}
 
-	fmt.Fprintf(os.Stderr,
-		"[wukong/antibot] Cloudflare detected on %s — stealth "+
-			"enabled pre-emptively\n", ec.host)
+	logutil.Warn("Cloudflare detected — stealth enabled pre-emptively", slog.String("host", ec.host))
 }
 
 // runAntibotProbe performs multi-dimensional anti-bot probing and adjusts
 // clone strategy based on the detected threats.
 func (ec *EnhancedCloner) runAntibotProbe(ctx context.Context) {
-	fmt.Fprintf(os.Stderr, "[wukong/antibot] probing %s for anti-bot measures...\n", ec.seedURL)
+	logutil.Warn("probing for anti-bot measures...", slog.String("url", ec.seedURL))
 
 	p := prober.NewProber()
 	profile := p.Probe(ctx, ec.seedURL)
 
 	switch profile.Level {
 	case prober.LevelCritical:
-		fmt.Fprintf(os.Stderr, "[wukong/antibot] critical anti-bot protection detected — enabling stealth\n")
+		logutil.Warn("critical anti-bot protection detected — enabling stealth")
 		ec.opts.Stealth = true
 		ec.opts.AntibotAutoEscalate = false
 	case prober.LevelHigh:
-		fmt.Fprintf(os.Stderr, "[wukong/antibot] high anti-bot protection (%s) — enabling stealth\n", profile.WAF)
+		logutil.Warn("high anti-bot protection — enabling stealth", slog.String("waf", profile.WAF))
 		ec.opts.Stealth = true
 	case prober.LevelMedium:
-		fmt.Fprintf(os.Stderr, "[wukong/antibot] medium anti-bot protection — enabling stealth\n")
+		logutil.Warn("medium anti-bot protection — enabling stealth")
 		ec.opts.Stealth = true
 	case prober.LevelLow:
-		fmt.Fprintf(os.Stderr, "[wukong/antibot] low anti-bot measures detected — monitoring\n")
+		logutil.Warn("low anti-bot measures detected — monitoring")
 		if profile.HasRateLimit {
 			if ec.opts.CrawlDelay == 0 {
 				ec.opts.CrawlDelay = 2000
-				fmt.Fprintf(os.Stderr, "[wukong/antibot] rate limiting detected — setting crawl delay to 2s\n")
+				logutil.Info("rate limiting detected — setting crawl delay to 2s")
 			}
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "[wukong/antibot] no significant anti-bot measures detected\n")
+		logutil.Warn("no significant anti-bot measures detected")
 	}
 
 	if profile.WAF != "" {
-		fmt.Fprintf(os.Stderr, "[wukong/antibot] detected WAF: %s\n", profile.WAF)
+		logutil.Info("detected WAF", slog.String("waf", profile.WAF))
 	}
 
 	if profile.HasJSChallenge {
-		fmt.Fprintf(os.Stderr, "[wukong/antibot] JS challenge detected — may require browser rendering\n")
+		logutil.Info("JS challenge detected — may require browser rendering")
 	}
 }
 
@@ -2218,8 +2455,7 @@ func (ec *EnhancedCloner) applyAntiBotLevel() {
 
 	if ec.antibot.NeedsStealthScript() && !ec.browserPool.StealthEnabled() {
 		if err := ec.browserPool.EnableStealth(); err != nil {
-			fmt.Fprintf(os.Stderr,
-				"[wukong/antibot] failed to enable stealth: %v\n", err)
+			logutil.Error("failed to enable stealth:", slog.Any("error", err))
 		}
 	}
 
@@ -2229,8 +2465,7 @@ func (ec *EnhancedCloner) applyAntiBotLevel() {
 		if pool, ok := ec.browserPool.(interface{ RotateUA() }); ok {
 			pool.RotateUA()
 		}
-		fmt.Fprintf(os.Stderr,
-			"[wukong/antibot] UA rotated for aggressive mode\n")
+		logutil.Info("UA rotated for aggressive mode")
 	}
 }
 

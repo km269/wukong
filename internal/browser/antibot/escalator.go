@@ -60,34 +60,29 @@ type EscalationEvent struct {
 	Retry    bool
 }
 
+// ProxyPool is an interface for proxy rotation integration.
+type ProxyPool interface {
+	GetProxy() string
+	ReportFailure(proxyURL string)
+	RotatedIndex() int
+	Count() int
+}
+
 // Escalator manages the auto-escalation of anti-bot measures
 // based on detected blocking patterns.
 type Escalator struct {
 	mu sync.Mutex
 
-	// CurrentLevel is the active stealth level.
 	CurrentLevel Level
-
-	// MaxLevel caps the maximum escalation (default LevelAggressive).
-	MaxLevel Level
-
-	// AutoEscalate enables automatic escalation on detection.
+	MaxLevel     Level
 	AutoEscalate bool
-
-	// Per-URL retry counts for LevelBackoff.
-	retries map[string]int
-
-	// MaxRetries per URL before giving up.
-	MaxRetries int
-
-	// Cooldown between escalation attempts for the same URL.
-	Cooldown time.Duration
-
-	// History of escalation events for diagnostics.
-	History []EscalationEvent
-
-	// Random source for jitter.
-	rng *rand.Rand
+	retries      map[string]int
+	MaxRetries   int
+	Cooldown     time.Duration
+	History      []EscalationEvent
+	rng          *rand.Rand
+	tlsManager   *TLSProfileManager
+	proxyPool    ProxyPool
 }
 
 // EscalatorConfig configures the auto-escalation engine.
@@ -130,6 +125,7 @@ func NewEscalator(cfg EscalatorConfig) *Escalator {
 		Cooldown:     cfg.Cooldown,
 		History:      make([]EscalationEvent, 0, 64),
 		rng:          rand.New(rand.NewSource(time.Now().UnixNano())),
+		tlsManager:   NewTLSProfileManager(),
 	}
 }
 
@@ -204,9 +200,32 @@ func (e *Escalator) Check(url string, reason BlockReason,
 
 	e.recordEvent(url, reason, oldLevel, newLevel, true)
 
+	if newLevel >= LevelAggressive {
+		e.tlsManager.Rotate()
+		if e.proxyPool != nil && e.proxyPool.Count() > 0 {
+			proxy := e.proxyPool.GetProxy()
+			e.proxyPool.ReportFailure(proxy)
+		}
+	}
+
 	return true, delay, newLevel,
 		fmt.Sprintf("escalated %s → %s for %s (retry %d/%d, delay %v)",
 			oldLevel, newLevel, url, e.retries[url], e.MaxRetries, delay)
+}
+
+// TLSFlags returns Chrome TLS flags for the current escalation level.
+// At LevelAggressive and above, TLS profile is rotated.
+func (e *Escalator) TLSFlags() []ChromeFlag {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.tlsManager.FlagsForLevel(e.CurrentLevel)
+}
+
+// SetProxyPool sets the proxy pool for rotation on escalation.
+func (e *Escalator) SetProxyPool(pool ProxyPool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.proxyPool = pool
 }
 
 // RetryCount returns the number of retries for a URL.

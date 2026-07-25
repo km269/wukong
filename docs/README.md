@@ -18,6 +18,7 @@
 
 | 文档 | 说明 | 关键词 |
 |------|------|--------|
+| [涉网应用深度分析](NETWORK_ANALYSIS.md) | 10 涉网子系统分析 + 分级升级建议 | HTTP Client、浏览器引擎、ANP、Gateway、ARD、反反爬 |
 | [网站克隆技术指南](CLONE_GUIDE.md) | 克隆引擎与 ZIM 打包详解 | EnhancedCloner、分页、反反爬、ZIM 打包 |
 | [反反爬技术详解](ANTIBOT_GUIDE.md) | 10 层反爬体系详解 | Antibot、Escalator、Stealth、Proxy Pool |
 | [记忆系统架构](MEMORY_ARCHITECTURE.md) | 双引擎三层记忆详解 | MemoryFlow、CortexDB、GraphFlow、SmartCleanup |
@@ -39,6 +40,7 @@
 | 整体系统是怎么设计的？ | [系统架构](ARCHITECTURE.md) |
 | 有哪些配置项？怎么配置？ | [配置手册](CONFIG.md) |
 | 命令行工具有哪些命令？ | [CLI & TUI 架构](CLI_TUI.md) |
+| 涉网应用有哪些？怎么升级？ | [涉网应用深度分析](NETWORK_ANALYSIS.md) |
 | 网站克隆怎么用？原理是什么？ | [网站克隆技术指南](CLONE_GUIDE.md) |
 | 反爬是怎么处理的？ | [反反爬技术详解](ANTIBOT_GUIDE.md) |
 | 记忆系统是怎么工作的？ | [记忆系统架构](MEMORY_ARCHITECTURE.md) |

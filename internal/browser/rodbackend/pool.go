@@ -5,9 +5,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,7 +20,7 @@ import (
 	"github.com/km269/wukong/internal/browser/behavior"
 	"github.com/km269/wukong/internal/browser/stealth"
 	"github.com/km269/wukong/internal/browser/types"
-	"github.com/km269/wukong/internal/util"
+	"github.com/km269/wukong/pkg/logutil"
 	"github.com/ysmood/gson"
 )
 
@@ -192,7 +192,7 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 				Source: stealth.Script,
 			}.Call(page)
 			if err != nil {
-				fmt.Fprintf(nil, "[wukong/rod] stealth script injection warning: %v\n", err)
+				logutil.Warn("stealth script injection warning", slog.Any("error", err))
 			}
 		}
 		if p.opts.DisableDownloads {
@@ -493,10 +493,7 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 		}
 	doneCollecting:
 
-		if util.DebugEnabled {
-			fmt.Fprintf(os.Stderr, "[wukong/clone] asset collection: %d tracked, %d to fetch, %d success, %d failed\n",
-				len(allTracked), len(toFetch), successCount, failCount)
-		}
+		logutil.Info("asset collection", slog.Int("tracked", len(allTracked)), slog.Int("toFetch", len(toFetch)), slog.Int("success", successCount), slog.Int("failed", failCount))
 	}
 
 	html, err := page.HTML()
@@ -535,9 +532,7 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 		return JSON.stringify(Array.from(links));
 	}`)
 	if evalErr != nil {
-		if util.DebugEnabled {
-			fmt.Fprintf(os.Stderr, "[wukong/rod] eval links failed: %v\n", evalErr)
-		}
+		logutil.Debug("eval links failed", slog.Any("error", evalErr))
 	} else if linksVal != nil && !linksVal.Value.Nil() {
 		jsonStr := linksVal.Value.String()
 		// The Value.String() adds quotes around strings, so we need to trim them.
@@ -550,14 +545,12 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 			var links []string
 			if err := json.Unmarshal([]byte(jsonStr), &links); err == nil {
 				extractedLinks = links
-			} else if util.DebugEnabled {
-				fmt.Fprintf(os.Stderr, "[wukong/rod] failed to parse links JSON: %v (json: %s)\n", err, jsonStr[:100])
+			} else {
+				logutil.Debug("failed to parse links JSON", slog.Any("error", err), slog.String("json", jsonStr[:100]))
 			}
 		}
 	}
-	if util.DebugEnabled {
-		fmt.Fprintf(os.Stderr, "[wukong/rod] extracted %d links from page\n", len(extractedLinks))
-	}
+	logutil.Debug("extracted links from page", slog.Int("count", len(extractedLinks)))
 
 	var title string
 	titleEl, err := page.Element("title")
@@ -649,7 +642,7 @@ func (p *Pool) EnableStealth() error {
 				Source: stealth.Script,
 			}.Call(page)
 			if err != nil {
-				fmt.Fprintf(nil, "[wukong/rod] stealth script injection warning: %v\n", err)
+				logutil.Warn("stealth script injection warning", slog.Any("error", err))
 			}
 			w.page = page
 		}
@@ -696,7 +689,7 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 			Source: stealth.Script,
 		}.Call(page)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset stealth injection warning: %v\n", err)
+			logutil.Warn("DownloadAsset stealth injection warning", slog.Any("error", err))
 		}
 	}
 
@@ -719,77 +712,77 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 	// - Uses correct Sec-Fetch headers for navigation (document/navigate)
 	// - Bypasses CORS restrictions
 	// - Bypasses subresource-level download restrictions
-	fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer1 direct nav: trying for %s\n", assetURL)
+	logutil.Info("DownloadAsset layer1 direct nav: trying", slog.String("url", assetURL))
 	l1Ctx, l1Cancel := context.WithTimeout(assetCtx, 20*time.Second)
 	l1Page := page.Context(l1Ctx)
 	result, err := p.downloadAssetViaNavigation(l1Page, assetURL, referer, ua)
 	l1Cancel()
 	if err == nil && len(result.Body) > 0 {
-		fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer1 direct nav: success for %s (%d bytes)\n", assetURL, len(result.Body))
+		logutil.Info("DownloadAsset layer1 direct nav: success", slog.String("url", assetURL), slog.Int("bytes", len(result.Body)))
 		return result, nil
 	}
 	firstErr = err
-	fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer1 direct nav: failed for %s: %v\n", assetURL, err)
+	logutil.Warn("DownloadAsset layer1 direct nav: failed", slog.String("url", assetURL), slog.Any("error", err))
 
 	// Layer 2: <img> tag on Referer page (realistic browser behavior)
 	// Tries loading the image as a subresource of the Referer page, which
 	// provides the most natural request context (proper Referer, cookies, etc.)
 	if isImageURL(assetURL) && referer != "" {
-		fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer2 img-on-referer: trying for %s\n", assetURL)
+		logutil.Info("DownloadAsset layer2 img-on-referer: trying", slog.String("url", assetURL))
 		l2Ctx, l2Cancel := context.WithTimeout(assetCtx, 25*time.Second)
 		l2Page := page.Context(l2Ctx)
 		result, err2 := p.downloadAssetViaImgOnRefererPage(l2Page, assetURL, referer, ua)
 		l2Cancel()
 		if err2 == nil && len(result.Body) > 0 {
-			fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer2 img-on-referer: success for %s (%d bytes)\n", assetURL, len(result.Body))
+			logutil.Info("DownloadAsset layer2 img-on-referer: success", slog.String("url", assetURL), slog.Int("bytes", len(result.Body)))
 			return result, nil
 		}
-		fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer2 img-on-referer: failed for %s: %v\n", assetURL, err2)
+		logutil.Warn("DownloadAsset layer2 img-on-referer: failed", slog.String("url", assetURL), slog.Any("error", err2))
 	} else if !isImageURL(assetURL) {
-		fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer2 img-on-referer: skipped for non-image resource %s\n", assetURL)
+		logutil.Info("DownloadAsset layer2 img-on-referer: skipped for non-image resource", slog.String("url", assetURL))
 	} else {
-		fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer2 img-on-referer: skipped (no referer) for %s\n", assetURL)
+		logutil.Info("DownloadAsset layer2 img-on-referer: skipped (no referer)", slog.String("url", assetURL))
 	}
 
 	// Layer 3: Network.loadNetworkResource (CDP direct network load)
-	fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer3 Network.loadNetworkResource: trying for %s\n", assetURL)
+	logutil.Info("DownloadAsset layer3 Network.loadNetworkResource: trying", slog.String("url", assetURL))
 	l3Ctx, l3Cancel := context.WithTimeout(assetCtx, 20*time.Second)
 	l3Page := page.Context(l3Ctx)
 	result, err3 := p.downloadAssetViaLoadNetworkResource(l3Page, assetURL, referer, ua)
 	l3Cancel()
 	if err3 == nil && len(result.Body) > 0 {
-		fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer3 Network.loadNetworkResource: success for %s (%d bytes)\n", assetURL, len(result.Body))
+		logutil.Info("DownloadAsset layer3 Network.loadNetworkResource: success", slog.String("url", assetURL), slog.Int("bytes", len(result.Body)))
 		return result, nil
 	}
-	fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer3 Network.loadNetworkResource: failed for %s: %v\n", assetURL, err3)
+	logutil.Warn("DownloadAsset layer3 Network.loadNetworkResource: failed", slog.String("url", assetURL), slog.Any("error", err3))
 
 	// Layer 4: JS fetch
-	fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer4 fetch: trying for %s\n", assetURL)
+	logutil.Info("DownloadAsset layer4 fetch: trying", slog.String("url", assetURL))
 	l4Ctx, l4Cancel := context.WithTimeout(assetCtx, 15*time.Second)
 	l4Page := page.Context(l4Ctx)
 	result, err4 := p.downloadAssetViaFetch(l4Page, assetURL, referer)
 	l4Cancel()
 	if err4 == nil && len(result.Body) > 0 {
-		fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer4 fetch: success for %s (%d bytes)\n", assetURL, len(result.Body))
+		logutil.Info("DownloadAsset layer4 fetch: success", slog.String("url", assetURL), slog.Int("bytes", len(result.Body)))
 		return result, nil
 	}
-	fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset layer4 fetch: failed for %s: %v\n", assetURL, err4)
+	logutil.Warn("DownloadAsset layer4 fetch: failed", slog.String("url", assetURL), slog.Any("error", err4))
 
 	// Fallback: try full-resolution URL variant for media.defense.gov assets
 	// Sometimes the 300x300 thumbnail endpoint is blocked while full-resolution works
 	if strings.Contains(assetURL, "media.defense.gov") && strings.Contains(assetURL, "/300/300/0/") {
 		fullResURL := strings.Replace(assetURL, "/300/300/0/", "/-1/-1/0/", 1)
-		fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset trying full-resolution variant: %s\n", fullResURL)
+		logutil.Info("DownloadAsset trying full-resolution variant", slog.String("url", fullResURL))
 
 		l5Ctx, l5Cancel := context.WithTimeout(assetCtx, 20*time.Second)
 		l5Page := page.Context(l5Ctx)
 		result5, err5 := p.downloadAssetViaNavigation(l5Page, fullResURL, referer, ua)
 		l5Cancel()
 		if err5 == nil && len(result5.Body) > 0 {
-			fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset full-resolution variant success: %s (%d bytes)\n", fullResURL, len(result5.Body))
+			logutil.Info("DownloadAsset full-resolution variant success", slog.String("url", fullResURL), slog.Int("bytes", len(result5.Body)))
 			return result5, nil
 		}
-		fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset full-resolution variant failed: %v\n", err5)
+		logutil.Warn("DownloadAsset full-resolution variant failed", slog.Any("error", err5))
 
 		// Also try img-on-referer with full-resolution URL
 		if referer != "" {
@@ -798,10 +791,10 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 			result5b, err5b := p.downloadAssetViaImgOnRefererPage(l5bPage, fullResURL, referer, ua)
 			l5bCancel()
 			if err5b == nil && len(result5b.Body) > 0 {
-				fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset full-resolution variant (img-on-referer) success: %s (%d bytes)\n", fullResURL, len(result5b.Body))
+				logutil.Info("DownloadAsset full-resolution variant (img-on-referer) success", slog.String("url", fullResURL), slog.Int("bytes", len(result5b.Body)))
 				return result5b, nil
 			}
-			fmt.Fprintf(os.Stderr, "[wukong/rod] DownloadAsset full-resolution variant (img-on-referer) failed: %v\n", err5b)
+			logutil.Warn("DownloadAsset full-resolution variant (img-on-referer) failed", slog.Any("error", err5b))
 		}
 	}
 
@@ -1000,7 +993,7 @@ func (p *Pool) downloadAssetViaImgOnRefererPage(page *rod.Page, assetURL, refere
 	if usingCache {
 		p.refererUseMu.Lock()
 		page = cachedPage
-		fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: using cached referer page for %s\n", referer)
+		logutil.Info("img-on-referer: using cached referer page", slog.String("referer", referer))
 		defer p.refererUseMu.Unlock()
 
 		// Clean up any previously injected img elements to keep the page state clean
@@ -1031,10 +1024,10 @@ func (p *Pool) downloadAssetViaImgOnRefererPage(page *rod.Page, assetURL, refere
 		}.Call(page)
 
 		// Step 1: Navigate to the Referer page to establish proper context
-		fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: navigating to referer page: %s\n", referer)
+		logutil.Info("img-on-referer: navigating to referer page", slog.String("referer", referer))
 		navErr := page.Navigate(referer)
 		if navErr != nil {
-			fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: referer nav error: %v\n", navErr)
+			logutil.Warn("img-on-referer: referer nav error", slog.Any("error", navErr))
 			// If referer page fails to navigate, try about:blank instead
 			if err := page.Navigate("about:blank"); err != nil {
 				return nil, fmt.Errorf("navigate to about:blank fallback: %w", err)
@@ -1042,7 +1035,7 @@ func (p *Pool) downloadAssetViaImgOnRefererPage(page *rod.Page, assetURL, refere
 			page.WaitLoad()
 		} else {
 			if err := page.WaitLoad(); err != nil {
-				fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: referer waitLoad warning: %v\n", err)
+				logutil.Warn("img-on-referer: referer waitLoad warning", slog.Any("error", err))
 			}
 			// Add a small human-like delay after page load
 			time.Sleep(time.Duration(800+_randInt(0, 1200)) * time.Millisecond)
@@ -1101,10 +1094,10 @@ func (p *Pool) downloadAssetViaImgOnRefererPage(page *rod.Page, assetURL, refere
 		fetchOK := fetchResult.Value.Get("ok").Bool()
 		if fetchOK {
 			fetchType := fetchResult.Value.Get("type").String()
-			fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: fetch succeeded (type=%s), trying img element for body\n", fetchType)
+			logutil.Info("img-on-referer: fetch succeeded, trying img element for body", slog.String("type", fetchType))
 		} else {
 			fetchErrMsg := fetchResult.Value.Get("error").String()
-			fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: fetch failed: %s\n", fetchErrMsg)
+			logutil.Warn("img-on-referer: fetch failed", slog.String("error", fetchErrMsg))
 		}
 	}
 
@@ -1147,7 +1140,7 @@ func (p *Pool) downloadAssetViaImgOnRefererPage(page *rod.Page, assetURL, refere
 		if !imgOK {
 			errType := imgResult.Value.Get("errorType").String()
 			errMsg := imgResult.Value.Get("errorMessage").String()
-			fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: img.onerror: type=%s, msg=%s\n", errType, errMsg)
+			logutil.Warn("img-on-referer: img.onerror", slog.String("type", errType), slog.String("message", errMsg))
 		}
 	}
 
@@ -1613,7 +1606,7 @@ func (p *Pool) getOrCreateRefererPage(referer string, ua *antibot.UAProfile) *ro
 	if err := rp.Navigate(referer); err != nil {
 		navCancel()
 		rp.Close()
-		fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: failed to pre-load referer page: %v\n", err)
+		logutil.Warn("img-on-referer: failed to pre-load referer page", slog.Any("error", err))
 		return nil
 	}
 	rp.WaitLoad()
@@ -1622,7 +1615,7 @@ func (p *Pool) getOrCreateRefererPage(referer string, ua *antibot.UAProfile) *ro
 	rp = rp.Context(context.Background())
 
 	p.refererPages[referer] = rp
-	fmt.Fprintf(os.Stderr, "[wukong/rod]   img-on-referer: pre-loaded referer page for %s\n", referer)
+	logutil.Info("img-on-referer: pre-loaded referer page", slog.String("referer", referer))
 
 	time.Sleep(time.Duration(500+_randInt(0, 500)) * time.Millisecond)
 
@@ -1681,9 +1674,9 @@ func (p *Pool) injectRefererCookies(targetPage *rod.Page, referer string) {
 			Cookies: cookieParams,
 		}.Call(targetPage)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[wukong/rod] injectRefererCookies: failed to set cookies: %v\n", err)
+			logutil.Warn("injectRefererCookies: failed to set cookies", slog.Any("error", err))
 		} else {
-			fmt.Fprintf(os.Stderr, "[wukong/rod] injectRefererCookies: injected %d cookies from referer\n", len(cookieParams))
+			logutil.Info("injectRefererCookies: injected cookies from referer", slog.Int("count", len(cookieParams)))
 		}
 	}
 }
