@@ -80,7 +80,7 @@ func (m *Manager) SkillsDir() string {
 	if m.cfg.SkillsDir != "" {
 		return m.cfg.SkillsDir
 	}
-	return ".wukong_skills"
+	return ".wukong/skills"
 }
 
 // SetEvolutionHook sets the evolution hook for trace capture.
@@ -104,7 +104,7 @@ func (m *Manager) Initialize(ctx context.Context) error {
 
 	skillsDir := m.cfg.SkillsDir
 	if skillsDir == "" {
-		skillsDir = ".wukong_skills"
+		skillsDir = ".wukong/skills"
 	}
 
 	// Ensure skills directory exists

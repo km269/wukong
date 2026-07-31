@@ -15,12 +15,16 @@ package clone
 
 import (
 	"bytes"
+	"compress/gzip"
+	"compress/zlib"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -228,6 +232,11 @@ type EnhancedClonerOptions struct {
 	ProxyEnabled     bool
 	ProxyPool        []string
 	ProxyRotateEvery int
+
+	// ExportStructuredData enables exporting clone results as structured JSON
+	// with Markdown content. When enabled, each page's HTML is converted to
+	// Markdown and saved in a structured_export.json file.
+	ExportStructuredData bool
 }
 
 // DefaultSkipAssetExts returns the default set of file extensions that should
@@ -500,7 +509,7 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	outputDir := ec.opts.OutputDir
 	if outputDir == "" {
 		homeDir, _ := os.UserHomeDir()
-		outputDir = filepath.Join(homeDir, ".wukong_apps", "cloned", ec.host)
+		outputDir = filepath.Join(homeDir, ".wukong/apps", "cloned", ec.host)
 	}
 	ec.opts.OutputDir = outputDir
 
@@ -556,6 +565,16 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	} else {
 		ec.httpClient = &http.Client{
 			Timeout: 60 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: true,
+				},
+				ForceAttemptHTTP2: true,
+				DialContext: (&net.Dialer{
+					Timeout:   30 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+			},
 			CheckRedirect: func(req *http.Request,
 				via []*http.Request) error {
 				if len(via) >= 10 {
@@ -607,7 +626,7 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	if util.DebugEnabled {
 		logutil.Debug("Creating browser backend...")
 	}
-	browserBackend := browser.NewBackend(ec.opts.BrowserBackend, browser.BackendOptions{
+	browserBackend, err := browser.NewBackend(ec.opts.BrowserBackend, browser.BackendOptions{
 		Headless:         ec.opts.Headless,
 		Workers:          ec.opts.Workers,
 		Settle:           ec.opts.Settle,
@@ -619,6 +638,10 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 		DisableDownloads: ec.opts.DisableDownloads,
 		Proxy:            proxy,
 	})
+	if err != nil {
+		logutil.Warn("failed to initialize browser backend", slog.String("error", err.Error()))
+		return nil, fmt.Errorf("failed to initialize browser: %w", err)
+	}
 	ec.browserPool = browserBackend
 	defer browserBackend.Close()
 	logutil.Info("Browser ready. Starting crawl...")
@@ -762,6 +785,16 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	}
 	ec.resultsMu.Unlock()
 	ec.statsMu.RUnlock()
+
+	if ec.opts.ExportStructuredData {
+		exportPath, err := ExportStructuredData(
+			outputDir, ec.seedURL, ec.host, ec.results, result.Errors)
+		if err != nil {
+			logutil.Error("structured export failed", slog.Any("error", err))
+		} else {
+			logutil.Info("structured export completed", slog.String("path", exportPath))
+		}
+	}
 
 	return result, nil
 }
@@ -910,9 +943,30 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 					return result
 				}
 			}
-			result.Error = fmt.Sprintf("render: %v", err)
-			return result
 		}
+
+		// Check if it's a connection error that might be fixed with HTTP fallback
+		errStr := err.Error()
+		isConnectionError := strings.Contains(errStr, "ERR_CONNECTION_CLOSED") ||
+			strings.Contains(errStr, "ERR_CONNECTION_REFUSED") ||
+			strings.Contains(errStr, "net::ERR")
+
+		if isConnectionError {
+			logutil.Warn("browser render connection error, trying HTTP fallback",
+				slog.String("url", pageURL),
+				slog.String("error", errStr))
+
+			// Try HTTP client as fallback
+			if httpResult, httpErr := ec.fetchPageViaHTTP(ctx, pageURL, referer); httpErr == nil && httpResult != nil {
+				logutil.Info("HTTP fallback succeeded", slog.String("url", pageURL))
+				return ec.processPageContent(ctx, pageURL, depth, httpResult.HTML, inScope)
+			} else if httpErr != nil {
+				logutil.Warn("HTTP fallback also failed",
+					slog.String("url", pageURL),
+					slog.Any("error", httpErr))
+			}
+		}
+
 		result.Error = fmt.Sprintf("render: %v", err)
 		return result
 	}
@@ -1098,6 +1152,18 @@ processContent:
 	result.Title = renderResult.Title
 	result.Size = int64(len(rewrittenHTML))
 
+	if ec.opts.ExportStructuredData {
+		markdown, err := sanitize.ExtractMainContentMarkdown(rewrittenHTML)
+		if err == nil && markdown != "" {
+			const maxMarkdownLen = 50000
+			if len(markdown) > maxMarkdownLen {
+				markdown = markdown[:maxMarkdownLen] +
+					fmt.Sprintf("\n\n... (truncated, %d chars total)", len(markdown))
+			}
+			result.Markdown = markdown
+		}
+	}
+
 	ec.statsMu.RLock()
 	cloned := ec.stats.PagesCloned + 1
 	failed := ec.stats.PagesFailed
@@ -1119,8 +1185,263 @@ processContent:
 }
 
 // ---------------------------------------------------------------------------
-// Asset processing.
+// HTTP fallback for page rendering.
 // ---------------------------------------------------------------------------
+
+// httpPageResult holds the result of fetching a page via HTTP client.
+type httpPageResult struct {
+	HTML        string
+	ContentType string
+	StatusCode  int
+}
+
+// fetchPageViaHTTP fetches a page using the HTTP client as a fallback
+// when browser rendering fails. This is useful for sites that block
+// headless browsers but allow regular HTTP requests.
+func (ec *EnhancedCloner) fetchPageViaHTTP(ctx context.Context, pageURL string, referer string) (*httpPageResult, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", pageURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+
+	// Set realistic headers — DO NOT set Accept-Encoding manually,
+	// because Go's http.Client only auto-decompresses gzip/deflate when
+	// it sets the header itself. If we set it, we must decompress manually.
+	uaProfile := ec.antibot.GetRandomDesktopUA()
+	req.Header.Set("User-Agent", uaProfile.UserAgent)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Sec-Ch-Ua", uaProfile.SecChUa)
+	req.Header.Set("Sec-Ch-Ua-Mobile", uaProfile.SecChUaMobile)
+	req.Header.Set("Sec-Ch-Ua-Platform", uaProfile.SecChUaPlatform)
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+	req.Header.Set("Sec-Fetch-Site", "none")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-User", "?1")
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	if referer != "" {
+		req.Header.Set("Referer", referer)
+	}
+
+	// Add Cloudflare clearance if available
+	if ec.cfClearance != "" {
+		req.AddCookie(&http.Cookie{
+			Name:  "cf_clearance",
+			Value: ec.cfClearance,
+		})
+	}
+
+	// Use a custom transport that allows insecure TLS connections,
+	// as some .mil sites use certificates not in the standard trust store.
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			// Don't verify certs — some .mil sites use DoD certificates
+			InsecureSkipVerify: true,
+		},
+		ForceAttemptHTTP2: true,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+	}
+	client := &http.Client{
+		Timeout:   60 * time.Second,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("too many redirects")
+			}
+			return nil
+		},
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Handle response body with manual decompression if needed.
+	// We check Content-Encoding to determine if we need to decompress.
+	var reader io.Reader = resp.Body
+	contentEncoding := resp.Header.Get("Content-Encoding")
+	switch contentEncoding {
+	case "gzip":
+		gzReader, gzErr := gzip.NewReader(resp.Body)
+		if gzErr == nil {
+			defer gzReader.Close()
+			reader = gzReader
+		}
+	case "deflate":
+		zlibReader, zlibErr := zlib.NewReader(resp.Body)
+		if zlibErr == nil {
+			defer zlibReader.Close()
+			reader = zlibReader
+		}
+	}
+
+	body, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body[:min(len(body), 200)]))
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	if !strings.Contains(contentType, "text/html") && !strings.Contains(contentType, "application/xhtml") {
+		return nil, fmt.Errorf("non-HTML response: %s", contentType)
+	}
+
+	return &httpPageResult{
+		HTML:        string(body),
+		ContentType: contentType,
+		StatusCode:  resp.StatusCode,
+	}, nil
+}
+
+// processPageContent processes HTML content from HTTP fallback,
+// performing the same DOM walk, link rewriting, and saving as
+// the browser-based path.
+func (ec *EnhancedCloner) processPageContent(ctx context.Context, pageURL string, depth int, htmlStr string, inScope bool) PageResult {
+	result := PageResult{
+		URL:   pageURL,
+		Depth: depth,
+	}
+
+	// Build mirror path.
+	mirrorPath := ec.buildMirrorPath(pageURL)
+	fullPath := filepath.Join(ec.pageDir, mirrorPath)
+	localRelPath := filepath.ToSlash(mirrorPath)
+
+	// Ensure output directory exists.
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		result.Error = fmt.Sprintf("mkdir: %v", err)
+		return result
+	}
+
+	// Use the same sink-based DOM walk as the browser path.
+	var linksFound, assetsFound int
+	rewrittenHTML := ec.rewriteAndDiscover(
+		htmlStr, pageURL, localRelPath, depth, inScope,
+		&linksFound, &assetsFound)
+
+	if util.DebugEnabled {
+		logutil.Debug("HTTP fallback processed",
+			slog.String("url", pageURL),
+			slog.Int("links_found", linksFound),
+			slog.Int("assets_found", assetsFound),
+			slog.Int("html_bytes", len(rewrittenHTML)))
+	}
+
+	// Detect anti-bot patterns.
+	abReason, abDesc := ec.antibot.CheckResponse(200, nil, rewrittenHTML)
+	if abReason != antibot.ReasonNone {
+		logutil.Warn("anti-bot detected in HTTP fallback",
+			slog.String("url", pageURL),
+			slog.String("description", abDesc))
+	}
+
+	// Extract title from HTML
+	title := extractHTMLTitle(rewrittenHTML)
+	result.Title = title
+
+	// Save the HTML file.
+	saveHTML := rewrittenHTML
+	if !strings.HasSuffix(strings.ToLower(fullPath), ".html") {
+		fullPath += ".html"
+	}
+
+	if err := os.WriteFile(fullPath, []byte(saveHTML), 0644); err != nil {
+		result.Error = fmt.Sprintf("write file: %v", err)
+		return result
+	}
+
+	result.FilePath = fullPath
+	result.Title = title
+	result.Size = int64(len(saveHTML))
+
+	if ec.opts.ExportStructuredData {
+		markdown, err := sanitize.ExtractMainContentMarkdown(rewrittenHTML)
+		if err == nil && markdown != "" {
+			const maxMarkdownLen = 50000
+			if len(markdown) > maxMarkdownLen {
+				markdown = markdown[:maxMarkdownLen] +
+					fmt.Sprintf("\n\n... (truncated, %d chars total)", len(markdown))
+			}
+			result.Markdown = markdown
+		}
+	}
+
+	// Update stats.
+	ec.statsMu.Lock()
+	ec.stats.PagesCloned++
+	ec.stats.TotalBytes += result.Size
+	ec.statsMu.Unlock()
+
+	ec.statsMu.RLock()
+	cloned := ec.stats.PagesCloned
+	failed := ec.stats.PagesFailed
+	ec.statsMu.RUnlock()
+	seenCount := ec.front.seenCount()
+	pending := seenCount - cloned - failed
+	logutil.Info("clone progress (HTTP fallback)",
+		slog.Int("cloned", cloned),
+		slog.Int("pending", pending),
+		slog.Int("failed", failed),
+		slog.Int("links_found", linksFound),
+		slog.Int("assets_found", assetsFound))
+
+	// Save to incremental cache.
+	contentBytes := []byte(saveHTML)
+	ec.updateCacheEntry(pageURL, fullPath, contentBytes)
+
+	ec.front.markVisited(localRelPath)
+
+	return result
+}
+
+// buildMirrorPath creates the mirror file path for a URL.
+func (ec *EnhancedCloner) buildMirrorPath(pageURL string) string {
+	u, err := url.Parse(pageURL)
+	if err != nil {
+		return "index.html"
+	}
+
+	path := u.Path
+	if path == "" || path == "/" {
+		path = "/index"
+	}
+
+	// Remove query string and fragment, but preserve path
+	cleanURL := *u
+	cleanURL.RawQuery = ""
+	cleanURL.Fragment = ""
+
+	relPath := strings.TrimPrefix(cleanURL.Path, "/")
+	if relPath == "" {
+		relPath = "index"
+	}
+
+	// Add host prefix if not the seed host
+	host := u.Host
+	if host != ec.host {
+		relPath = filepath.Join(host, relPath)
+	}
+
+	return filepath.Join(relPath)
+}
+
+// extractHTMLTitle extracts the title from HTML content using regex.
+func extractHTMLTitle(htmlStr string) string {
+	re := regexp.MustCompile(`<title[^>]*>(.*?)</title>`)
+	matches := re.FindStringSubmatch(htmlStr)
+	if len(matches) > 1 {
+		return strings.TrimSpace(matches[1])
+	}
+	return ""
+}
 
 // saveCollectedAsset saves an asset that was already downloaded by the browser
 // during page rendering. Returns true if the asset was newly saved.
@@ -1242,6 +1563,7 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 	var body []byte
 	var contentType string
 	var isCSS bool
+	var de *DownloadError
 
 	// Try HTTP client first.
 	assetResult, httpErr := ec.assetDownloader.Download(ctx, assetURL)
@@ -1256,16 +1578,17 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 
 		// Check if we should try browser fallback.
 		// Fallback strategy:
-		//   - network errors (DNS, connection, etc.)
+		//   - DNS errors: system resolver is blocked/misconfigured; Chrome
+		//     uses DNS-over-HTTPS and can still resolve the host.
+		//   - network errors (connection refused, reset, etc.)
 		//   - 403 Forbidden: browser has better chance with proper
 		//     cookies, referer, and cache from page rendering
 		//   - other non-404 HTTP errors
 		//   - 404 is skipped because browser would also get 404
 		shouldFallback := false
-		var de *DownloadError
 		if AsDownloadError(httpErr, &de) {
 			switch de.Reason {
-			case "network":
+			case "dns", "network":
 				shouldFallback = true
 			case "http_status":
 				if de.StatusCode == 403 {
@@ -1279,7 +1602,11 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 		}
 
 		if shouldFallback && ec.browserPool != nil {
-			if util.DebugEnabled {
+			isDNSErrorFallback := AsDownloadError(httpErr, &de) && de.Reason == "dns"
+			if isDNSErrorFallback {
+				logutil.Info("HTTP DNS failed — falling back to browser (Chrome DoH) for asset",
+					slog.String("url", assetURL))
+			} else if util.DebugEnabled {
 				logutil.Debug("falling back to browser download", slog.String("url", assetURL))
 			}
 			browserResult, browserErr := ec.browserPool.DownloadAsset(ctx, assetURL, ec.seedURL)
@@ -1297,40 +1624,49 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 				}
 			}
 		}
+	}
 
-		// If both methods failed, handle anti-bot and return error.
-		if len(body) == 0 {
-			// Anti-bot check: was this asset blocked by HTTP status?
-			if AsDownloadError(httpErr, &de) && de.StatusCode > 0 {
-				reason, desc := antibot.DetectHTTP(de.StatusCode, nil)
-				if reason != antibot.ReasonNone {
-					// Already at max level? Skip useless retry and
-					// just give up on this asset instead of wasting
-					// minutes on UA rotation that doesn't help.
-					atMax := ec.antibot.Level() >= ec.antibot.Escalator.MaxLevel
-					isSameLevel := ec.antibot.Escalator.RetryCount(assetURL) > 0
-
-					if atMax && isSameLevel {
-						logutil.Warn("asset anti-bot: already at max level, skipping retry", slog.String("url", assetURL), slog.String("description", desc), slog.Int("level", int(ec.antibot.Level())))
-						ec.front.markVisited(key)
-						return httpErr
-					}
-
-					retry, delay, _, msg := ec.antibot.Escalate(
-						assetURL, reason, de.StatusCode)
-					ec.applyAntiBotLevel()
-					logutil.Warn("asset anti-bot escalation", slog.String("url", assetURL), slog.String("description", desc), slog.String("reason", msg))
-					if retry {
-						time.Sleep(delay)
-						ec.wg.Add(1)
-						ec.assetJobs <- assetJob{url: assetURL}
-						return nil
-					}
-				}
-			}
+	// If both methods failed, handle anti-bot and return error.
+	if len(body) == 0 {
+		// DNS resolution failure: anti-bot escalation is useless (the
+		// issue is DNS, not bot detection). Log and give up on this asset.
+		if AsDownloadError(httpErr, &de) && de.Reason == "dns" {
+			logutil.Warn("asset download failed: DNS resolution error (system DNS and public DNS both unreachable)",
+				slog.String("url", assetURL), slog.Any("error", httpErr))
 			ec.front.markVisited(key)
 			return httpErr
 		}
+		// Anti-bot check: was this asset blocked by HTTP status?
+		if AsDownloadError(httpErr, &de) && de.StatusCode > 0 {
+			reason, desc := antibot.DetectHTTP(de.StatusCode, nil)
+			if reason != antibot.ReasonNone {
+				// Already at max level? Skip useless retry and
+				// just give up on this asset instead of wasting
+				// minutes on UA rotation that doesn't help.
+				atMax := ec.antibot.Level() >= ec.antibot.Escalator.MaxLevel
+				isSameLevel := ec.antibot.Escalator.RetryCount(assetURL) > 0
+
+				if atMax && isSameLevel {
+					logutil.Warn("asset anti-bot: already at max level, skipping retry", slog.String("url", assetURL), slog.String("description", desc), slog.Int("level", int(ec.antibot.Level())))
+					ec.front.markVisited(key)
+					return httpErr
+				}
+
+				retry, delay, _, msg := ec.antibot.Escalate(
+					assetURL, reason, de.StatusCode)
+				ec.applyAntiBotLevel()
+				logutil.Warn("asset anti-bot escalation", slog.String("url", assetURL), slog.String("description", desc), slog.String("reason", msg))
+				if retry {
+					time.Sleep(delay)
+					ec.wg.Add(1)
+					ec.assetJobs <- assetJob{url: assetURL}
+					return nil
+				}
+			}
+		}
+		logutil.Warn("asset download failed", slog.String("url", assetURL), slog.Any("error", httpErr))
+		ec.front.markVisited(key)
+		return httpErr
 	}
 
 	// Determine local path.
@@ -1426,8 +1762,7 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 //
 // This merges the former three-pass approach (extractLinks + extractAssets
 // + rewritePageLinks) into one efficient traversal.
-func (ec *EnhancedCloner) rewriteAndDiscover(htmlStr, pageURL, pageMirrorPath string,
-	depth int, inScope bool, linksFound, assetsFound *int) string {
+func (ec *EnhancedCloner) rewriteAndDiscover(htmlStr string, pageURL string, pageMirrorPath string, depth int, inScope bool, linksFound *int, assetsFound *int) string {
 
 	doc, err := html.Parse(strings.NewReader(htmlStr))
 	if err != nil {
@@ -2479,6 +2814,9 @@ func (ec *EnhancedCloner) applyAntiBotLevel() {
 //  2. Non-critical assets (JS, media, other) are subject to AssetSameDomain.
 //  3. SkipAssetExts: skip assets whose file extension is in the skip set
 //     (media files, archives, documents). These remain as live links.
+//  4. Any URL with a recognizable file extension (documents, images,
+//     multimedia, archives) is always allowed cross-domain, because
+//     many sites host files on CDNs (e.g. media.defense.gov).
 func (ec *EnhancedCloner) wantAsset(assetURL string, kind URLKind) bool {
 	u, err := url.Parse(assetURL)
 	if err != nil {
@@ -2502,8 +2840,17 @@ func (ec *EnhancedCloner) wantAsset(assetURL string, kind URLKind) bool {
 		return true
 	}
 
+	// Any URL with a recognizable file extension (not a page type) is
+	// a direct file download — allow cross-domain for all file types:
+	// documents, images, multimedia, archives, etc.
+	// This ensures CDN-hosted files (e.g. media.defense.gov) are always
+	// downloaded, matching apps download behavior.
+	if isDirectFileURL(ext, kind) {
+		return true
+	}
+
 	// AssetSameDomain: only download same-registrable-domain assets
-	// for non-critical asset types (JS, media, other).
+	// for non-critical asset types (JS, unknown extension, etc.).
 	if ec.opts.AssetSameDomain {
 		seed, _ := url.Parse(ec.seedURL)
 		if seed != nil && !SameRegistrableDomain(seed, u) {
@@ -2541,6 +2888,33 @@ func isCriticalRenderingAsset(ext string, kind URLKind) bool {
 	}
 
 	return false
+}
+
+// isDirectFileURL reports whether the URL points to a downloadable file
+// (as opposed to a dynamic page or API endpoint). If the URL has a
+// recognizable file extension that is NOT a page type (.html, .htm,
+// .php, .asp, .aspx, .jsp), it's considered a direct file URL and
+// should be allowed cross-domain.
+//
+// This covers: documents (.pdf, .doc, .docx, ...), multimedia (.mp4,
+// .mp3, ...), archives (.zip, .tar, ...), images, and any other file
+// with a clear extension — even if the extension is not in the
+// critical-rendering-asset list.
+func isDirectFileURL(ext string, kind URLKind) bool {
+	// No extension — can't determine file type, don't allow cross-domain.
+	if ext == "" {
+		return false
+	}
+
+	// Page-type extensions — these are NOT direct file downloads.
+	switch ext {
+	case ".html", ".htm", ".php", ".asp", ".aspx", ".jsp", ".jspx":
+		return false
+	}
+
+	// Any other extension is a direct file (document, image, multimedia,
+	// archive, etc.) — allow cross-domain download.
+	return true
 }
 
 // isAssetDomainAllowed checks whether a host is in the additional allowed

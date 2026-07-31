@@ -159,7 +159,7 @@ func (ts *ComputerControllerToolSet) Name() string {
 func (ts *ComputerControllerToolSet) Init(ctx context.Context) error {
 	cacheDir := ts.cfg.Browser.CacheDir
 	if cacheDir == "" {
-		cacheDir = ".wukong_cache"
+		cacheDir = ".wukong/cache"
 	}
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		return fmt.Errorf("create cache dir: %w", err)
@@ -269,7 +269,7 @@ func (ts *ComputerControllerToolSet) fileCache(
 ) (FileCacheRsp, error) {
 	cacheDir := ts.cfg.Browser.CacheDir
 	if cacheDir == "" {
-		cacheDir = ".wukong_cache"
+		cacheDir = ".wukong/cache"
 	}
 
 	filename := req.Filename
@@ -367,7 +367,7 @@ func (ts *ComputerControllerToolSet) cacheList(
 ) (CacheListRsp, error) {
 	cacheDir := ts.cfg.Browser.CacheDir
 	if cacheDir == "" {
-		cacheDir = ".wukong_cache"
+		cacheDir = ".wukong/cache"
 	}
 
 	entries, err := os.ReadDir(cacheDir)
@@ -416,7 +416,7 @@ func (ts *ComputerControllerToolSet) cacheClear(
 ) (CacheClearRsp, error) {
 	cacheDir := ts.cfg.Browser.CacheDir
 	if cacheDir == "" {
-		cacheDir = ".wukong_cache"
+		cacheDir = ".wukong/cache"
 	}
 
 	entries, err := os.ReadDir(cacheDir)
@@ -547,9 +547,10 @@ type BrowserExtractReq struct {
 
 // BrowserExtractRsp is the output for text extraction.
 type BrowserExtractRsp struct {
-	Success bool   `json:"success"`
-	Text    string `json:"text,omitempty"`
-	Error   string `json:"error,omitempty"`
+	Success  bool   `json:"success"`
+	Text     string `json:"text,omitempty"`
+	Markdown string `json:"markdown,omitempty"`
+	Error    string `json:"error,omitempty"`
 }
 
 func (ts *ComputerControllerToolSet) browserExtract(
@@ -564,9 +565,10 @@ func (ts *ComputerControllerToolSet) browserExtract(
 	}
 
 	return BrowserExtractRsp{
-		Success: result.Success,
-		Text:    result.Text,
-		Error:   result.Error,
+		Success:  result.Success,
+		Text:     result.Text,
+		Markdown: result.Markdown,
+		Error:    result.Error,
 	}, nil
 }
 
@@ -593,7 +595,7 @@ func (ts *ComputerControllerToolSet) browserScreenshot(
 	if outputPath == "" {
 		cacheDir := ts.cfg.Browser.CacheDir
 		if cacheDir == "" {
-			cacheDir = ".wukong_cache"
+			cacheDir = ".wukong/cache"
 		}
 		// Generate a filename based on URL and timestamp
 		safeName := strings.NewReplacer(
@@ -632,24 +634,26 @@ func (ts *ComputerControllerToolSet) browserScreenshot(
 
 // SiteCloneReq is the input for cloning a website.
 type SiteCloneReq struct {
-	URL           string `json:"url" jsonschema:"description=URL of the website to clone"`
-	OutputDir     string `json:"output_dir,omitempty" jsonschema:"description=Local directory to save the cloned site"`
-	MaxPages      int    `json:"max_pages,omitempty" jsonschema:"description=Maximum number of pages to clone (0 = unlimited)"`
-	MaxDepth      int    `json:"max_depth,omitempty" jsonschema:"description=Maximum link depth to crawl (0 = unlimited)"`
-	Traversal     string `json:"traversal,omitempty" jsonschema:"description=Traversal strategy: bfs or dfs (default: bfs)"`
-	Subdomains    bool   `json:"subdomains,omitempty" jsonschema:"description=Include subdomains in crawl scope"`
-	Scroll        bool   `json:"scroll,omitempty" jsonschema:"description=Enable auto-scrolling for lazy loading"`
-	RespectRobots bool   `json:"respect_robots,omitempty" jsonschema:"description=Obey robots.txt rules (default: true)"`
-	DedupContent  bool   `json:"dedup_content,omitempty" jsonschema:"description=Enable SHA-256 content deduplication (default: true)"`
-	EnableResume  bool   `json:"enable_resume,omitempty" jsonschema:"description=Enable resume capability (default: true)"`
-	Force         bool   `json:"force,omitempty" jsonschema:"description=Delete existing clone data and start fresh"`
-	Workers       int    `json:"workers,omitempty" jsonschema:"description=Number of concurrent workers (default: 4)"`
+	URL              string `json:"url" jsonschema:"description=URL of the website to clone"`
+	OutputDir        string `json:"output_dir,omitempty" jsonschema:"description=Local directory to save the cloned site"`
+	MaxPages         int    `json:"max_pages,omitempty" jsonschema:"description=Maximum number of pages to clone (0 = unlimited)"`
+	MaxDepth         int    `json:"max_depth,omitempty" jsonschema:"description=Maximum link depth to crawl (0 = unlimited)"`
+	Traversal        string `json:"traversal,omitempty" jsonschema:"description=Traversal strategy: bfs or dfs (default: bfs)"`
+	Subdomains       bool   `json:"subdomains,omitempty" jsonschema:"description=Include subdomains in crawl scope"`
+	Scroll           bool   `json:"scroll,omitempty" jsonschema:"description=Enable auto-scrolling for lazy loading"`
+	RespectRobots    bool   `json:"respect_robots,omitempty" jsonschema:"description=Obey robots.txt rules (default: true)"`
+	DedupContent     bool   `json:"dedup_content,omitempty" jsonschema:"description=Enable SHA-256 content deduplication (default: true)"`
+	EnableResume     bool   `json:"enable_resume,omitempty" jsonschema:"description=Enable resume capability (default: true)"`
+	Force            bool   `json:"force,omitempty" jsonschema:"description=Delete existing clone data and start fresh"`
+	Workers          int    `json:"workers,omitempty" jsonschema:"description=Number of concurrent workers (default: 4)"`
+	ExportStructured bool   `json:"export_structured,omitempty" jsonschema:"description=Export results as structured JSON with Markdown content"`
 }
 
 // SiteCloneRsp is the output for cloning a website.
 type SiteCloneRsp struct {
 	Success       bool   `json:"success"`
 	OutputDir     string `json:"output_dir,omitempty"`
+	ExportPath    string `json:"export_path,omitempty"`
 	URL           string `json:"url,omitempty"`
 	PagesCloned   int    `json:"pages_cloned"`
 	AssetsSaved   int    `json:"assets_saved"`
@@ -690,6 +694,7 @@ func (ts *ComputerControllerToolSet) siteClone(
 	opts.DedupContent = req.DedupContent
 	opts.EnableResume = req.EnableResume
 	opts.Force = req.Force
+	opts.ExportStructuredData = req.ExportStructured
 	if req.Workers > 0 {
 		opts.Workers = req.Workers
 	}
@@ -714,9 +719,15 @@ func (ts *ComputerControllerToolSet) siteClone(
 		}, nil
 	}
 
+	exportPath := ""
+	if req.ExportStructured {
+		exportPath = filepath.Join(result.OutputDir, "structured_export.json")
+	}
+
 	return SiteCloneRsp{
 		Success:       true,
 		OutputDir:     result.OutputDir,
+		ExportPath:    exportPath,
 		URL:           result.SeedURL,
 		PagesCloned:   result.Pages,
 		AssetsSaved:   result.Assets,

@@ -368,13 +368,7 @@ func resolveRecipeDir(configPath, dirOverride string) string {
 		return wukongCfg.Agent.RecipeDir
 	}
 
-	// Default locations
-	candidates := []string{".wukong/recipes", ".wukong_recipes"}
-	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
-			return c
-		}
-	}
+	// Default location
 	return ".wukong/recipes"
 }
 

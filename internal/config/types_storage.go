@@ -41,10 +41,10 @@ type MemoryConfig struct {
 
 // TodoConfig defines task tracking storage settings.
 type TodoConfig struct {
-	Backend         string `mapstructure:"backend"`
-	DBPath          string `mapstructure:"db_path"`
-	EnableNativeTodo bool  `mapstructure:"enable_native_todo"`
-	EnableEnforcer  bool   `mapstructure:"enable_enforcer"`
+	Backend          string `mapstructure:"backend"`
+	DBPath           string `mapstructure:"db_path"`
+	EnableNativeTodo bool   `mapstructure:"enable_native_todo"`
+	EnableEnforcer   bool   `mapstructure:"enable_enforcer"`
 }
 
 // RecallConfig defines cross-session chat history search settings.
@@ -56,4 +56,7 @@ type RecallConfig struct {
 	MaxMessagesPerSession int    `mapstructure:"max_messages_per_session"`
 	SearchMode            string `mapstructure:"search_mode"`
 	EmbeddingModel        string `mapstructure:"embedding_model"`
+	// SearchStrategy overrides the hardcoded hybrid weights.
+	// When nil, SearchMode field is used (backward compat).
+	SearchStrategy *SearchStrategyConfig `mapstructure:"search_strategy"`
 }

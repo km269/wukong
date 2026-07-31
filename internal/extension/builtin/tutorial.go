@@ -143,7 +143,7 @@ func (ts *TutorialToolSet) startTutorial(
 	tutorial, ok := builtinTutorials[req.Topic]
 	if !ok {
 		// Try to find tutorial file on disk
-		tutorialDir := ".wukong_tutorials"
+		tutorialDir := ".wukong/tutorials"
 		filePath := filepath.Join(
 			tutorialDir, req.Topic+".md",
 		)

@@ -76,6 +76,7 @@ Built with tRPC-Agent-Go, tRPC-MCP-Go and tRPC-A2A-Go.`,
 	cmd.AddCommand(newBackupCmd())
 	cmd.AddCommand(newSystemCheckCmd())
 	cmd.AddCommand(newAppsCmd())
+	cmd.AddCommand(newSearchCmd())
 
 	return cmd
 }

@@ -2,6 +2,7 @@ package httpclient
 
 import (
 	"context"
+	"crypto/tls"
 	"log/slog"
 	"net"
 	"net/http"
@@ -12,6 +13,17 @@ import (
 
 	"github.com/km269/wukong/pkg/logutil"
 )
+
+// Public DNS servers used as fallback when the system resolver fails.
+// Many corporate/government DNS servers (e.g. DoD .mil/.gov) work with
+// these public resolvers even when the local system DNS can't resolve.
+var publicDNSFallback = []string{
+	"8.8.8.8:53", // Google Public DNS
+	"8.8.4.4:53", // Google Public DNS
+	"1.1.1.1:53", // Cloudflare DNS
+	"1.0.0.1:53", // Cloudflare DNS
+	"9.9.9.9:53", // Quad9
+}
 
 type Client struct {
 	*http.Client
@@ -68,6 +80,7 @@ type Options struct {
 	EnableRateLimit     bool
 	RateLimitPerSecond  float64
 	RateLimitBurst      int
+	InsecureSkipVerify  bool // Skip TLS certificate verification (for .mil/.gov sites)
 }
 
 func DefaultOptions() Options {
@@ -115,23 +128,109 @@ func New(opts Options) *Client {
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
+	if opts.InsecureSkipVerify {
+		transport.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: true,
+		}
+	}
+
+	// buildDialer constructs a net.Dialer with standard settings.
+	buildDialer := func() *net.Dialer {
+		return &net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
+	}
+
+	// dialWithDNSFallback splits host:port, tries to resolve the host via
+	// the system resolver, and on failure retries with public DNS servers.
+	// Time budgets are kept tight so that DNS-blocked environments (where
+	// both system DNS and public DNS are unreachable) fail fast and let
+	// the caller fall back to alternative resolution (e.g. browser DoH).
+	dialWithDNSFallback := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if opts.ForceIPv4 && network == "tcp" {
+			network = "tcp4"
+		}
+
+		dialer := buildDialer()
+		conn, err := dialer.DialContext(ctx, network, addr)
+		if err == nil {
+			return conn, nil
+		}
+
+		// Only retry DNS fallback on lookup errors.
+		if !isDNSError(err) {
+			return nil, err
+		}
+
+		host, port, splitErr := net.SplitHostPort(addr)
+		if splitErr != nil {
+			return nil, err
+		}
+
+		// Skip for IP addresses — there's nothing to resolve.
+		if net.ParseIP(host) != nil {
+			return nil, err
+		}
+
+		logutil.Warn("[httpclient] system DNS failed, trying public DNS fallback",
+			slog.String("host", host), slog.Any("error", err))
+
+		// Try public DNS servers. Only try the first 2 servers (not all 5)
+		// with a short 3s timeout each, so total fallback time is ≤6s.
+		// In DNS-blocked networks (e.g. ISP-level UDP 53 blocking), trying
+		// all 5 servers wastes 25s per request for no benefit.
+		ipFamily := "ip"
+		if opts.ForceIPv4 {
+			ipFamily = "ip4"
+		}
+
+		maxDNSServers := 2
+		if maxDNSServers > len(publicDNSFallback) {
+			maxDNSServers = len(publicDNSFallback)
+		}
+		for _, dnsAddr := range publicDNSFallback[:maxDNSServers] {
+			resolver := &net.Resolver{
+				PreferGo: true,
+				Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					d := &net.Dialer{Timeout: 3 * time.Second}
+					return d.DialContext(ctx, "udp", dnsAddr)
+				},
+			}
+
+			resolveCtx, resolveCancel := context.WithTimeout(ctx, 3*time.Second)
+			ips, lookupErr := resolver.LookupIP(resolveCtx, ipFamily, host)
+			resolveCancel()
+
+			if lookupErr != nil || len(ips) == 0 {
+				continue
+			}
+
+			for _, ip := range ips {
+				targetAddr := net.JoinHostPort(ip.String(), port)
+				dialCtx, dialCancel := context.WithTimeout(ctx, 10*time.Second)
+				conn2, dialErr := dialer.DialContext(dialCtx, network, targetAddr)
+				dialCancel()
+				if dialErr == nil {
+					logutil.Info("[httpclient] public DNS fallback resolved",
+						slog.String("host", host),
+						slog.String("ip", ip.String()),
+						slog.String("dns", dnsAddr))
+					return conn2, nil
+				}
+			}
+		}
+
+		// All fallbacks exhausted — return the original error.
+		return nil, err
+	}
+
 	var dnsCache *DNSCache
 	if opts.EnableDNSCache {
 		dnsCache = NewDNSCache(opts.DNSCacheTTL)
-		transport.DialContext = dnsCache.DialContext(&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		})
+		transport.DialContext = dnsCache.WrapDialContext(dialWithDNSFallback)
 	} else {
-		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			if opts.ForceIPv4 && network == "tcp" {
-				network = "tcp4"
-			}
-			return (&net.Dialer{
-				Timeout:   30 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext(ctx, network, addr)
-		}
+		transport.DialContext = dialWithDNSFallback
 	}
 
 	var limiter *RateLimiter
@@ -491,4 +590,24 @@ func max(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+// isDNSError reports whether err is caused by a DNS resolution failure.
+// This is used to trigger the public-DNS fallback path.
+func isDNSError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Type assertion path first — most reliable.
+	if _, ok := err.(*net.DNSError); ok {
+		return true
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "no such host") ||
+		strings.Contains(errStr, "DNS") ||
+		strings.Contains(errStr, "lookup") ||
+		strings.Contains(errStr, "Temporary failure in name resolution") ||
+		strings.Contains(errStr, "server misbehaving") ||
+		strings.Contains(errStr, "name or service not known") ||
+		strings.Contains(errStr, "nodename nor servname provided")
 }

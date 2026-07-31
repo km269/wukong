@@ -50,6 +50,7 @@ Subcommands:
 	cmd.AddCommand(newAppsDeleteCmd())
 	cmd.AddCommand(newAppsHistoryCmd())
 	cmd.AddCommand(newAppsExportCmd())
+	cmd.AddCommand(newAppsDownloadCmd())
 
 	return cmd
 }
@@ -1064,6 +1065,163 @@ Examples:
 	}
 
 	cmd.Flags().IntVar(&timeout, "timeout", 60, "Total timeout in seconds")
+
+	return cmd
+}
+
+// ==========================================================================
+// apps download
+// ==========================================================================
+
+func newAppsDownloadCmd() *cobra.Command {
+	var (
+		configPath string
+		outputDir  string
+		maxPages   int
+		maxDepth   int
+		workers    int
+		headless   bool
+		stealth    bool
+		antibot    bool
+		resume     bool
+		force      bool
+		refresh    bool
+		fileExts   []string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "download <url> [extensions...]",
+		Short: "Download files from a website",
+		Long: `Download specific file types from a website by crawling its pages.
+Supports document formats like PDF, Word, Excel, PowerPoint, and more.
+
+Default file extensions: .txt, .csv, .doc, .docx, .xls, .xlsx, .ppt, .pptx, .pdf
+
+Examples:
+  wukong apps download https://example.com
+  wukong apps download https://example.com .pdf .docx
+  wukong apps download https://example.com --file-extensions .pdf,.docx
+  wukong apps download https://example.com --file-extensions .pdf --file-extensions .docx
+  wukong apps download https://example.com --max-pages 100 --max-depth 3
+  wukong apps download https://example.com --output ./downloads`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			seedURL := strings.ReplaceAll(args[0], "`", "")
+			seedURL = strings.TrimSpace(strings.Trim(seedURL, "\"'"))
+			if seedURL == "" {
+				return fmt.Errorf("URL is required")
+			}
+
+			if len(args) > 1 {
+				for _, ext := range args[1:] {
+					ext = strings.ReplaceAll(ext, "`", "")
+					ext = strings.TrimSpace(strings.Trim(ext, "\"'"))
+					if ext != "" {
+						fileExts = append(fileExts, ext)
+					}
+				}
+			}
+			cfgPath, _ := cmd.Flags().GetString("config")
+
+			mgr, cleanup, err := createAppsManager(cfgPath)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			fmt.Printf("Downloading from: %s\n", seedURL)
+
+			opts := apps.DownloadOptions{
+				OutputDir: outputDir,
+				MaxPages:  maxPages,
+				MaxDepth:  maxDepth,
+				Workers:   workers,
+				Headless:  headless,
+				Stealth:   stealth,
+				Antibot:   antibot,
+				Resume:    resume,
+				Force:     force,
+				Refresh:   refresh,
+			}
+
+			if len(fileExts) > 0 {
+				extMap := make(map[string]bool)
+				for _, ext := range fileExts {
+					ext = strings.TrimSpace(ext)
+					ext = strings.Trim(ext, "`\"'")
+					if ext == "" {
+						continue
+					}
+					parts := strings.Split(ext, ",")
+					for _, part := range parts {
+						part = strings.TrimSpace(part)
+						if part == "" {
+							continue
+						}
+						if !strings.HasPrefix(part, ".") {
+							part = "." + part
+						}
+						extMap[strings.ToLower(part)] = true
+					}
+				}
+				opts.FileExts = extMap
+			}
+
+			result, err := mgr.DownloadFiles(cmd.Context(), seedURL, opts)
+			if err != nil {
+				return fmt.Errorf("download: %w", err)
+			}
+
+			fmt.Printf("\nDownload complete!\n")
+			fmt.Printf("  Files downloaded: %d\n", result.FilesDownloaded)
+			fmt.Printf("  Files skipped:    %d\n", result.FilesSkipped)
+			fmt.Printf("  Files failed:     %d\n", result.FilesFailed)
+			fmt.Printf("  Total size:       %s\n", formatSize(result.TotalSize))
+			fmt.Printf("  Duration:         %s\n", result.Duration)
+			fmt.Printf("  Output directory: %s\n", result.OutputDir)
+
+			if result.AntibotStats != "" {
+				fmt.Printf("\n  Anti-bot: %s\n", result.AntibotStats)
+			}
+
+			if result.FilesDownloaded > 0 {
+				fmt.Printf("\nDownloaded files:\n")
+				for _, f := range result.Files {
+					fmt.Printf("  - %s (%s)\n", f.FileName, formatSize(f.Size))
+				}
+			}
+
+			if len(result.Errors) > 0 {
+				fmt.Printf("\nErrors (%d):\n", len(result.Errors))
+				showCount := 10
+				if len(result.Errors) < showCount {
+					showCount = len(result.Errors)
+				}
+				for _, e := range result.Errors[:showCount] {
+					fmt.Printf("  - %s\n", e)
+				}
+				if len(result.Errors) > showCount {
+					fmt.Printf("  ... and %d more errors\n", len(result.Errors)-showCount)
+				}
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to config file")
+	cmd.Flags().StringVarP(&outputDir, "output", "o", "", "Output directory for downloaded files")
+	cmd.Flags().IntVarP(&maxPages, "max-pages", "p", 50, "Maximum number of pages to crawl")
+	cmd.Flags().IntVarP(&maxDepth, "max-depth", "d", 0, "Maximum link depth to follow (0 = unlimited)")
+	cmd.Flags().IntVarP(&workers, "workers", "w", 4, "Number of concurrent download workers")
+	cmd.Flags().BoolVar(&headless, "headless", true, "Run browser in headless mode")
+	cmd.Flags().BoolVar(&stealth, "stealth", true, "Enable stealth anti-detection mode")
+	cmd.Flags().BoolVar(&antibot, "antibot", true, "Enable anti-bot detection and bypass")
+	cmd.Flags().BoolVar(&resume, "resume", true, "Resume from previous download state")
+	cmd.Flags().BoolVar(&force, "force", false, "Force restart (delete existing downloads)")
+	cmd.Flags().BoolVar(&refresh, "refresh", false, "Refresh already downloaded files")
+	cmd.Flags().StringArrayVar(&fileExts, "file-extensions", nil,
+		"File extensions to download (repeatable or comma-separated). Default: .txt .csv .doc .docx .xls .xlsx .ppt .pptx .pdf")
 
 	return cmd
 }

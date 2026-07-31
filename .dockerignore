@@ -4,8 +4,6 @@
 *.db-shm
 *.db-wal
 .wukong
-.wukong_apps
-.wukong_cache
 node_modules
 *.tmp
 *.test

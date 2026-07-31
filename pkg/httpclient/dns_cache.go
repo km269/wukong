@@ -79,6 +79,40 @@ func (c *DNSCache) DialContext(dialer *net.Dialer) func(ctx context.Context, net
 	}
 }
 
+// WrapDialContext wraps an existing DialContext function with DNS caching.
+// It first checks the cache for a resolved IP, then falls back to the
+// underlying dial (which may itself do DNS resolution with fallback logic).
+func (c *DNSCache) WrapDialContext(underlying func(ctx context.Context, network, addr string) (net.Conn, error)) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return underlying(ctx, network, addr)
+		}
+
+		// If the host is already an IP, just dial through.
+		if net.ParseIP(host) != nil {
+			return underlying(ctx, network, addr)
+		}
+
+		// Try a cached lookup first — if we have a recent result, use it
+		// directly with the underlying dialer via IP.
+		if addrs, lookupErr := c.Lookup(host); lookupErr == nil && len(addrs) > 0 {
+			resolvedAddr := net.JoinHostPort(addrs[0], port)
+			if conn, dialErr := underlying(ctx, network, resolvedAddr); dialErr == nil {
+				return conn, nil
+			}
+			// Cached IP didn't work — invalidate and fall back below.
+			c.mu.Lock()
+			delete(c.entries, host)
+			c.mu.Unlock()
+		}
+
+		// Otherwise let the underlying dialer handle the full resolve + dial
+		// (which includes public DNS fallback on failure).
+		return underlying(ctx, network, addr)
+	}
+}
+
 func (c *DNSCache) Cleanup() {
 	c.mu.Lock()
 	defer c.mu.Unlock()

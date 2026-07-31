@@ -354,7 +354,7 @@ func (e *EvolutionEngine) readSkillContent(
 ) (string, string, error) {
 	skillsDir := e.wukongCfg.Skill.SkillsDir
 	if skillsDir == "" {
-		skillsDir = ".wukong_skills"
+		skillsDir = ".wukong/skills"
 	}
 
 	skillDir := filepath.Join(skillsDir, skillName)

@@ -1,11 +1,14 @@
 package browser
 
 import (
+	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/km269/wukong/internal/browser/rodbackend"
 	"github.com/km269/wukong/internal/browser/types"
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/pkg/logutil"
 )
 
 var globalProxyPool *SmartProxyPool
@@ -39,10 +42,10 @@ type BackendOptions struct {
 	Proxy            string // Proxy URL (http://user:pass@host:port or socks5://...)
 }
 
-func NewBackend(backendType BackendType, opts BackendOptions) types.BrowserBackend {
+func NewBackend(backendType BackendType, opts BackendOptions) (types.BrowserBackend, error) {
 	switch backendType {
 	case BackendRod:
-		rodBackend := rodbackend.New(rodbackend.Options{
+		rodBackend, err := rodbackend.New(rodbackend.Options{
 			Headless:         opts.Headless,
 			Workers:          opts.Workers,
 			Settle:           opts.Settle,
@@ -55,7 +58,24 @@ func NewBackend(backendType BackendType, opts BackendOptions) types.BrowserBacke
 			DisableDownloads: opts.DisableDownloads,
 			Proxy:            opts.Proxy,
 		})
-		return rodBackend
+		if err != nil {
+			logutil.Warn("rod backend failed, falling back to chromedp",
+				slog.String("error", err.Error()))
+			// Fallback to chromedp if rod fails
+			return New(Options{
+				Headless:         opts.Headless,
+				Workers:          opts.Workers,
+				Settle:           opts.Settle,
+				RenderTimeout:    opts.RenderTimeout,
+				Scroll:           opts.Scroll,
+				ChromeBin:        opts.ChromeBin,
+				ControlURL:       opts.ControlURL,
+				Stealth:          opts.Stealth,
+				DisableDownloads: opts.DisableDownloads,
+				Proxy:            opts.Proxy,
+			}), nil
+		}
+		return rodBackend, nil
 	default:
 		return New(Options{
 			Headless:         opts.Headless,
@@ -68,13 +88,13 @@ func NewBackend(backendType BackendType, opts BackendOptions) types.BrowserBacke
 			Stealth:          opts.Stealth,
 			DisableDownloads: opts.DisableDownloads,
 			Proxy:            opts.Proxy,
-		})
+		}), nil
 	}
 }
 
-func NewBackendFromConfig(cfg *config.BrowserConfig) types.BrowserBackend {
+func NewBackendFromConfig(cfg *config.BrowserConfig) (types.BrowserBackend, error) {
 	if cfg == nil {
-		return nil
+		return nil, fmt.Errorf("browser config is nil")
 	}
 
 	settleTimeout := 2 * time.Second

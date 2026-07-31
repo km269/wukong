@@ -577,7 +577,7 @@ func runEvolutionLog(cmd *cobra.Command, args []string) error {
 
 	skillDir := wukongCfg.Skill.SkillsDir
 	if skillDir == "" {
-		skillDir = ".wukong_skills"
+		skillDir = ".wukong/skills"
 	}
 
 	logPath := filepath.Join(skillDir, skillName, "log.json")

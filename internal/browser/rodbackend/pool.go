@@ -73,7 +73,7 @@ type renderResultOrErr struct {
 	Err    error
 }
 
-func New(opts Options) *Pool {
+func New(opts Options) (*Pool, error) {
 	if opts.Workers <= 0 {
 		opts.Workers = 4
 	}
@@ -91,6 +91,8 @@ func New(opts Options) *Pool {
 		l := launcher.New()
 		if opts.ChromeBin != "" {
 			l = l.Bin(opts.ChromeBin)
+		} else if chromePath := FindChromePath(); chromePath != "" {
+			l = l.Bin(chromePath)
 		}
 		// Use new headless mode (Chrome 112+) which behaves much closer
 		// to a real browser and is less likely to trigger detection.
@@ -102,6 +104,10 @@ func New(opts Options) *Pool {
 		l = l.Set("start-maximized", "")
 		l = l.Set("disable-ipv6", "")
 		l = l.Set("disable-gpu", "")
+		l = l.Set("disable-http-cache", "")
+		// Ignore certificate errors — many .mil/.gov sites use
+		// DoD certificates not in the standard trust store.
+		l = l.Set("ignore-certificate-errors", "")
 		// Disable Safe Browsing to prevent ERR_BLOCKED_BY_CLIENT
 		// when navigating directly to binary resources (images, etc.).
 		l = l.Set("safebrowsing-disable-download-protection", "")
@@ -114,8 +120,14 @@ func New(opts Options) *Pool {
 		l = l.Set("disable-breakpad", "")
 		l = l.Set("disable-client-side-phishing-detection", "")
 		l = l.Set("download-default-directory", "")
+		// Important: Use a unique temporary user data directory to avoid conflicts
+		// with existing Chrome instances. This is the most common cause of
+		// "Failed to get the debug url" errors.
 		if opts.ProfileDir != "" {
 			l = l.UserDataDir(opts.ProfileDir)
+		} else {
+			// Let rod create a temp dir automatically, which handles isolation
+			l = l.UserDataDir("")
 		}
 		if needNoSandbox() {
 			l = l.NoSandbox(true)
@@ -124,7 +136,36 @@ func New(opts Options) *Pool {
 		if opts.Proxy != "" {
 			l = l.Proxy(opts.Proxy)
 		}
-		controlURL = l.MustLaunch()
+		var err error
+		// Retry launch up to 3 times with short delays. The most common failure
+		// is "Failed to get the debug url" which happens when Chrome is slow to
+		// start (e.g. many existing Chrome processes, system under load) or when
+		// a previous rod instance left a stale lock file in the temp user-data-dir.
+		maxLaunchRetries := 3
+		for attempt := 1; attempt <= maxLaunchRetries; attempt++ {
+			controlURL, err = l.Launch()
+			if err == nil {
+				break
+			}
+			if attempt < maxLaunchRetries {
+				logutil.Warn("rod launch attempt failed, retrying",
+					slog.Int("attempt", attempt),
+					slog.Int("max", maxLaunchRetries),
+					slog.Any("error", err))
+				time.Sleep(2 * time.Second)
+			}
+		}
+		if err != nil {
+			// Provide helpful diagnostic information
+			chromePath := opts.ChromeBin
+			if chromePath == "" {
+				chromePath = FindChromePath()
+			}
+			if chromePath == "" {
+				return nil, fmt.Errorf("failed to launch Chrome via rod: %w. No Chrome/Chromium found on the system. Please install Chrome or set CHROME_PATH environment variable", err)
+			}
+			return nil, fmt.Errorf("failed to launch Chrome via rod (path: %s): %w", chromePath, err)
+		}
 	}
 
 	browserInstance := rod.New().ControlURL(controlURL).MustConnect()
@@ -148,7 +189,7 @@ func New(opts Options) *Pool {
 		go p.workerLoop(p.workers[i])
 	}
 
-	return p
+	return p, nil
 }
 
 func (p *Pool) getCurrentUA() *antibot.UAProfile {
@@ -314,9 +355,22 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 	if p.opts.Scroll {
 		page.Eval(`
 			(async () => {
-				for (let i = 0; i < 5; i++) {
-					window.scrollBy(0, window.innerHeight);
-					await new Promise(r => setTimeout(r, 500 + Math.random() * 300));
+				const scrollHeight = document.documentElement.scrollHeight;
+				const viewportHeight = window.innerHeight;
+				let currentScroll = 0;
+				const maxIterations = 20;
+				let iterations = 0;
+				
+				while (currentScroll < scrollHeight - viewportHeight && iterations < maxIterations) {
+					window.scrollBy(0, viewportHeight);
+					currentScroll += viewportHeight;
+					iterations++;
+					await new Promise(r => setTimeout(r, 300 + Math.random() * 500));
+				}
+				
+				if (currentScroll < scrollHeight - viewportHeight) {
+					window.scrollTo(0, scrollHeight);
+					await new Promise(r => setTimeout(r, 500));
 				}
 			})()
 		`)

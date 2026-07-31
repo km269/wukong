@@ -100,7 +100,7 @@ type previewServerEntry struct {
 func NewManager(cfg *config.AppsConfig) (*Manager, error) {
 	appDir := cfg.AppDir
 	if appDir == "" {
-		appDir = ".wukong_apps"
+		appDir = ".wukong/apps"
 	}
 
 	// 确保目录存在
@@ -544,6 +544,124 @@ type CloneResult struct {
 	DedupBytesSaved   int64
 	AntibotDetections int
 	AntibotStats      string
+}
+
+// DownloadOptions defines options for file downloading.
+type DownloadOptions struct {
+	OutputDir string
+	MaxPages  int
+	MaxDepth  int
+	Workers   int
+	Headless  bool
+	Stealth   bool
+	Antibot   bool
+	Resume    bool
+	Force     bool
+	Refresh   bool
+	FileExts  map[string]bool
+}
+
+// DownloadResult wraps the download result for CLI output.
+type DownloadResult struct {
+	Success         bool
+	SeedURL         string
+	Host            string
+	OutputDir       string
+	FilesDownloaded int
+	FilesSkipped    int
+	FilesFailed     int
+	TotalSize       int64
+	Duration        time.Duration
+	StartTime       time.Time
+	EndTime         time.Time
+	Files           []DownloadedFile
+	Errors          []string
+	AntibotStats    string
+}
+
+// DownloadedFile represents a single downloaded file for CLI display.
+type DownloadedFile struct {
+	URL         string
+	FilePath    string
+	FileName    string
+	Size        int64
+	ContentType string
+	Extension   string
+	Depth       int
+	Error       string
+}
+
+// DownloadFiles downloads files from a website by crawling its pages.
+func (m *Manager) DownloadFiles(ctx context.Context, seedURL string, opts DownloadOptions) (*DownloadResult, error) {
+	// Set default output directory if not specified
+	if opts.OutputDir == "" {
+		host := extractHost(seedURL)
+		opts.OutputDir = filepath.Join(m.appDir, "downloads", host)
+	}
+
+	// Build downloader options
+	dlOpts := clone.DownloaderOptions{
+		OutputDir: opts.OutputDir,
+		MaxPages:  opts.MaxPages,
+		MaxDepth:  opts.MaxDepth,
+		Workers:   opts.Workers,
+		Headless:  opts.Headless,
+		Stealth:   opts.Stealth,
+		Antibot:   opts.Antibot,
+		Resume:    opts.Resume,
+		Force:     opts.Force,
+		Refresh:   opts.Refresh,
+	}
+
+	if opts.FileExts != nil {
+		dlOpts.FileExts = opts.FileExts
+	}
+
+	// Create downloader
+	downloader := clone.NewDownloader(dlOpts)
+
+	// Execute download
+	dlResult, err := downloader.Download(ctx, seedURL)
+	if err != nil {
+		return nil, fmt.Errorf("download files: %w", err)
+	}
+
+	// Convert result
+	result := &DownloadResult{
+		Success:         dlResult.Success,
+		SeedURL:         dlResult.SeedURL,
+		Host:            dlResult.Host,
+		OutputDir:       dlResult.OutputDir,
+		FilesDownloaded: dlResult.FilesDownloaded,
+		FilesSkipped:    dlResult.FilesSkipped,
+		FilesFailed:     dlResult.FilesFailed,
+		TotalSize:       dlResult.TotalSize,
+		Duration:        dlResult.Duration,
+		StartTime:       dlResult.StartTime,
+		EndTime:         dlResult.EndTime,
+		AntibotStats:    dlResult.AntibotStats,
+	}
+
+	// Convert downloaded files
+	result.Files = make([]DownloadedFile, len(dlResult.Files))
+	for i, f := range dlResult.Files {
+		result.Files[i] = DownloadedFile{
+			URL:         f.URL,
+			FilePath:    f.FilePath,
+			FileName:    f.FileName,
+			Size:        f.Size,
+			ContentType: f.ContentType,
+			Extension:   f.Extension,
+			Depth:       f.Depth,
+			Error:       f.Error,
+		}
+	}
+
+	// Copy errors
+	result.Errors = make([]string, len(dlResult.Errors))
+	copy(result.Errors, dlResult.Errors)
+
+	return result, nil
 }
 
 // extractHost extracts the hostname from a URL.

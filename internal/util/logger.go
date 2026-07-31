@@ -4,6 +4,8 @@ package util
 import (
 	"log/slog"
 	"os"
+
+	"github.com/km269/wukong/pkg/logutil"
 )
 
 var (
@@ -30,6 +32,7 @@ func SetDebugMode() {
 		Level: slog.LevelDebug,
 	}))
 	slog.SetDefault(Logger)
+	logutil.SetLevel(slog.LevelDebug)
 }
 
 // SetQuietMode switches the logger to warn level for minimal output.
@@ -39,6 +42,7 @@ func SetQuietMode() {
 		Level: slog.LevelWarn,
 	}))
 	slog.SetDefault(Logger)
+	logutil.SetLevel(slog.LevelWarn)
 }
 
 // SetLogLevel sets the global logger to the specified level.

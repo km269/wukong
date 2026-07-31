@@ -14,6 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/search"
 	"github.com/km269/wukong/internal/util"
 )
 
@@ -47,6 +48,7 @@ type Store struct {
 	pool     *util.DatabasePool
 	cfg      *config.RecallConfig
 	embedder Embedder
+	genome   search.SearchGenome // search strategy parameters
 }
 
 // NewStore creates a new recall store using a shared database pool.
@@ -64,7 +66,7 @@ func NewStore(
 		return nil, fmt.Errorf("get db: %w", err)
 	}
 
-	s := &Store{db: db, pool: pool, cfg: cfg}
+	s := &Store{db: db, pool: pool, cfg: cfg, genome: genomeFromConfig(cfg)}
 	if err := s.initSchema(); err != nil {
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
@@ -82,11 +84,23 @@ func NewStoreWithDB(
 	cfg := &config.RecallConfig{
 		MaxMessagesPerSession: maxMessagesPerSession,
 	}
-	s := &Store{db: db, pool: nil, cfg: cfg}
+	s := &Store{db: db, pool: nil, cfg: cfg, genome: search.DefaultGenome()}
 	if err := s.initSchema(); err != nil {
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 	return s, nil
+}
+
+// SetGenome configures the search strategy parameters. Call this
+// to override the default 70/30 hybrid weights with tuned values
+// from config or auto-tuning.
+func (s *Store) SetGenome(g search.SearchGenome) {
+	s.genome = g.Normalized()
+}
+
+// Genome returns the current search strategy parameters.
+func (s *Store) Genome() search.SearchGenome {
+	return s.genome
 }
 
 // StoreMessage persists a chat message for future recall.
@@ -423,12 +437,13 @@ func (s *Store) SetEmbedder(e Embedder) {
 // HasHybridSearch returns true when both hybrid mode is configured
 // and an embedder is available.
 func (s *Store) HasHybridSearch() bool {
-	return s.cfg.SearchMode == "hybrid" && s.embedder != nil
+	return s.genome.IsHybrid() && s.embedder != nil
 }
 
 // SearchHybrid performs a hybrid search: FTS5 retrieval followed
 // by embedding-based semantic re-ranking. Returns the top-K results
-// ranked by combined score (BM25 + cosine similarity).
+// ranked by combined score (DenseWeight × cosine + TextWeight × BM25).
+// Weights and pool size are controlled by the Store's SearchGenome.
 func (s *Store) SearchHybrid(
 	ctx context.Context,
 	query, userID string, limit int,
@@ -437,9 +452,11 @@ func (s *Store) SearchHybrid(
 		return s.Search(query, userID, limit)
 	}
 
+	g := s.genome.Normalized()
+	poolSize := g.EffectivePoolSize()
+
 	// Step 1: Retrieve candidates via FTS5 (wider pool for re-ranking)
-	const fts5Pool = 50
-	ftsResults, err := s.Search(query, userID, fts5Pool)
+	ftsResults, err := s.Search(query, userID, poolSize)
 	if err != nil {
 		return nil, fmt.Errorf("fts5 retrieval: %w", err)
 	}
@@ -480,8 +497,9 @@ func (s *Store) SearchHybrid(
 			continue
 		}
 		sim := cosineSimilarity(queryVec, candVecs[0])
-		// Combined score: 70% semantic + 30% BM25 (normalized)
-		combined := sim*0.7 + (1.0/float64(i+1))*0.3
+		// Combined score: genome-weighted semantic + BM25.
+		// BM25 rank score uses reciprocal rank (1/(i+1)).
+		combined := sim*g.DenseWeight + (1.0/float64(i+1))*g.TextWeight
 		r.Score = combined
 		hybrid = append(hybrid, scoredResult{result: r, score: combined})
 	}
@@ -630,4 +648,52 @@ func calculateScore(query, content string) float64 {
 		score = 1.0
 	}
 	return score
+}
+
+// genomeFromConfig builds a SearchGenome from RecallConfig.
+// When SearchStrategy is nil, falls back to SearchMode field for
+// backward compatibility (hybrid → 70/30, lexical → 100/0, etc.).
+func genomeFromConfig(cfg *config.RecallConfig) search.SearchGenome {
+	if cfg == nil {
+		return search.DefaultGenome()
+	}
+	if cfg.SearchStrategy != nil {
+		return search.SearchGenome{
+			RecallMode:          cfg.SearchStrategy.RecallMode,
+			DenseWeight:         cfg.SearchStrategy.DenseWeight,
+			TextWeight:          cfg.SearchStrategy.TextWeight,
+			KeywordMatchPercent: cfg.SearchStrategy.KeywordMatchPercent,
+			MaxRetrievedNum:     cfg.SearchStrategy.MaxRetrievedNum,
+			FTS5PoolSize:        cfg.SearchStrategy.FTS5PoolSize,
+		}.Normalized()
+	}
+	// Backward compat: derive from SearchMode string.
+	switch cfg.SearchMode {
+	case "lexical", "fts5":
+		return search.SearchGenome{
+			RecallMode:  search.RecallModeLexical,
+			DenseWeight: 0, TextWeight: 1,
+			MaxRetrievedNum: cfg.MaxResults,
+			FTS5PoolSize:    50,
+		}
+	case "vector", "semantic":
+		return search.SearchGenome{
+			RecallMode:  search.RecallModeVector,
+			DenseWeight: 1, TextWeight: 0,
+			MaxRetrievedNum: cfg.MaxResults,
+			FTS5PoolSize:    50,
+		}
+	default: // "hybrid" or empty
+		maxR := cfg.MaxResults
+		if maxR <= 0 {
+			maxR = 10
+		}
+		return search.SearchGenome{
+			RecallMode:      search.RecallModeHybrid,
+			DenseWeight:     0.7,
+			TextWeight:      0.3,
+			MaxRetrievedNum: maxR,
+			FTS5PoolSize:    50,
+		}
+	}
 }

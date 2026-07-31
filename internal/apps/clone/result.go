@@ -84,6 +84,9 @@ type PageResult struct {
 
 	// FromCache indicates whether this page was served from cache.
 	FromCache bool
+
+	// Markdown is the extracted Markdown content (if generated).
+	Markdown string
 }
 
 // AssetResult holds the result of downloading a single asset.
@@ -141,4 +144,27 @@ type CloneProgress struct {
 
 	// Percentage is the estimated completion percentage (0-100).
 	Percentage float64
+}
+
+// StructuredPageData represents a single page in structured export format.
+type StructuredPageData struct {
+	URL      string `json:"url"`
+	Title    string `json:"title"`
+	Markdown string `json:"markdown,omitempty"`
+	HTMLPath string `json:"html_path,omitempty"`
+	Depth    int    `json:"depth"`
+	Links    int    `json:"links_count"`
+	Assets   int    `json:"assets_count"`
+	Error    string `json:"error,omitempty"`
+}
+
+// StructuredExportData represents the full structured export.
+type StructuredExportData struct {
+	SeedURL    string               `json:"seed_url"`
+	Host       string               `json:"host"`
+	OutputDir  string               `json:"output_dir"`
+	ExportedAt string               `json:"exported_at"`
+	TotalPages int                  `json:"total_pages"`
+	Pages      []StructuredPageData `json:"pages"`
+	Errors     []string             `json:"errors,omitempty"`
 }

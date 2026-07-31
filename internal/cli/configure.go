@@ -231,7 +231,7 @@ func defaultConfig() *config.WukongConfig {
 			Enabled:         true,
 			BrowserType:     "chromium",
 			Headless:        true,
-			CacheDir:        ".wukong_cache",
+			CacheDir:        ".wukong/cache",
 			MaxDownloadSize: 104857600, // 100MB
 			Timeout:         60 * time.Second,
 		},
@@ -244,7 +244,7 @@ func defaultConfig() *config.WukongConfig {
 		},
 		Visualiser: config.VisualiserConfig{
 			Enabled:   true,
-			OutputDir: ".wukong_visuals",
+			OutputDir: ".wukong/visuals",
 			MaxWidth:  1200,
 			MaxHeight: 800,
 		},
@@ -254,7 +254,7 @@ func defaultConfig() *config.WukongConfig {
 		},
 		TopOfMind: config.TopOfMindConfig{
 			Enabled:         true,
-			InstructionFile: ".wukong_instructions.md",
+			InstructionFile: ".wukong/instructions.md",
 			MaxLength:       2000,
 		},
 		CodeMode: config.CodeModeConfig{
@@ -264,11 +264,11 @@ func defaultConfig() *config.WukongConfig {
 		},
 		Apps: config.AppsConfig{
 			Enabled: true,
-			AppDir:  ".wukong_apps",
+			AppDir:  ".wukong/apps",
 		},
 		Summon: config.SummonConfig{
 			Enabled:       true,
-			SkillsDir:     ".wukong_skills",
+			SkillsDir:     ".wukong/skills",
 			MaxConcurrent: 5,
 		},
 	}

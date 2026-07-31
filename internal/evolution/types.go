@@ -131,7 +131,7 @@ type SkillVersion struct {
 	// VersionNumber is the sequential version number (1, 2, 3...).
 	VersionNumber int `json:"version_number"`
 	// BackupPath is the absolute path to the backup file
-	// (e.g., ".wukong_agent_skills/my-skill/SKILL.v003.md").
+	// (e.g., ".wukong/agent_skills/my-skill/SKILL.v003.md").
 	BackupPath string `json:"backup_path"`
 	// FileHash is the SHA-256 hex digest of the backup file.
 	FileHash string `json:"file_hash"`

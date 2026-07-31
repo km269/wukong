@@ -10,6 +10,7 @@ import (
 
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/recall"
+	"github.com/km269/wukong/internal/search"
 
 	"github.com/liliang-cn/cortexdb/v2/pkg/core"
 	cortexdb "github.com/liliang-cn/cortexdb/v2/pkg/cortexdb"
@@ -26,6 +27,7 @@ type CortexStore struct {
 	db          *cortexdb.DB // real CortexDB (HNSW + FTS5)
 	lexical     *lexicalStore
 	vectorCache *VectorCache
+	genome      search.SearchGenome // search strategy parameters
 }
 
 // NewStore creates a CortexStore. If embedding is configured, opens
@@ -42,6 +44,7 @@ func NewStore(
 	cs := &CortexStore{
 		cfg:      cfg,
 		embedder: embedder,
+		genome:   cortexGenomeFromConfig(cfg),
 	}
 
 	// Create lexical store using the shared DB connection to avoid
@@ -148,20 +151,39 @@ func (s *CortexStore) storeCortexVector(msg recall.ChatMessage) error {
 }
 
 // Search uses CortexDB HNSW vector search when available, FTS5 otherwise.
+// The SearchGenome controls mode selection, TopK, and hybrid weighting.
 func (s *CortexStore) Search(
 	query, userID string, limit int,
 ) ([]recall.SearchResult, error) {
 	if limit <= 0 {
-		limit = s.cfg.MaxResults
-	}
-	if limit <= 0 {
-		limit = 10
+		limit = s.genome.EffectiveTopK()
 	}
 
-	if s.db != nil && s.embedder != nil {
+	g := s.genome.Normalized()
+	switch {
+	case g.IsLexicalOnly():
+		return s.lexical.search(query, userID, limit)
+	case g.IsVectorOnly() && s.db != nil && s.embedder != nil:
 		return s.searchCortex(query, userID, limit)
+	case g.IsHybrid() && s.db != nil && s.embedder != nil:
+		return s.searchHybridCortex(query, userID, limit)
+	default:
+		// Fallback: vector if available, else lexical.
+		if s.db != nil && s.embedder != nil {
+			return s.searchCortex(query, userID, limit)
+		}
+		return s.lexical.search(query, userID, limit)
 	}
-	return s.lexical.search(query, userID, limit)
+}
+
+// SetGenome configures the search strategy parameters.
+func (s *CortexStore) SetGenome(g search.SearchGenome) {
+	s.genome = g.Normalized()
+}
+
+// Genome returns the current search strategy parameters.
+func (s *CortexStore) Genome() search.SearchGenome {
+	return s.genome
 }
 
 func (s *CortexStore) searchCortex(
@@ -220,6 +242,108 @@ func (s *CortexStore) searchCortex(
 		})
 	}
 	return out, nil
+}
+
+// searchHybridCortex performs hybrid search: FTS5 lexical retrieval
+// combined with HNSW vector search. Results are merged and re-ranked
+// using DenseWeight (vector) + TextWeight (lexical) from the genome.
+func (s *CortexStore) searchHybridCortex(
+	query, userID string, limit int,
+) ([]recall.SearchResult, error) {
+	g := s.genome.Normalized()
+	poolSize := g.EffectivePoolSize()
+
+	// Step 1: FTS5 lexical retrieval (wider pool).
+	lexResults, _ := s.lexical.search(query, userID, poolSize)
+
+	// Step 2: HNSW vector search (wider pool).
+	bgCtx, cancel := context.WithTimeout(
+		context.Background(), 30*time.Second,
+	)
+	defer cancel()
+
+	var queryVec []float32
+	var err error
+	if s.vectorCache != nil {
+		queryVec, err = s.vectorCache.GetOrComputeQueryVector(
+			bgCtx, query,
+			func(ctx context.Context, texts []string) ([][]float64, error) {
+				return s.embedder.Embed(ctx, texts)
+			},
+		)
+	} else {
+		vecs, e := s.embedder.Embed(bgCtx, []string{query})
+		if e == nil && len(vecs) > 0 {
+			queryVec = vecToFloat32(vecs[0])
+		}
+		err = e
+	}
+
+	var vecResults []recall.SearchResult
+	if err == nil && queryVec != nil {
+		rawResults, vErr := s.db.Vector().Search(
+			bgCtx, queryVec,
+			core.SearchOptions{TopK: poolSize},
+		)
+		if vErr == nil {
+			for _, r := range rawResults {
+				vecResults = append(vecResults, recall.SearchResult{
+					Score:   r.Score,
+					Preview: truncatePreview(r.Content, 200),
+				})
+			}
+		}
+	}
+
+	// Step 3: Merge and re-rank using genome weights.
+	merged := make(map[string]*recall.SearchResult)
+	// Lexical results: score contribution = TextWeight × (1 / rank).
+	for i, r := range lexResults {
+		key := r.Preview
+		if key == "" {
+			key = fmt.Sprintf("lex_%d", i)
+		}
+		score := g.TextWeight * (1.0 / float64(i+1))
+		if existing, ok := merged[key]; ok {
+			existing.Score += score
+		} else {
+			r.Score = score
+			merged[key] = &r
+		}
+	}
+	// Vector results: score contribution = DenseWeight × similarity.
+	for i, r := range vecResults {
+		key := r.Preview
+		if key == "" {
+			key = fmt.Sprintf("vec_%d", i)
+		}
+		score := g.DenseWeight * r.Score
+		if existing, ok := merged[key]; ok {
+			existing.Score += score
+		} else {
+			r.Score = score
+			merged[key] = &r
+		}
+	}
+
+	// Step 4: Sort by combined score.
+	all := make([]recall.SearchResult, 0, len(merged))
+	for _, r := range merged {
+		all = append(all, *r)
+	}
+	for i := 0; i < len(all)-1; i++ {
+		for j := i + 1; j < len(all); j++ {
+			if all[j].Score > all[i].Score {
+				all[i], all[j] = all[j], all[i]
+			}
+		}
+	}
+
+	// Step 5: Return top-K.
+	if limit > len(all) {
+		limit = len(all)
+	}
+	return all[:limit], nil
 }
 
 // SearchBySession searches within a specific session.
@@ -328,6 +452,35 @@ func truncatePreview(content string, maxLen int) string {
 		return content
 	}
 	return content[:maxLen] + "..."
+}
+
+// cortexGenomeFromConfig builds a SearchGenome from CortexConfig.
+// When SearchStrategy is nil, returns DefaultGenome with MaxResults.
+func cortexGenomeFromConfig(cfg *config.CortexConfig) search.SearchGenome {
+	if cfg == nil {
+		return search.DefaultGenome()
+	}
+	if cfg.SearchStrategy != nil {
+		return search.SearchGenome{
+			RecallMode:          cfg.SearchStrategy.RecallMode,
+			DenseWeight:         cfg.SearchStrategy.DenseWeight,
+			TextWeight:          cfg.SearchStrategy.TextWeight,
+			KeywordMatchPercent: cfg.SearchStrategy.KeywordMatchPercent,
+			MaxRetrievedNum:     cfg.SearchStrategy.MaxRetrievedNum,
+			FTS5PoolSize:        cfg.SearchStrategy.FTS5PoolSize,
+		}.Normalized()
+	}
+	maxR := cfg.MaxResults
+	if maxR <= 0 {
+		maxR = 10
+	}
+	return search.SearchGenome{
+		RecallMode:      search.RecallModeHybrid,
+		DenseWeight:     0.7,
+		TextWeight:      0.3,
+		MaxRetrievedNum: maxR,
+		FTS5PoolSize:    50,
+	}
 }
 
 // Ensure types compile.

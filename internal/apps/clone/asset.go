@@ -11,6 +11,8 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -50,8 +52,10 @@ type AssetDownloader struct {
 func DefaultAssetDownloader() *AssetDownloader {
 	opts := httpclient.DefaultOptions()
 	opts.ForceIPv4 = true
+	opts.InsecureSkipVerify = true
+	client := httpclient.New(opts)
 	return &AssetDownloader{
-		Client:    httpclient.New(opts).Client,
+		Client:    client.Client,
 		UserAgent: httpclient.DefaultOptions().UserAgent,
 		MaxBytes:  50 * 1024 * 1024, // 50 MB.
 		Retries:   3,
@@ -201,6 +205,9 @@ func (d *AssetDownloader) tryDownload(ctx context.Context, assetURL string) (*Do
 		if err == nil {
 			transport := &http.Transport{
 				Proxy: http.ProxyURL(proxyParsed),
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: true,
+				},
 				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 					if network == "tcp" {
 						network = "tcp4"
@@ -221,6 +228,9 @@ func (d *AssetDownloader) tryDownload(ctx context.Context, assetURL string) (*Do
 		if err == nil {
 			transport := &http.Transport{
 				Proxy: http.ProxyURL(proxyParsed),
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: true,
+				},
 				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 					if network == "tcp" {
 						network = "tcp4"
@@ -245,7 +255,14 @@ func (d *AssetDownloader) tryDownload(ctx context.Context, assetURL string) (*Do
 			d.proxyIndex++
 			d.proxyMu.Unlock()
 		}
-		return nil, &DownloadError{URL: assetURL, Reason: "network", Err: err}
+		// Classify DNS resolution failures separately from other network
+		// errors. DNS failures are non-transient (retrying won't help) and
+		// should fall back to the browser immediately.
+		reason := "network"
+		if isDNSError(err) {
+			reason = "dns"
+		}
+		return nil, &DownloadError{URL: assetURL, Reason: reason, Err: err}
 	}
 	defer resp.Body.Close()
 
@@ -327,7 +344,9 @@ func (d *AssetDownloader) tryDownload(ctx context.Context, assetURL string) (*Do
 
 // transient reports whether the error is likely to resolve on retry.
 // Transient errors include: 403, 408, 425, 429, 5xx, and network errors.
-// Non-transient: context cancellation, timeout, too large, 404, 401, 410.
+// Non-transient: context cancellation, timeout, too large, 404, 401, 410,
+// and DNS resolution failures (retrying DNS won't help — the resolver is
+// either blocked or misconfigured, and the browser fallback should be used).
 func (d *AssetDownloader) transient(err error) bool {
 	var de *DownloadError
 	if AsDownloadError(err, &de) {
@@ -343,11 +362,36 @@ func (d *AssetDownloader) transient(err error) bool {
 			}
 		case "network":
 			return true
+		case "dns":
+			// DNS resolution failures are non-transient: retrying with the
+			// same resolver will produce the same result. The browser
+			// fallback (which uses Chrome's DoH) should handle these.
+			return false
 		default:
 			return false
 		}
 	}
 	return false
+}
+
+// isDNSError reports whether an error is caused by DNS resolution failure.
+// This includes "no such host" errors, DNS timeouts, and server misbehavior.
+func isDNSError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Type assertion — most reliable for Go's net.DNSError.
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "no such host") ||
+		strings.Contains(errStr, "lookup ") ||
+		strings.Contains(errStr, "server misbehaving") ||
+		strings.Contains(errStr, "name or service not known") ||
+		strings.Contains(errStr, "Temporary failure in name resolution") ||
+		strings.Contains(errStr, "nodename nor servname provided")
 }
 
 // ---------------------------------------------------------------------------

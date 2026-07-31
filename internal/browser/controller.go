@@ -12,12 +12,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/chromedp/chromedp"
+	"github.com/km269/wukong/internal/apps/sanitize"
 	"github.com/km269/wukong/internal/browser/settle"
 	"github.com/km269/wukong/internal/browser/stealth"
 	"github.com/km269/wukong/internal/browser/types"
@@ -61,7 +63,11 @@ func NewController(cfg *config.BrowserConfig) *Controller {
 
 	if cfg != nil && cfg.Enabled &&
 		strings.EqualFold(cfg.BrowserType, "chromium") {
-		c.backend = NewBackendFromConfig(cfg)
+		var err error
+		c.backend, err = NewBackendFromConfig(cfg)
+		if err != nil {
+			logutil.Warn("failed to initialize browser backend", slog.String("error", err.Error()))
+		}
 	}
 
 	return c
@@ -300,10 +306,11 @@ func (c *Controller) navigateWithBrowser(
 
 // ExtractResult contains the result of content extraction.
 type ExtractResult struct {
-	Success bool   `json:"success"`
-	Text    string `json:"text,omitempty"`
-	HTML    string `json:"html,omitempty"`
-	Error   string `json:"error,omitempty"`
+	Success  bool   `json:"success"`
+	Text     string `json:"text,omitempty"`
+	HTML     string `json:"html,omitempty"`
+	Markdown string `json:"markdown,omitempty"`
+	Error    string `json:"error,omitempty"`
 }
 
 // ExtractText fetches a URL and extracts human-readable text.
@@ -326,10 +333,13 @@ func (c *Controller) ExtractText(
 	}
 
 	text := stripHTML(result.Content)
+	markdown, _ := sanitize.ExtractMainContentMarkdown(result.Content)
+
 	return &ExtractResult{
-		Success: true,
-		Text:    text,
-		HTML:    result.Content,
+		Success:  true,
+		Text:     text,
+		HTML:     result.Content,
+		Markdown: markdown,
 	}, nil
 }
 

@@ -216,7 +216,7 @@ func runSession(cmd *cobra.Command, args []string) error {
 	// Start TUI — pass projectMgr for instruction tracking.
 	return tui.StartTUI(
 		wukongCfg, loop, userID, sessionID,
-		workingDir, bootstrapState.ProjectMgr)
+		workingDir, bootstrapState.ProjectMgr, "")
 }
 
 // BootstrapState holds resources created during bootstrap that need

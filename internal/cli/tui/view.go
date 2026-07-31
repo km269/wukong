@@ -3,24 +3,129 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 )
 
-var (
-	// Color scheme
-	colorUser      = lipgloss.Color("120") // Green
-	colorAssistant = lipgloss.Color("213") // Pink
-	colorStatus    = lipgloss.Color("63")  // Blue
-	colorRunning   = lipgloss.Color("226") // Yellow
-	colorDone      = lipgloss.Color("42")  // Green
-	colorError     = lipgloss.Color("196") // Red
-	colorDim       = lipgloss.Color("240") // Gray
-	colorAccent    = lipgloss.Color("147") // Teal
-	colorBorder    = lipgloss.Color("237") // Dark gray
-	colorBanner    = lipgloss.Color("234") // Darker gray for banner
+// ThemeType defines available color themes.
+type ThemeType int
 
-	// Styles
+const (
+	ThemeDark ThemeType = iota
+	ThemeLight
+	ThemeClassic
+)
+
+// String returns the theme name.
+func (t ThemeType) String() string {
+	switch t {
+	case ThemeLight:
+		return "light"
+	case ThemeClassic:
+		return "classic"
+	default:
+		return "dark"
+	}
+}
+
+// ParseTheme converts a string to ThemeType.
+func ParseTheme(name string) ThemeType {
+	switch strings.ToLower(name) {
+	case "light", "l":
+		return ThemeLight
+	case "classic", "c":
+		return ThemeClassic
+	default:
+		return ThemeDark
+	}
+}
+
+// ColorPalette holds the color scheme for a theme.
+type ColorPalette struct {
+	User      lipgloss.Color
+	Assistant lipgloss.Color
+	Status    lipgloss.Color
+	Running   lipgloss.Color
+	Done      lipgloss.Color
+	Error     lipgloss.Color
+	Dim       lipgloss.Color
+	Accent    lipgloss.Color
+	Border    lipgloss.Color
+	Banner    lipgloss.Color
+	BannerFg  lipgloss.Color
+	StatusBg  lipgloss.Color
+	StatusFg  lipgloss.Color
+}
+
+// Theme palettes
+var (
+	darkPalette = ColorPalette{
+		User:      lipgloss.Color("120"),
+		Assistant: lipgloss.Color("213"),
+		Status:    lipgloss.Color("63"),
+		Running:   lipgloss.Color("226"),
+		Done:      lipgloss.Color("42"),
+		Error:     lipgloss.Color("196"),
+		Dim:       lipgloss.Color("240"),
+		Accent:    lipgloss.Color("147"),
+		Border:    lipgloss.Color("237"),
+		Banner:    lipgloss.Color("234"),
+		BannerFg:  lipgloss.Color("255"),
+		StatusBg:  lipgloss.Color("237"),
+		StatusFg:  lipgloss.Color("248"),
+	}
+
+	lightPalette = ColorPalette{
+		User:      lipgloss.Color("22"),
+		Assistant: lipgloss.Color("54"),
+		Status:    lipgloss.Color("25"),
+		Running:   lipgloss.Color("178"),
+		Done:      lipgloss.Color("28"),
+		Error:     lipgloss.Color("160"),
+		Dim:       lipgloss.Color("245"),
+		Accent:    lipgloss.Color("29"),
+		Border:    lipgloss.Color("240"),
+		Banner:    lipgloss.Color("252"),
+		BannerFg:  lipgloss.Color("0"),
+		StatusBg:  lipgloss.Color("252"),
+		StatusFg:  lipgloss.Color("235"),
+	}
+
+	classicPalette = ColorPalette{
+		User:      lipgloss.Color("34"),
+		Assistant: lipgloss.Color("35"),
+		Status:    lipgloss.Color("36"),
+		Running:   lipgloss.Color("33"),
+		Done:      lipgloss.Color("32"),
+		Error:     lipgloss.Color("31"),
+		Dim:       lipgloss.Color("90"),
+		Accent:    lipgloss.Color("37"),
+		Border:    lipgloss.Color("245"),
+		Banner:    lipgloss.Color("240"),
+		BannerFg:  lipgloss.Color("235"),
+		StatusBg:  lipgloss.Color("240"),
+		StatusFg:  lipgloss.Color("232"),
+	}
+)
+
+// Current theme and styles
+var (
+	currentTheme   = ThemeDark
+	colorUser      = darkPalette.User
+	colorAssistant = darkPalette.Assistant
+	colorStatus    = darkPalette.Status
+	colorRunning   = darkPalette.Running
+	colorDone      = darkPalette.Done
+	colorError     = darkPalette.Error
+	colorDim       = darkPalette.Dim
+	colorAccent    = darkPalette.Accent
+	colorBorder    = darkPalette.Border
+	colorBanner    = darkPalette.Banner
+	colorBannerFg  = darkPalette.BannerFg
+	colorStatusBg  = darkPalette.StatusBg
+	colorStatusFg  = darkPalette.StatusFg
+
 	userStyle = lipgloss.NewStyle().
 			Foreground(colorUser).
 			Bold(true)
@@ -39,7 +144,7 @@ var (
 
 	bannerStyle = lipgloss.NewStyle().
 			Background(colorBanner).
-			Foreground(lipgloss.Color("255")).
+			Foreground(colorBannerFg).
 			Padding(0, 2)
 
 	bannerAccentStyle = lipgloss.NewStyle().
@@ -48,12 +153,12 @@ var (
 				Bold(true)
 
 	statusBarStyleBottom = lipgloss.NewStyle().
-				Background(lipgloss.Color("237")).
-				Foreground(lipgloss.Color("248")).
+				Background(colorStatusBg).
+				Foreground(colorStatusFg).
 				Padding(0, 1)
 
 	modalStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("235")).
+			Background(colorStatusBg).
 			Foreground(lipgloss.Color("255")).
 			BorderStyle(lipgloss.RoundedBorder()).
 			BorderForeground(colorBorder).
@@ -78,6 +183,97 @@ var (
 				BorderLeftForeground(colorAccent).
 				Padding(0, 0, 0, 2)
 )
+
+// SetTheme changes the active color theme and reinitializes all styles.
+func SetTheme(theme ThemeType) {
+	currentTheme = theme
+
+	var palette ColorPalette
+	switch theme {
+	case ThemeLight:
+		palette = lightPalette
+	case ThemeClassic:
+		palette = classicPalette
+	default:
+		palette = darkPalette
+	}
+
+	colorUser = palette.User
+	colorAssistant = palette.Assistant
+	colorStatus = palette.Status
+	colorRunning = palette.Running
+	colorDone = palette.Done
+	colorError = palette.Error
+	colorDim = palette.Dim
+	colorAccent = palette.Accent
+	colorBorder = palette.Border
+	colorBanner = palette.Banner
+	colorBannerFg = palette.BannerFg
+	colorStatusBg = palette.StatusBg
+	colorStatusFg = palette.StatusFg
+
+	userStyle = lipgloss.NewStyle().
+		Foreground(colorUser).
+		Bold(true)
+
+	assistantStyle = lipgloss.NewStyle().
+		Foreground(colorAssistant).
+		Bold(true)
+
+	statusBarStyle = lipgloss.NewStyle().
+		Background(colorStatus).
+		Foreground(lipgloss.Color("255")).
+		Padding(0, 1)
+
+	dimStyle = lipgloss.NewStyle().
+		Foreground(colorDim)
+
+	bannerStyle = lipgloss.NewStyle().
+		Background(colorBanner).
+		Foreground(colorBannerFg).
+		Padding(0, 2)
+
+	bannerAccentStyle = lipgloss.NewStyle().
+		Background(colorBanner).
+		Foreground(colorAccent).
+		Bold(true)
+
+	statusBarStyleBottom = lipgloss.NewStyle().
+		Background(colorStatusBg).
+		Foreground(colorStatusFg).
+		Padding(0, 1)
+
+	modalStyle = lipgloss.NewStyle().
+		Background(colorStatusBg).
+		Foreground(lipgloss.Color("255")).
+		BorderStyle(lipgloss.RoundedBorder()).
+		BorderForeground(colorBorder).
+		Padding(1, 2)
+
+	modalTitleStyle = lipgloss.NewStyle().
+		Foreground(colorAccent).
+		Bold(true).
+		Underline(true)
+
+	modalSelectedStyle = lipgloss.NewStyle().
+		Background(colorStatus).
+		Foreground(lipgloss.Color("255")).
+		Bold(true)
+
+	modalItemStyle = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("248"))
+
+	toolCallResultStyle = lipgloss.NewStyle().
+		Foreground(colorDim).
+		BorderLeft(true).
+		BorderLeftForeground(colorAccent).
+		Padding(0, 0, 0, 2)
+}
+
+// GetTheme returns the current theme type.
+func GetTheme() ThemeType {
+	return currentTheme
+}
 
 // RenderUserMessage formats a user message with styling.
 func RenderUserMessage(content string) string {
@@ -149,7 +345,9 @@ func RenderToolCall(name, status string) string {
 }
 
 // RenderToolCallResult formats a tool call with its result.
-func RenderToolCallResult(entry toolCallEntry) string {
+// Supports collapse/expand state, truncation for long results, and
+// a selected-highlight indicator for keyboard navigation.
+func RenderToolCallResult(entry toolCallEntry, selected bool) string {
 	icon := "○"
 	color := colorDim
 	switch entry.Status {
@@ -164,18 +362,62 @@ func RenderToolCallResult(entry toolCallEntry) string {
 		color = colorError
 	}
 
-	var result string
-	if entry.Result != "" {
-		result = "\n" + toolCallResultStyle.Render(entry.Result)
+	collapseIcon := "▼"
+	if entry.Collapsed {
+		collapseIcon = "▶"
 	}
 
-	return fmt.Sprintf(
-		"%s %s %s%s",
+	header := fmt.Sprintf(
+		"%s %s %s",
+		lipgloss.NewStyle().Foreground(color).Render(collapseIcon),
 		lipgloss.NewStyle().Foreground(color).Render(icon),
 		lipgloss.NewStyle().Foreground(color).Bold(true).Render(entry.Name),
-		lipgloss.NewStyle().Foreground(colorDim).Render(entry.Args),
-		result,
 	)
+
+	if entry.Status == "running" && !entry.StartTime.IsZero() {
+		elapsed := time.Since(entry.StartTime)
+		elapsedStr := formatDuration(elapsed)
+		header += " " + lipgloss.NewStyle().Foreground(color).Render(elapsedStr)
+	}
+
+	if selected {
+		header = "▌ " + header
+	}
+
+	if entry.Args != "" && !entry.Collapsed {
+		argsStr := entry.Args
+		if len(argsStr) > 80 {
+			argsStr = argsStr[:77] + "..."
+		}
+		header += " " + lipgloss.NewStyle().Foreground(colorDim).Render(argsStr)
+	}
+
+	var result string
+	if entry.Result != "" && !entry.Collapsed {
+		resultStr := entry.Result
+		if len(resultStr) > 500 {
+			resultStr = resultStr[:497] + "..."
+		}
+		result = "\n" + toolCallResultStyle.Render(resultStr)
+	} else if entry.Result != "" && entry.Collapsed {
+		result = "\n" + lipgloss.NewStyle().Foreground(colorDim).Render(
+			fmt.Sprintf("  [%d chars hidden - press Tab to expand]", len(entry.Result)),
+		)
+	}
+
+	return header + result
+}
+
+func formatDuration(d time.Duration) string {
+	if d < time.Second {
+		return fmt.Sprintf("(%dms)", d.Milliseconds())
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("(%.1fs)", d.Seconds())
+	}
+	mins := int(d.Minutes())
+	secs := int(d.Seconds()) % 60
+	return fmt.Sprintf("(%dm%ds)", mins, secs)
 }
 
 // RenderDim renders text in dim style.
@@ -255,7 +497,7 @@ func RenderHeader(
 	status string,
 	width int,
 ) string {
-	return RenderBanner("v0.2.4", providerName, width)
+	return RenderBanner("v0.2.7", providerName, width)
 }
 
 // RenderModal renders a modal window.

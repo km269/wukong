@@ -157,7 +157,7 @@ func (m *SummonManager) LoadSkills(ctx context.Context) error {
 
 	skillsDir := m.cfg.SkillsDir
 	if skillsDir == "" {
-		skillsDir = ".wukong_skills"
+		skillsDir = ".wukong/skills"
 	}
 
 	// Create directory if not exists

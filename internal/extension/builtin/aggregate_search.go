@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/km269/wukong/internal/apps/sanitize"
 	"github.com/km269/wukong/pkg/httpclient"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
@@ -22,6 +23,7 @@ type aggregateSearchTool struct {
 	tavilyClient     *httpclient.Client
 	googleClient     *httpclient.Client
 	bingClient       *httpclient.Client
+	fetchClient      *httpclient.Client
 	searxngURL       string
 	searxngAPIKey    string
 	tavilyAPIKey     string
@@ -29,6 +31,7 @@ type aggregateSearchTool struct {
 	googleCSEID      string
 	bingAPIKey       string
 	enabledBackends  []string
+	maxFetchResults  int
 }
 
 type searchResult struct {
@@ -38,6 +41,13 @@ type searchResult struct {
 	Source  string `json:"source"`
 }
 
+type fetchResult struct {
+	URL      string `json:"url"`
+	Title    string `json:"title,omitempty"`
+	Markdown string `json:"markdown,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
 func NewAggregateSearchTool(enabledBackends []string, searxngURL, searxngAPIKey, tavilyAPIKey, googleAPIKey, googleCSEID, bingAPIKey string) tool.Tool {
 	st := &aggregateSearchTool{
 		duckduckgoClient: httpclient.New(httpclient.Options{Timeout: 15 * time.Second}),
@@ -45,6 +55,7 @@ func NewAggregateSearchTool(enabledBackends []string, searxngURL, searxngAPIKey,
 		tavilyClient:     httpclient.New(httpclient.Options{Timeout: 20 * time.Second}),
 		googleClient:     httpclient.New(httpclient.Options{Timeout: 15 * time.Second}),
 		bingClient:       httpclient.New(httpclient.Options{Timeout: 15 * time.Second}),
+		fetchClient:      httpclient.New(httpclient.Options{Timeout: 30 * time.Second}),
 		searxngURL:       searxngURL,
 		searxngAPIKey:    searxngAPIKey,
 		tavilyAPIKey:     tavilyAPIKey,
@@ -52,6 +63,7 @@ func NewAggregateSearchTool(enabledBackends []string, searxngURL, searxngAPIKey,
 		googleCSEID:      googleCSEID,
 		bingAPIKey:       bingAPIKey,
 		enabledBackends:  enabledBackends,
+		maxFetchResults:  3,
 	}
 	return function.NewFunctionTool(
 		st.search,
@@ -59,19 +71,22 @@ func NewAggregateSearchTool(enabledBackends []string, searxngURL, searxngAPIKey,
 		function.WithDescription(
 			"Search the web using multiple search engines and aggregate results. "+
 				"Returns combined results from DuckDuckGo, SearXNG, Tavily, Google, and Bing. "+
+				"Also fetches and returns full page content (as Markdown) for the top results. "+
 				"Use this tool to get comprehensive search coverage across multiple sources.",
 		),
 	)
 }
 
 type aggregateSearchReq struct {
-	Query string `json:"query" jsonschema:"description=Search query to find relevant information"`
+	Query      string `json:"query" jsonschema:"description=Search query to find relevant information"`
+	FetchCount int    `json:"fetch_count,omitempty" jsonschema:"description=Number of top results to fetch full content from (0=skip fetch, default=3)"`
 }
 
 type aggregateSearchRsp struct {
-	Success bool           `json:"success"`
-	Results []searchResult `json:"results"`
-	Error   string         `json:"error,omitempty"`
+	Success      bool           `json:"success"`
+	Results      []searchResult `json:"results"`
+	FetchResults []fetchResult  `json:"fetch_results,omitempty"`
+	Error        string         `json:"error,omitempty"`
 }
 
 func (a *aggregateSearchTool) search(
@@ -147,10 +162,128 @@ func (a *aggregateSearchTool) search(
 		allResults = allResults[:20]
 	}
 
+	maxFetch := a.maxFetchResults
+	if req.FetchCount > 0 {
+		maxFetch = req.FetchCount
+	}
+
+	var fetchResults []fetchResult
+	if maxFetch > 0 && len(allResults) > 0 {
+		fetchCount := maxFetch
+		if fetchCount > len(allResults) {
+			fetchCount = len(allResults)
+		}
+
+		var fetchWg sync.WaitGroup
+		fetchResultChan := make(chan fetchResult, fetchCount)
+
+		for i := 0; i < fetchCount; i++ {
+			result := allResults[i]
+			if result.URL == "" {
+				continue
+			}
+			fetchWg.Add(1)
+			go func(url, title string) {
+				defer fetchWg.Done()
+				fr := a.fetchAndConvertPage(ctx, url)
+				if title != "" {
+					fr.Title = title
+				}
+				fetchResultChan <- fr
+			}(result.URL, result.Title)
+		}
+
+		fetchWg.Wait()
+		close(fetchResultChan)
+
+		for fr := range fetchResultChan {
+			fetchResults = append(fetchResults, fr)
+		}
+	}
+
 	return aggregateSearchRsp{
-		Success: true,
-		Results: allResults,
+		Success:      true,
+		Results:      allResults,
+		FetchResults: fetchResults,
 	}, nil
+}
+
+func (a *aggregateSearchTool) fetchAndConvertPage(ctx context.Context, pageURL string) fetchResult {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
+	if err != nil {
+		return fetchResult{URL: pageURL, Error: fmt.Sprintf("create request: %v", err)}
+	}
+
+	req.Header.Set("User-Agent",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "+
+			"AppleWebKit/537.36 (KHTML, like Gecko) "+
+			"Chrome/120.0.0.0 Safari/537.36 Wukong-Agent/1.0")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+
+	resp, err := a.fetchClient.Do(req)
+	if err != nil {
+		return fetchResult{URL: pageURL, Error: fmt.Sprintf("fetch failed: %v", err)}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return fetchResult{
+			URL:   pageURL,
+			Error: fmt.Sprintf("HTTP %d", resp.StatusCode),
+		}
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if err != nil {
+		return fetchResult{URL: pageURL, Error: fmt.Sprintf("read body: %v", err)}
+	}
+
+	htmlContent := string(body)
+	title := extractTitleFromHTML(htmlContent)
+
+	markdown, err := sanitize.ExtractMainContentMarkdown(htmlContent)
+	if err != nil {
+		return fetchResult{
+			URL:   pageURL,
+			Title: title,
+			Error: fmt.Sprintf("convert to markdown: %v", err),
+		}
+	}
+
+	const maxMarkdownLen = 50000
+	if len(markdown) > maxMarkdownLen {
+		markdown = markdown[:maxMarkdownLen] +
+			fmt.Sprintf("\n\n... (truncated, %d chars total)", len(markdown))
+	}
+
+	return fetchResult{
+		URL:      pageURL,
+		Title:    title,
+		Markdown: markdown,
+	}
+}
+
+func extractTitleFromHTML(html string) string {
+	lower := strings.ToLower(html)
+	startTag := "<title>"
+	endTag := "</title>"
+
+	start := strings.Index(lower, startTag)
+	if start == -1 {
+		return ""
+	}
+	start += len(startTag)
+
+	end := strings.Index(lower[start:], endTag)
+	if end == -1 {
+		return ""
+	}
+
+	title := strings.TrimSpace(html[start : start+end])
+	if len(title) > 500 {
+		title = title[:500] + "..."
+	}
+	return title
 }
 
 func (a *aggregateSearchTool) searchDuckDuckGo(ctx context.Context, query string) ([]searchResult, error) {
