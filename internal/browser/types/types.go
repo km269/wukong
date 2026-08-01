@@ -13,6 +13,24 @@ type CollectedAsset struct {
 	StatusCode  int
 }
 
+// DiscoveredAPI represents an API endpoint discovered by
+// intercepting XHR/fetch requests during page rendering.
+// Hidden APIs are endpoints that serve structured data (JSON,
+// XML, GraphQL) but are not visible as links in the HTML — they
+// are called dynamically by the page's JavaScript.
+type DiscoveredAPI struct {
+	URL         string `json:"url"`
+	Method      string `json:"method,omitempty"`
+	ContentType string `json:"content_type,omitempty"`
+	StatusCode  int    `json:"status_code,omitempty"`
+	// ResourceType is the CDP resource type (XHR, Fetch, etc.).
+	ResourceType string `json:"resource_type,omitempty"`
+	// PaginationKind is the detected pagination style, if any.
+	// One of: "query_param", "path_based", "offset_limit",
+	// "cursor", "header", "none".
+	PaginationKind string `json:"pagination_kind,omitempty"`
+}
+
 type RenderResult struct {
 	HTML                string
 	URL                 string
@@ -26,6 +44,9 @@ type RenderResult struct {
 	// Links extracted from the rendered DOM using JavaScript.
 	// This includes dynamically generated links that static HTML parsing may miss.
 	ExtractedLinks []string
+	// DiscoveredAPIs are hidden API endpoints (JSON/XML/GraphQL)
+	// intercepted from XHR/fetch requests during page rendering.
+	DiscoveredAPIs []DiscoveredAPI
 }
 
 type ErrNotHTML struct {

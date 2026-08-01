@@ -16,11 +16,12 @@ const (
 	ProviderDeepSeek  ProviderType = "deepseek"
 	ProviderOllama    ProviderType = "ollama"
 	ProviderLMStudio  ProviderType = "lmstudio"
+	ProviderVLLM      ProviderType = "vllm"
 	ProviderACP       ProviderType = "acp"
 )
 
 // ProviderConfig defines a connection to an LLM backend.
-// Supported types: openai, anthropic, google, deepseek, ollama, lmstudio, acp.
+// Supported types: openai, anthropic, google, deepseek, ollama, lmstudio, vllm, acp.
 // API keys support ${ENV_VAR} expansion for secrets management.
 type ProviderConfig struct {
 	Name     string `mapstructure:"name"`

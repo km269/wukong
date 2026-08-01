@@ -133,7 +133,7 @@ func runFullValidation(cfg *config.WukongConfig) []string {
 	}
 
 	// 4. API key required for cloud providers
-	if p.APIKey == "" && p.Type != "ollama" && p.Type != "lmstudio" {
+	if p.APIKey == "" && p.Type != "ollama" && p.Type != "lmstudio" && p.Type != "vllm" {
 		issues = append(issues,
 			fmt.Sprintf("provider %q (type=%s) has no API key configured; "+
 				"set %s.api_key or ${%s_API_KEY}",
@@ -143,14 +143,14 @@ func runFullValidation(cfg *config.WukongConfig) []string {
 	// 5. Provider type must be valid
 	validTypes := map[string]bool{
 		"openai": true, "anthropic": true, "google": true,
-		"deepseek": true, "ollama": true, "lmstudio": true, "acp": true,
+		"deepseek": true, "ollama": true, "lmstudio": true, "vllm": true, "acp": true,
 	}
 	for _, prov := range cfg.Providers {
 		if !validTypes[prov.Type] {
 			issues = append(issues,
 				fmt.Sprintf("provider %q has unknown type %q; "+
 					"valid types: openai, anthropic, google, "+
-					"deepseek, ollama, lmstudio, acp",
+					"deepseek, ollama, lmstudio, vllm, acp",
 					prov.Name, prov.Type))
 		}
 		if prov.Type == "acp" && prov.AgentURL == "" {

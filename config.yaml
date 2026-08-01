@@ -20,6 +20,7 @@
 #   - artifact.cos_secret_id, cos_secret_key
 #   - acp_server.api_key
 #   - cortex.embedding_api_key, embedding_base_url, embedding_model
+#   - cortex.reranker_api_key, reranker_base_url, reranker_model
 #   - memoryflow.planner_model, memoryflow.extractor_model
 #   - graphflow.extractor_model
 #   - dify.api_secret
@@ -39,14 +40,16 @@
 # A. Global Settings
 # ===========================================================================
 log_level: "info"                    # debug | info | warn | error
-default_provider: "lmstudio"         # must match a name in providers[]
-lightweight_provider: "lmstudio"     # background tasks (empty = default_provider)
-lightweight_model: "google/gemma-4-26b-a4b"  # background lightweight model
+default_provider: "vllm"         # must match a name in providers[]
+lightweight_provider: "vllm"     # background tasks (empty = default_provider)
+lightweight_model: "qwen3.6-27b"  # background lightweight model
 
 # ===========================================================================
 # B. Providers — LLM backends
 # ===========================================================================
-# Supported types: openai | anthropic | google | deepseek | ollama | lmstudio | acp
+# Supported types: openai | anthropic | google | deepseek | ollama | lmstudio | vllm | acp
+# - openai-compatible cloud providers (siliconflow/openrouter/groq/etc.) use type: "openai"
+# - local inference servers (vllm/ollama/lmstudio) need no api_key
 # api_key supports ${ENV_VAR} expansion for secrets management.
 providers:
   - name: "openai"
@@ -55,17 +58,29 @@ providers:
     base_url: "https://api.openai.com/v1"
     model: "gpt-4o"
 
+  - name: "anthropic"
+    type: "anthropic"
+    api_key: "${ANTHROPIC_API_KEY}"
+    base_url: "https://api.anthropic.com/v1"
+    model: "claude-sonnet-4-20250514"
+
+  - name: "google"
+    type: "google"
+    api_key: "${GOOGLE_API_KEY}"
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
+    model: "gemini-2.0-flash"
+
   - name: "deepseek"
     type: "deepseek"
     api_key: "${DEEPSEEK_API_KEY}"
     base_url: "https://api.deepseek.com"
     model: "deepseek-chat"
 
-  - name: "anthropic"
-    type: "anthropic"
-    api_key: "${ANTHROPIC_API_KEY}"
-    base_url: "https://api.anthropic.com"
-    model: "claude-sonnet-4-20250514"
+  - name: "vllm"
+    type: "vllm"
+    api_key: " "
+    base_url: "http://192.168.50.97:8081/"
+    model: "qwen3.6-27b"
 
   - name: "ollama"
     type: "ollama"
@@ -78,6 +93,37 @@ providers:
     api_key: "lmstudio"
     base_url: "${LMSTUDIO_BASE_URL:-http://localhost:1234/v1}"
     model: "${LMSTUDIO_MODEL:-google/gemma-4-26b-a4b}"
+
+  # --- OpenAI-compatible cloud providers (type: openai) ---
+  - name: "siliconflow"
+    type: "openai"
+    api_key: "${SILICONFLOW_API_KEY}"
+    base_url: "https://api.siliconflow.cn/v1"
+    model: "Qwen/Qwen2.5-72B-Instruct"
+
+  - name: "openrouter"
+    type: "openai"
+    api_key: "${OPENROUTER_API_KEY}"
+    base_url: "https://openrouter.ai/api/v1"
+    model: "anthropic/claude-sonnet-4"
+
+  - name: "groq"
+    type: "openai"
+    api_key: "${GROQ_API_KEY}"
+    base_url: "https://api.groq.com/openai/v1"
+    model: "llama-3.3-70b-versatile"
+
+  - name: "moonshot"
+    type: "openai"
+    api_key: "${MOONSHOT_API_KEY}"
+    base_url: "https://api.moonshot.cn/v1"
+    model: "moonshot-v1-32k"
+
+  - name: "zhipu"
+    type: "openai"
+    api_key: "${ZHIPU_API_KEY}"
+    base_url: "https://open.bigmodel.cn/api/paas/v4"
+    model: "glm-4-plus"
 
   - name: "acp-coder"
     type: "acp"
@@ -210,6 +256,42 @@ cortex:
   embedding_base_url: "${EMBEDDING_BASE_URL:-http://192.168.50.97:1234}"
   embedding_api_key: "${EMBEDDING_API_KEY:-lmstudio}"
   embedding_model: "${EMBEDDING_MODEL:-qwen3-embedding-0.6b}"
+  # Cross-Encoder reranker (optional; empty = disabled)
+  # Reuses embedding_base_url/api_key when reranker_* not set.
+  reranker_base_url: "${RERANKER_BASE_URL:-}"
+  reranker_api_key: "${RERANKER_API_KEY:-}"
+  reranker_model: "${RERANKER_MODEL:-}"
+  # Search strategy tuning (optional)
+  search_strategy:
+    recall_mode: "hybrid"          # lexical | vector | hybrid
+    dense_weight: 0.7              # vector weight [0,1]
+    text_weight: 0.3               # lexical weight [0,1]
+    fts5_pool_size: 50             # candidate pool before re-rank
+    max_retrieved_num: 10          # final Top-K
+    fusion_method: "rrf"           # weighted | rrf (RRF recommended)
+    rrf_k: 60                      # RRF smoothing constant
+    reranker_enabled: false        # enable Cross-Encoder reranking
+    reranker_top_n: 20             # candidates to send to reranker
+    mmr_enabled: false             # enable MMR diversity in top-K
+    mmr_lambda: 0.7                # MMR trade-off [0,1]: 1=relevance, 0=diversity
+
+  # Vertical domain search routing (optional)
+  # Routes queries to specialised backends (arXiv, GitHub, Wikipedia,
+  # Reddit) based on detected intent, augmenting local retrieval.
+  vertical_routing:
+    enabled: false                 # enable query-intent routing
+    top_n: 5                       # max results per backend
+    timeout: "10s"                 # per-backend deadline
+    merge_mode: "prepend"          # prepend | append | replace
+    github_api_key: "${GITHUB_API_KEY:-}"
+
+  # Semantic chunking for RAG ingestion (optional, enabled by default)
+  # Splits long messages into coherent chunks before embedding.
+  chunking:
+    enabled: true                  # enable semantic chunking
+    max_size: 1200                 # max runes per chunk
+    overlap: 200                   # overlap runes between chunks
+    min_size: 100                  # merge chunks smaller than this
 
 memoryflow:
   enabled: true

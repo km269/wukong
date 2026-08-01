@@ -1481,7 +1481,7 @@ func validateConfig(cfg *config.WukongConfig) {
 			"the provider may use a default model")
 	}
 
-	if p.APIKey == "" && p.Type != "ollama" && p.Type != "lmstudio" {
+	if p.APIKey == "" && p.Type != "ollama" && p.Type != "lmstudio" && p.Type != "vllm" {
 		util.Logger.Warn("no API key configured for " + cfg.DefaultProvider +
 			"; set " + p.Name + ".api_key in config or via " +
 			strings.ToUpper(p.Name) + "_API_KEY env var")
@@ -1513,7 +1513,7 @@ func validateConfig(cfg *config.WukongConfig) {
 		cfg.Memory.ExtractorModel == "" {
 		// Auto-extract uses the default provider; warn if that
 		// provider may be slow or expensive for extraction.
-		if p.Type == "lmstudio" || p.Type == "ollama" {
+		if p.Type == "lmstudio" || p.Type == "ollama" || p.Type == "vllm" {
 			util.Logger.Info("auto-extract uses local " + p.Type +
 				" model — this may be slow; consider setting " +
 				"memory.extractor_provider to a faster model")

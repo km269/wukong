@@ -300,6 +300,7 @@ type CloneOptions struct {
 	KeepMedia           bool     // 下载媒体文件（视频、音频、PDF、压缩包等）
 	SkipExt             []string // 额外跳过的文件扩展名
 	AllowDownloads      bool     // 允许浏览器自动下载文件（默认禁止, 由 cloner 统一管理资源）
+	ArchiveFallback     *bool    // 死链回退到 Wayback Machine（nil = 默认false）
 }
 
 // mergeCloneOptions merges config defaults and CLI options into EnhancedClonerOptions.
@@ -407,6 +408,9 @@ func applyConfigDefaults(eco *clone.EnhancedClonerOptions, dc config.CloneDefaul
 	}
 	if dc.BrowserBackend != "" {
 		eco.BrowserBackend = dc.BrowserBackend
+	}
+	if dc.ArchiveFallback {
+		eco.ArchiveFallback = dc.ArchiveFallback
 	}
 }
 
@@ -527,6 +531,9 @@ func applyCLIOptions(eco *clone.EnhancedClonerOptions, opts CloneOptions) {
 	}
 	// 默认禁止浏览器自动下载文件; 仅当用户显式指定 --allow-downloads 时开启.
 	eco.DisableDownloads = !opts.AllowDownloads
+	if opts.ArchiveFallback != nil {
+		eco.ArchiveFallback = *opts.ArchiveFallback
+	}
 }
 
 // CloneResult wraps the clone package result for external use.

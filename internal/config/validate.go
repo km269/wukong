@@ -88,13 +88,13 @@ func (c *WukongConfig) Validate() error {
 		switch ProviderType(p.Type) {
 		case ProviderOpenAI, ProviderAnthropic, ProviderGoogle,
 			ProviderDeepSeek, ProviderOllama, ProviderLMStudio,
-			ProviderACP, "":
+			ProviderVLLM, ProviderACP, "":
 			// Valid.
 		default:
 			return fmt.Errorf(
 				"providers[%q].type %q is invalid; "+
 					"use openai, anthropic, google, deepseek, "+
-					"ollama, lmstudio, or acp",
+					"ollama, lmstudio, vllm, or acp",
 				p.Name, p.Type,
 			)
 		}

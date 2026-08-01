@@ -22,6 +22,7 @@ const (
 	DeepSeekBaseURL  = "https://api.deepseek.com/v1"
 	OllamaBaseURL    = "http://localhost:11434/v1"
 	LMStudioBaseURL  = "http://localhost:1234/v1"
+	VLLMBaseURL      = "http://localhost:8000/v1"
 )
 
 // Factory creates model instances from provider configuration.
@@ -61,7 +62,7 @@ func (f *Factory) CreateModel(name string) (model.Model, error) {
 
 	switch p.Type {
 	case "openai", "anthropic", "google", "deepseek",
-		"ollama", "lmstudio":
+		"ollama", "lmstudio", "vllm":
 		return f.createOpenAI(p), nil
 	case "acp":
 		return f.createACP(p)
@@ -96,7 +97,7 @@ func (f *Factory) CreateModelWithName(
 
 	switch p.Type {
 	case "openai", "anthropic", "google", "deepseek",
-		"ollama", "lmstudio":
+		"ollama", "lmstudio", "vllm":
 		opts := []openai.Option{
 			openai.WithBaseURL(p.BaseURL),
 			openai.WithAPIKey(p.APIKey),
@@ -135,6 +136,8 @@ func (f *Factory) fillDefaultBaseURL(p *config.ProviderConfig) {
 		p.BaseURL = OllamaBaseURL
 	case "lmstudio":
 		p.BaseURL = LMStudioBaseURL
+	case "vllm":
+		p.BaseURL = VLLMBaseURL
 	}
 }
 

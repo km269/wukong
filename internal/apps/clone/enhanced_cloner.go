@@ -40,6 +40,7 @@ import (
 	"github.com/km269/wukong/internal/browser/antibot"
 	"github.com/km269/wukong/internal/browser/antibot/prober"
 	"github.com/km269/wukong/internal/browser/types"
+	"github.com/km269/wukong/internal/errsignal"
 	"github.com/km269/wukong/internal/util"
 	"github.com/km269/wukong/pkg/httpclient"
 	"github.com/km269/wukong/pkg/logutil"
@@ -237,6 +238,12 @@ type EnhancedClonerOptions struct {
 	// with Markdown content. When enabled, each page's HTML is converted to
 	// Markdown and saved in a structured_export.json file.
 	ExportStructuredData bool
+
+	// ArchiveFallback enables falling back to the Wayback Machine
+	// (web.archive.org) when a page or asset cannot be fetched
+	// from the live site (404, DNS failure, connection timeout).
+	// Default is true.
+	ArchiveFallback bool
 }
 
 // DefaultSkipAssetExts returns the default set of file extensions that should
@@ -340,6 +347,13 @@ type EnhancedCloner struct {
 	// Anti-bot detection and auto-escalation engine.
 	antibot *antibot.Engine
 
+	// Archive fallback for dead links (Wayback Machine).
+	archiveFallback *ArchiveFallback
+
+	// Discovered hidden API endpoints collected during page rendering.
+	discoveredAPIs  []types.DiscoveredAPI
+	discoveredAPIMu sync.Mutex
+
 	// preflightTurnstile is set true when the seed URL returns a Cloudflare
 	// Turnstile challenge page — a JS-interactive challenge that headless
 	// Chrome cannot pass. When true, the retry loop is skipped.
@@ -436,6 +450,7 @@ func NewEnhancedCloner(opts EnhancedClonerOptions) *EnhancedCloner {
 		pageReady:        make(chan struct{}, 1),
 		dispatcherStop:   make(chan struct{}),
 		pageStack:        make([]pageJob, 0),
+		archiveFallback:  NewArchiveFallback(opts.ArchiveFallback),
 	}
 }
 
@@ -796,6 +811,21 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 		}
 	}
 
+	// Save discovered hidden API endpoints to api_endpoints.json.
+	ec.discoveredAPIMu.Lock()
+	allAPIs := make([]types.DiscoveredAPI, len(ec.discoveredAPIs))
+	copy(allAPIs, ec.discoveredAPIs)
+	ec.discoveredAPIMu.Unlock()
+	if len(allAPIs) > 0 {
+		if apiPath, err := SaveDiscoveredAPIs(outputDir, allAPIs); err != nil {
+			logutil.Error("api endpoints export failed", slog.Any("error", err))
+		} else {
+			logutil.Info("api endpoints export completed",
+				slog.String("path", apiPath),
+				slog.Int("count", len(allAPIs)))
+		}
+	}
+
 	return result, nil
 }
 
@@ -913,6 +943,17 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 	// Anti-bot jitter delay (randomised pause for aggressive levels).
 	ec.antibot.Wait()
 
+	// Platform API shortcut: for known platforms (Reddit, HN, GitHub,
+	// Wikipedia, arXiv), fetch content via public API instead of
+	// launching a headless browser — 10-50× faster.
+	if htmlStr, ok := TryPlatformAPI(ctx, pageURL); ok {
+		if util.DebugEnabled {
+			logutil.Debug("platform API shortcut, skipping browser",
+				slog.String("url", pageURL))
+		}
+		return ec.processPageContent(ctx, pageURL, depth, htmlStr, inScope)
+	}
+
 	// Render page in headless Chrome.
 	if util.DebugEnabled {
 		logutil.Debug("rendering...", slog.String("url", pageURL))
@@ -945,16 +986,20 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 			}
 		}
 
-		// Check if it's a connection error that might be fixed with HTTP fallback
-		errStr := err.Error()
-		isConnectionError := strings.Contains(errStr, "ERR_CONNECTION_CLOSED") ||
-			strings.Contains(errStr, "ERR_CONNECTION_REFUSED") ||
-			strings.Contains(errStr, "net::ERR")
+		// Classify the render error using signal-driven classification.
+		// This replaces ad-hoc string matching with canonical categories
+		// that drive the appropriate fallback strategy.
+		errCls := errsignal.Classify(err, 0)
 
-		if isConnectionError {
-			logutil.Warn("browser render connection error, trying HTTP fallback",
+		// Transient/unknown errors: try HTTP fallback (browser may have
+		// network issues that a direct HTTP request can bypass).
+		if errCls.Class == errsignal.ClassTransient ||
+			errCls.Class == errsignal.ClassUnknown {
+			logutil.Warn("render error classified, trying HTTP fallback",
 				slog.String("url", pageURL),
-				slog.String("error", errStr))
+				slog.String("error_class", errCls.Class.String()),
+				slog.String("reason", errCls.Reason),
+				slog.String("error", err.Error()))
 
 			// Try HTTP client as fallback
 			if httpResult, httpErr := ec.fetchPageViaHTTP(ctx, pageURL, referer); httpErr == nil && httpResult != nil {
@@ -964,6 +1009,19 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 				logutil.Warn("HTTP fallback also failed",
 					slog.String("url", pageURL),
 					slog.Any("error", httpErr))
+			}
+		}
+
+		// Archive fallback: try the Wayback Machine for permanent errors
+		// (dead links, 404, DNS failure) and when all other fallbacks fail.
+		if ec.archiveFallback != nil && ec.archiveFallback.Enabled() {
+			if archResult, archErr := ec.archiveFallback.FetchArchivedPage(ctx, pageURL); archErr == nil && archResult != nil {
+				logutil.Info("archive fallback succeeded", slog.String("url", pageURL))
+				return ec.processPageContent(ctx, pageURL, depth, archResult.HTML, inScope)
+			} else if archErr != nil {
+				logutil.Debug("archive fallback failed",
+					slog.String("url", pageURL),
+					slog.Any("error", archErr))
 			}
 		}
 
@@ -1120,6 +1178,20 @@ processContent:
 		}
 	} else if util.DebugEnabled {
 		logutil.Debug("browser extracted 0 links", slog.String("url", pageURL))
+	}
+
+	// Collect discovered hidden API endpoints from the render result.
+	// These are XHR/fetch requests returning structured data (JSON,
+	// XML, GraphQL) intercepted during page rendering.
+	if len(renderResult.DiscoveredAPIs) > 0 {
+		ec.discoveredAPIMu.Lock()
+		ec.discoveredAPIs = append(ec.discoveredAPIs, renderResult.DiscoveredAPIs...)
+		ec.discoveredAPIMu.Unlock()
+		if util.DebugEnabled {
+			logutil.Debug("discovered API endpoints",
+				slog.String("url", pageURL),
+				slog.Int("count", len(renderResult.DiscoveredAPIs)))
+		}
 	}
 
 	contentBytes := []byte(rewrittenHTML)
@@ -1286,7 +1358,10 @@ func (ec *EnhancedCloner) fetchPageViaHTTP(ctx context.Context, pageURL string, 
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body[:min(len(body), 200)]))
+		cls := errsignal.ClassifyHTTP(resp.StatusCode, string(body[:min(len(body), 200)]))
+		return nil, fmt.Errorf("HTTP %d [%s]: %s",
+			resp.StatusCode, cls.Class.String(),
+			string(body[:min(len(body), 200)]))
 	}
 
 	contentType := resp.Header.Get("Content-Type")

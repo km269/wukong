@@ -190,7 +190,7 @@ func registerConfigHealth(reg *health.Registry, cfg *config.WukongConfig) {
 		reg.Register("provider:"+cfg.DefaultProvider, func(ctx context.Context) health.ComponentHealth {
 			status := health.StatusHealthy
 			msg := fmt.Sprintf("type=%s, model=%s", p.Type, p.Model)
-			if p.APIKey == "" && p.Type != "ollama" && p.Type != "lmstudio" {
+			if p.APIKey == "" && p.Type != "ollama" && p.Type != "lmstudio" && p.Type != "vllm" {
 				status = health.StatusDegraded
 				msg += " (no API key)"
 			}

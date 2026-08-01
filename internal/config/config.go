@@ -41,6 +41,8 @@
 //   - artifact.cos_secret_id, cos_secret_key
 //   - acp_server.api_key
 //   - cortex.embedding_api_key, embedding_base_url, embedding_model
+//   - cortex.reranker_api_key, reranker_base_url, reranker_model
+//   - cortex.vertical_routing.github_api_key
 //   - memoryflow.planner_model, extractor_model
 //   - graphflow.extractor_model
 //   - dify.api_secret
@@ -386,6 +388,20 @@ func (l *Loader) expandSecrets(cfg *WukongConfig) {
 		expandEnv(cfg.Cortex.EmbeddingBaseURL)
 	cfg.Cortex.EmbeddingModel =
 		expandEnv(cfg.Cortex.EmbeddingModel)
+
+	// CortexDB reranker settings.
+	cfg.Cortex.RerankerAPIKey =
+		expandEnv(cfg.Cortex.RerankerAPIKey)
+	cfg.Cortex.RerankerBaseURL =
+		expandEnv(cfg.Cortex.RerankerBaseURL)
+	cfg.Cortex.RerankerModel =
+		expandEnv(cfg.Cortex.RerankerModel)
+
+	// Vertical routing GitHub API key.
+	if cfg.Cortex.VerticalRouting != nil {
+		cfg.Cortex.VerticalRouting.GitHubAPIKey =
+			expandEnv(cfg.Cortex.VerticalRouting.GitHubAPIKey)
+	}
 
 	// MemoryFlow model settings.
 	cfg.MemoryFlow.PlannerModel =

@@ -482,6 +482,8 @@ func (s *Store) SearchHybrid(
 	type scoredResult struct {
 		result SearchResult
 		score  float64
+		sim    float64
+		ftsIdx int // original FTS rank index
 	}
 	var hybrid []scoredResult
 	for i, r := range ftsResults {
@@ -497,11 +499,48 @@ func (s *Store) SearchHybrid(
 			continue
 		}
 		sim := cosineSimilarity(queryVec, candVecs[0])
-		// Combined score: genome-weighted semantic + BM25.
-		// BM25 rank score uses reciprocal rank (1/(i+1)).
-		combined := sim*g.DenseWeight + (1.0/float64(i+1))*g.TextWeight
-		r.Score = combined
-		hybrid = append(hybrid, scoredResult{result: r, score: combined})
+		hybrid = append(hybrid, scoredResult{
+			result: r,
+			sim:    sim,
+			ftsIdx: i,
+		})
+	}
+
+	// Step 3b: Compute fused score.
+	if g.IsRRF() {
+		// Reciprocal Rank Fusion: rank candidates by similarity,
+		// then fuse FTS rank + vector rank.
+		// Sort a copy by similarity to get vector ranking.
+		vecRanked := make([]scoredResult, len(hybrid))
+		copy(vecRanked, hybrid)
+		for i := 0; i < len(vecRanked)-1; i++ {
+			for j := i + 1; j < len(vecRanked); j++ {
+				if vecRanked[j].sim > vecRanked[i].sim {
+					vecRanked[i], vecRanked[j] = vecRanked[j], vecRanked[i]
+				}
+			}
+		}
+		// Build vector rank map.
+		vecRank := make(map[int]int, len(vecRanked)) // ftsIdx -> vector rank
+		for rank, sr := range vecRanked {
+			vecRank[sr.ftsIdx] = rank
+		}
+		k := g.EffectiveRRFK()
+		for i := range hybrid {
+			ftsRank := hybrid[i].ftsIdx
+			vRank := vecRank[hybrid[i].ftsIdx]
+			hybrid[i].score = 1.0/(k+float64(ftsRank+1)) +
+				1.0/(k+float64(vRank+1))
+			hybrid[i].result.Score = hybrid[i].score
+		}
+	} else {
+		// Weighted fusion (original): sim×DenseWeight + (1/rank)×TextWeight.
+		for i := range hybrid {
+			combined := hybrid[i].sim*g.DenseWeight +
+				(1.0/float64(hybrid[i].ftsIdx+1))*g.TextWeight
+			hybrid[i].score = combined
+			hybrid[i].result.Score = combined
+		}
 	}
 
 	// Step 4: Sort by combined score descending
@@ -665,6 +704,12 @@ func genomeFromConfig(cfg *config.RecallConfig) search.SearchGenome {
 			KeywordMatchPercent: cfg.SearchStrategy.KeywordMatchPercent,
 			MaxRetrievedNum:     cfg.SearchStrategy.MaxRetrievedNum,
 			FTS5PoolSize:        cfg.SearchStrategy.FTS5PoolSize,
+			FusionMethod:        cfg.SearchStrategy.FusionMethod,
+			RRFK:                cfg.SearchStrategy.RRFK,
+			RerankerEnabled:     cfg.SearchStrategy.RerankerEnabled,
+			RerankerTopN:        cfg.SearchStrategy.RerankerTopN,
+			MMREnabled:          cfg.SearchStrategy.MMREnabled,
+			MMRLambda:           cfg.SearchStrategy.MMRLambda,
 		}.Normalized()
 	}
 	// Backward compat: derive from SearchMode string.

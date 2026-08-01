@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -317,33 +316,6 @@ func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Resu
 		}
 	}
 
-	// Pre-walk to build a case-insensitive map of all asset ZIM URLs.
-	// On case-insensitive filesystems (Windows), the filesystem may store
-	// a directory as "DesktopModules" while the original HTML references it
-	// as "Desktopmodules". Since ZIM lookups are case-sensitive, we need to
-	// rewrite HTML references to match the stored (filesystem) case.
-	assetCaseMap := make(map[string]string) // lowercase(url) -> actual url
-	if isClonedLayout {
-		filepath.Walk(sourceDir, func(path string, info os.FileInfo, walkErr error) error {
-			if walkErr != nil || info.IsDir() {
-				return nil
-			}
-			relPath, _ := filepath.Rel(sourceDir, path)
-			if filepath.Base(relPath) == "state.json" {
-				return nil
-			}
-			if strings.HasPrefix(relPath, "_wukong"+string(filepath.Separator)) {
-				return nil
-			}
-			url := filepath.ToSlash(stripPrefix(relPath))
-			mimeType := getMimeType(url)
-			if mimeType != "text/html" {
-				assetCaseMap[strings.ToLower(url)] = url
-			}
-			return nil
-		})
-	}
-
 	err := filepath.Walk(sourceDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			warnings = append(warnings, fmt.Sprintf("skip file %s: %v", path, walkErr))
@@ -379,14 +351,6 @@ func (p *Packer) packZIM(_ context.Context, sourceDir, outputPath string) (*Resu
 			}
 			if stripAssetsPrefix {
 				data = stripAssetsPrefixFromHTML(data)
-			}
-			// Normalize asset reference case to match the case of assets
-			// actually stored in the ZIM. On case-insensitive filesystems
-			// (Windows), HTML may reference "Desktopmodules/..." while the
-			// file was saved as "DesktopModules/...". ZIM lookups are
-			// case-sensitive, so we rewrite references to the stored case.
-			if len(assetCaseMap) > 0 {
-				data = normalizeAssetCaseInHTML(data, url, assetCaseMap)
 			}
 			if t := htmlTitleOfBytes(data); t != "" {
 				title = t
@@ -1002,11 +966,6 @@ func adjustHTMLPaths(data []byte, levels int) []byte {
 	// Process url() inside style attributes
 	s = adjustStyleURLs(s, levels)
 
-	// Process url() inside <style>...</style> tags
-	s = processStyleTags(s, func(css string) string {
-		return removeParentDirFromCSSURLs(css, levels)
-	})
-
 	return []byte(s)
 }
 
@@ -1061,55 +1020,6 @@ func processStyleAttr(s, attrPrefix string, transform func(string) string) strin
 		pos = valEnd + 1
 	}
 
-	return builder.String()
-}
-
-// processStyleTags finds all <style>...</style> blocks in the HTML and
-// transforms their CSS content using the provided function.
-// Handles <style>, <style type="text/css">, and similar variants.
-// The opening tag and closing </style> are preserved as-is; only the
-// CSS text between them is transformed.
-func processStyleTags(s string, transform func(string) string) string {
-	lowerS := strings.ToLower(s)
-	var builder strings.Builder
-	pos := 0
-	for {
-		idx := strings.Index(lowerS[pos:], "<style")
-		if idx < 0 {
-			builder.WriteString(s[pos:])
-			break
-		}
-		absIdx := pos + idx
-		builder.WriteString(s[pos:absIdx])
-
-		// Find the closing > of the opening <style ...> tag
-		tagEnd := strings.IndexByte(s[absIdx:], '>')
-		if tagEnd < 0 {
-			builder.WriteString(s[absIdx:])
-			break
-		}
-		tagEnd = absIdx + tagEnd
-
-		// Write the opening tag as-is
-		builder.WriteString(s[absIdx : tagEnd+1])
-
-		// Find </style> (case-insensitive)
-		contentStart := tagEnd + 1
-		closeIdx := strings.Index(lowerS[contentStart:], "</style>")
-		if closeIdx < 0 {
-			builder.WriteString(s[contentStart:])
-			break
-		}
-		closeIdx = contentStart + closeIdx
-
-		// Transform the CSS content
-		cssContent := s[contentStart:closeIdx]
-		builder.WriteString(transform(cssContent))
-
-		// Write </style> (8 chars) and continue searching after it
-		builder.WriteString(s[closeIdx : closeIdx+8])
-		pos = closeIdx + 8
-	}
 	return builder.String()
 }
 
@@ -1228,11 +1138,6 @@ func stripAssetsPrefixFromHTML(data []byte) []byte {
 		})
 	}
 
-	// Also process url() inside <style>...</style> tags
-	s = processStyleTags(s, func(css string) string {
-		return stripAssetsPrefixFromCSSURLs(css)
-	})
-
 	return []byte(s)
 }
 
@@ -1290,9 +1195,10 @@ func stripAssetsPrefixFromCSSURLs(css string) string {
 
 		urlValue := css[urlContentStart:urlEnd]
 
-		// Remove only the leading "assets/" path component (the clone directory
-		// prefix), preserving "assets/" segments that are part of the actual URL.
-		urlValue = stripLeadingAssetsComponent(urlValue)
+		// Remove "assets/" prefix if present
+		if strings.Contains(urlValue, "assets/") {
+			urlValue = strings.Replace(urlValue, "assets/", "", 1)
+		}
 
 		// Find closing paren
 		afterURL := urlEnd + quoteLen
@@ -1345,11 +1251,12 @@ func stripAssetsPrefixFromAttr(s, attrPrefix string) string {
 		valEnd = valStart + valEnd
 		value := s[valStart:valEnd]
 
-		// Remove only the leading "assets/" path component (the clone directory
-		// prefix), not "assets/" segments that are part of the actual URL path
-		// (e.g., ".../skins/dod2/assets/dist/css/..."). Handles multi-value
-		// attributes like srcset (comma-separated URLs) by processing each entry.
-		value = stripLeadingAssetsComponent(value)
+		// Remove "assets/" prefix from all paths that contain it.
+		// Handle both relative paths (../assets/...) and direct paths (assets/...).
+		// Also handles multi-value attributes like srcset with comma-separated URLs.
+		if strings.Contains(value, "assets/") {
+			value = strings.ReplaceAll(value, "assets/", "")
+		}
 
 		builder.WriteString(attrPrefix)
 		builder.WriteString(value)
@@ -1358,52 +1265,6 @@ func stripAssetsPrefixFromAttr(s, attrPrefix string) string {
 	}
 
 	return builder.String()
-}
-
-// stripLeadingAssetsComponent removes only the leading "assets/" path component
-// (the clone directory prefix) from a path or comma-separated list of paths.
-// It preserves "assets/" segments that appear in the middle of the actual URL
-// path (e.g., ".../skins/dod2/assets/dist/css/...").
-//
-// Examples:
-//
-//	"../../../../assets/_wukong/x/assets/y.css" → "../../../../_wukong/x/assets/y.css"
-//	"assets/_wukong/x.css"                      → "_wukong/x.css"
-//	"a/assets/b.css"                            → "a/assets/b.css"  (unchanged, no leading assets/)
-//	"url1 1x, ../assets/url2 2x"                → "url1 1x, ../url2 2x"
-func stripLeadingAssetsComponent(value string) string {
-	if !strings.Contains(value, "assets/") {
-		return value
-	}
-	// Handle multi-value attributes like srcset: "url1 1x, url2 2x"
-	if strings.Contains(value, ",") {
-		parts := strings.Split(value, ",")
-		for i, p := range parts {
-			// Preserve leading whitespace
-			trimmed := strings.TrimLeft(p, " \t")
-			leadingWS := p[:len(p)-len(trimmed)]
-			parts[i] = leadingWS + stripLeadingAssetsComponentSingle(trimmed)
-		}
-		return strings.Join(parts, ",")
-	}
-	return stripLeadingAssetsComponentSingle(value)
-}
-
-// stripLeadingAssetsComponentSingle strips the leading "assets/" path component
-// from a single path value (after any "../" prefix).
-func stripLeadingAssetsComponentSingle(value string) string {
-	rest := value
-	parentCount := 0
-	// Strip leading "../" sequences
-	for strings.HasPrefix(rest, "../") {
-		rest = rest[3:]
-		parentCount++
-	}
-	// Strip the single leading "assets/" if present
-	if strings.HasPrefix(rest, "assets/") {
-		rest = rest[len("assets/"):]
-	}
-	return strings.Repeat("../", parentCount) + rest
 }
 
 // replaceOneParentDir removes one leading "../" from relative paths in HTML
@@ -1560,278 +1421,4 @@ func buildCounterString(stats map[string]int) string {
 		parts = append(parts, fmt.Sprintf("%s=%d", mime, count))
 	}
 	return strings.Join(parts, ";")
-}
-
-// normalizeAssetCaseInHTML rewrites asset references in HTML to match the
-// case of the asset URLs actually stored in the ZIM file.
-//
-// On case-insensitive filesystems (Windows), the filesystem may store a
-// directory as "DesktopModules" while the original HTML references it as
-// "Desktopmodules". Since ZIM lookups are case-sensitive, references that
-// don't match the stored case resolve to 404. This function resolves each
-// relative asset reference against the page URL, looks it up in the
-// case-insensitive assetCaseMap, and rewrites the reference to use the
-// stored case.
-//
-// pageURL is the ZIM URL of the HTML page (e.g. "biographies/foo/index.html").
-// assetCaseMap maps lowercase(assetURL) -> actual assetURL stored in ZIM.
-func normalizeAssetCaseInHTML(data []byte, pageURL string, assetCaseMap map[string]string) []byte {
-	if len(assetCaseMap) == 0 {
-		return data
-	}
-	pageDir := path.Dir(pageURL)
-	if pageDir == "." {
-		pageDir = ""
-	}
-
-	s := string(data)
-
-	// Process href, src, srcset, content attributes
-	attrs := []string{
-		`href="`, `href='`,
-		`src="`, `src='`,
-		`srcset="`, `srcset='`,
-		`content="`, `content='`,
-	}
-	for _, attrPrefix := range attrs {
-		s = normalizeCaseInAttr(s, attrPrefix, pageDir, assetCaseMap)
-	}
-
-	// Process url() inside style attributes and <style> tags
-	s = processStyleAttr(s, `style="`, func(css string) string {
-		return normalizeCaseInCSSURLs(css, pageDir, assetCaseMap)
-	})
-	s = processStyleAttr(s, `style='`, func(css string) string {
-		return normalizeCaseInCSSURLs(css, pageDir, assetCaseMap)
-	})
-	s = processStyleTags(s, func(css string) string {
-		return normalizeCaseInCSSURLs(css, pageDir, assetCaseMap)
-	})
-
-	return []byte(s)
-}
-
-// normalizeCaseInAttr scans for HTML attributes with the given prefix (e.g.
-// `href="`) and rewrites their asset references to match the stored case.
-// Handles multi-value attributes like srcset (comma-separated URLs).
-func normalizeCaseInAttr(s, attrPrefix, pageDir string, assetCaseMap map[string]string) string {
-	var builder strings.Builder
-	pos := 0
-	prefixLen := len(attrPrefix)
-
-	for {
-		idx := strings.Index(s[pos:], attrPrefix)
-		if idx < 0 {
-			builder.WriteString(s[pos:])
-			break
-		}
-		absIdx := pos + idx
-		builder.WriteString(s[pos:absIdx])
-
-		quote := attrPrefix[prefixLen-1]
-		if quote != '"' && quote != '\'' {
-			builder.WriteString(s[absIdx : absIdx+prefixLen])
-			pos = absIdx + prefixLen
-			continue
-		}
-
-		valStart := absIdx + prefixLen
-		valEnd := strings.IndexByte(s[valStart:], quote)
-		if valEnd < 0 {
-			builder.WriteString(s[absIdx:])
-			break
-		}
-		valEnd = valStart + valEnd
-		value := s[valStart:valEnd]
-
-		// Handle comma-separated values (srcset: "url1 w1, url2 w2")
-		if strings.Contains(value, ",") {
-			parts := strings.Split(value, ",")
-			for i, p := range parts {
-				trimmed := strings.TrimLeft(p, " \t")
-				leadingWS := p[:len(p)-len(trimmed)]
-				// Split URL from descriptor at first whitespace
-				spIdx := strings.IndexAny(trimmed, " \t")
-				var u, desc string
-				if spIdx >= 0 {
-					u = trimmed[:spIdx]
-					desc = trimmed[spIdx:]
-				} else {
-					u = trimmed
-				}
-				u = normalizeCaseInURL(u, pageDir, assetCaseMap)
-				parts[i] = leadingWS + u + desc
-			}
-			value = strings.Join(parts, ",")
-		} else {
-			value = normalizeCaseInURL(value, pageDir, assetCaseMap)
-		}
-
-		builder.WriteString(attrPrefix)
-		builder.WriteString(value)
-		builder.WriteByte(quote)
-		pos = valEnd + 1
-	}
-
-	return builder.String()
-}
-
-// normalizeCaseInCSSURLs rewrites url() paths in CSS content to match the
-// stored asset case. Operates on both <style> tag content and inline
-// style attribute values.
-func normalizeCaseInCSSURLs(css, pageDir string, assetCaseMap map[string]string) string {
-	var builder strings.Builder
-	pos := 0
-
-	for {
-		idx := strings.Index(css[pos:], "url(")
-		if idx < 0 {
-			builder.WriteString(css[pos:])
-			break
-		}
-		absIdx := pos + idx
-		builder.WriteString(css[pos:absIdx])
-
-		urlStart := absIdx + 4
-
-		quoteChar := byte(0)
-		quoteLen := 0
-		trimmed := 0
-		for urlStart+trimmed < len(css) {
-			c := css[urlStart+trimmed]
-			if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
-				trimmed++
-				continue
-			}
-			if c == '"' || c == '\'' {
-				quoteChar = c
-				quoteLen = 1
-				trimmed++
-			}
-			break
-		}
-		urlContentStart := urlStart + trimmed
-
-		var urlEnd int
-		if quoteChar != 0 {
-			urlEnd = strings.IndexByte(css[urlContentStart:], quoteChar)
-			if urlEnd < 0 {
-				builder.WriteString(css[absIdx:])
-				break
-			}
-			urlEnd = urlContentStart + urlEnd
-		} else {
-			urlEnd = strings.IndexAny(css[urlContentStart:], ") \t\n\r")
-			if urlEnd < 0 {
-				builder.WriteString(css[absIdx:])
-				break
-			}
-			urlEnd = urlContentStart + urlEnd
-		}
-
-		urlValue := css[urlContentStart:urlEnd]
-		urlValue = normalizeCaseInURL(urlValue, pageDir, assetCaseMap)
-
-		afterURL := urlEnd + quoteLen
-		parenIdx := strings.IndexByte(css[afterURL:], ')')
-		if parenIdx < 0 {
-			builder.WriteString(css[absIdx:])
-			break
-		}
-
-		builder.WriteString(css[absIdx:urlContentStart])
-		builder.WriteString(urlValue)
-		builder.WriteString(css[urlEnd : afterURL+parenIdx+1])
-
-		pos = afterURL + parenIdx + 1
-	}
-
-	return builder.String()
-}
-
-// normalizeCaseInURL resolves a relative reference against the page
-// directory, looks it up in assetCaseMap, and returns the case-corrected
-// relative path. If the reference is external, absolute, or not found in
-// the map, it is returned unchanged.
-func normalizeCaseInURL(ref, pageDir string, assetCaseMap map[string]string) string {
-	// Skip external/anchor/data/absolute references
-	if strings.HasPrefix(ref, "http://") || strings.HasPrefix(ref, "https://") ||
-		strings.HasPrefix(ref, "//") || strings.HasPrefix(ref, "#") ||
-		strings.HasPrefix(ref, "mailto:") || strings.HasPrefix(ref, "tel:") ||
-		strings.HasPrefix(ref, "data:") || strings.HasPrefix(ref, "javascript:") ||
-		strings.HasPrefix(ref, "/") || ref == "" {
-		return ref
-	}
-
-	// Split off query/fragment for lookup, reattach afterwards
-	query := ""
-	if idx := strings.IndexAny(ref, "?#"); idx >= 0 {
-		query = ref[idx:]
-		ref = ref[:idx]
-	}
-
-	// Resolve relative to page directory
-	var resolved string
-	if pageDir == "" {
-		resolved = ref
-	} else {
-		resolved = path.Join(pageDir, ref)
-	}
-	resolved = path.Clean(resolved)
-
-	// Look up in case map (lowercase key)
-	actual, ok := assetCaseMap[strings.ToLower(resolved)]
-	if !ok || actual == resolved {
-		return ref + query
-	}
-
-	// Compute relative path from pageDir to the actual-cased URL
-	var rel string
-	if pageDir == "" {
-		rel = actual
-	} else {
-		rel = relSlashPath(pageDir, actual)
-	}
-
-	return rel + query
-}
-
-// relSlashPath computes a relative path from base to target, both using
-// forward slashes. This is the forward-slash equivalent of filepath.Rel,
-// needed because the standard "path" package does not provide Rel.
-//
-// e.g. relSlashPath("biographies/foo", "biographies/DesktopModules/x.css")
-//
-//	=> "../DesktopModules/x.css"
-func relSlashPath(base, target string) string {
-	base = strings.TrimPrefix(base, "./")
-	target = strings.TrimPrefix(target, "./")
-	if base == "" {
-		return target
-	}
-
-	baseParts := strings.Split(base, "/")
-	targetParts := strings.Split(target, "/")
-
-	// Find common prefix length.
-	common := 0
-	for common < len(baseParts) && common < len(targetParts) &&
-		baseParts[common] == targetParts[common] {
-		common++
-	}
-
-	var parts []string
-	// Go up from base to the common ancestor.
-	for i := common; i < len(baseParts); i++ {
-		parts = append(parts, "..")
-	}
-	// Descend into target.
-	for i := common; i < len(targetParts); i++ {
-		parts = append(parts, targetParts[i])
-	}
-
-	if len(parts) == 0 {
-		return "."
-	}
-	return strings.Join(parts, "/")
 }

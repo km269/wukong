@@ -253,10 +253,11 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 	// Test: only enable event listening, no body collection
 	// Track all network requests to collect their response bodies later.
 	type trackedResponse struct {
-		requestID proto.NetworkRequestID
-		url       string
-		mimeType  string
-		status    int
+		requestID    proto.NetworkRequestID
+		url          string
+		mimeType     string
+		status       int
+		resourceType string // CDP resource type: XHR, Fetch, Document, etc.
 	}
 	var tracked []*trackedResponse
 	var trackedMu sync.Mutex
@@ -268,10 +269,11 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 		}
 		trackedMu.Lock()
 		tracked = append(tracked, &trackedResponse{
-			requestID: e.RequestID,
-			url:       e.Response.URL,
-			mimeType:  e.Response.MIMEType,
-			status:    int(e.Response.Status),
+			requestID:    e.RequestID,
+			url:          e.Response.URL,
+			mimeType:     e.Response.MIMEType,
+			status:       int(e.Response.Status),
+			resourceType: string(e.Type),
 		})
 		trackedMu.Unlock()
 	})
@@ -400,6 +402,7 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 	// Collect assets by fetching them in the page context via JS.
 	// This is more reliable than Network.getResponseBody which can hang.
 	collectedAssets := make(map[string]*types.CollectedAsset)
+	var discoveredAPIs []types.DiscoveredAPI
 	{
 		trackedMu.Lock()
 		allTracked := make([]*trackedResponse, len(tracked))
@@ -548,6 +551,20 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 	doneCollecting:
 
 		logutil.Info("asset collection", slog.Int("tracked", len(allTracked)), slog.Int("toFetch", len(toFetch)), slog.Int("success", successCount), slog.Int("failed", failCount))
+
+		// Discover hidden API endpoints from tracked network responses.
+		// Filters for XHR/Fetch requests returning structured data
+		// (JSON/XML/GraphQL), excluding static assets and the main document.
+		infos := make([]networkResponseInfo, len(allTracked))
+		for i, t := range allTracked {
+			infos[i] = networkResponseInfo{
+				URL:          t.url,
+				MimeType:     t.mimeType,
+				Status:       t.status,
+				ResourceType: t.resourceType,
+			}
+		}
+		discoveredAPIs = discoverAPIs(infos, finalURL)
 	}
 
 	html, err := page.HTML()
@@ -641,6 +658,7 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 		Referer:             job.referer,
 		CollectedAssets:     collectedAssets,
 		ExtractedLinks:      extractedLinks,
+		DiscoveredAPIs:      discoveredAPIs,
 	}}
 }
 

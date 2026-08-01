@@ -785,6 +785,7 @@ func newAppsCloneCmd() *cobra.Command {
 		keepMedia        bool
 		skipExt          []string
 		allowDownloads   bool
+		archiveFallback  bool
 	)
 
 	cmd := &cobra.Command{
@@ -861,6 +862,10 @@ Examples:
 			if cmd.Flags().Changed("asset-same-domain") {
 				v := assetSameDomain
 				opts.AssetSameDomain = &v
+			}
+			if cmd.Flags().Changed("archive-fallback") {
+				v := archiveFallback
+				opts.ArchiveFallback = &v
 			}
 
 			// Respect flags default (non-flag bools are false by default, meaning
@@ -943,6 +948,7 @@ Examples:
 	cmd.Flags().BoolVar(&keepMedia, "keep-media", false, "Download media files (video, audio, PDF, archives) that are normally skipped")
 	cmd.Flags().StringArrayVar(&skipExt, "skip-ext", nil, "Additional file extensions to skip (repeatable, e.g. --skip-ext .mp3 --skip-ext .pdf)")
 	cmd.Flags().BoolVar(&allowDownloads, "allow-downloads", false, "Allow the browser to auto-download files (default: disabled — cloner manages assets)")
+	cmd.Flags().BoolVar(&archiveFallback, "archive-fallback", false, "Fall back to the Wayback Machine (web.archive.org) for dead links")
 
 	return cmd
 }

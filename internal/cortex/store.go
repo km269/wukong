@@ -11,6 +11,9 @@ import (
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/recall"
 	"github.com/km269/wukong/internal/search"
+	"github.com/km269/wukong/internal/search/chunking"
+	"github.com/km269/wukong/internal/search/metrics"
+	"github.com/km269/wukong/internal/search/vertical"
 
 	"github.com/liliang-cn/cortexdb/v2/pkg/core"
 	cortexdb "github.com/liliang-cn/cortexdb/v2/pkg/cortexdb"
@@ -24,7 +27,11 @@ import (
 type CortexStore struct {
 	cfg         *config.CortexConfig
 	embedder    *Embedder
-	db          *cortexdb.DB // real CortexDB (HNSW + FTS5)
+	reranker    *Reranker
+	router      *vertical.Router       // optional vertical domain routing
+	chunker     *chunking.Chunker      // optional semantic chunker
+	metrics     *metrics.SearchMetrics // search observability
+	db          *cortexdb.DB           // real CortexDB (HNSW + FTS5)
 	lexical     *lexicalStore
 	vectorCache *VectorCache
 	genome      search.SearchGenome // search strategy parameters
@@ -44,6 +51,10 @@ func NewStore(
 	cs := &CortexStore{
 		cfg:      cfg,
 		embedder: embedder,
+		reranker: NewReranker(cfg),
+		router:   vertical.NewRouter(verticalConfigFromCortex(cfg)),
+		chunker:  chunkerFromConfig(cfg),
+		metrics:  metrics.New(),
 		genome:   cortexGenomeFromConfig(cfg),
 	}
 
@@ -94,11 +105,72 @@ func (s *CortexStore) StoreMessage(msg recall.ChatMessage) error {
 }
 
 func (s *CortexStore) storeCortexVector(msg recall.ChatMessage) error {
-	embedText := msg.Content
-	if len(embedText) > 8000 {
-		embedText = embedText[:8000]
+	// Use semantic chunking for long messages; short messages
+	// skip the chunker entirely (single embedding).
+	var chunks []chunking.Chunk
+	if s.chunker != nil {
+		chunks = s.chunker.Chunk(msg.Content)
+	}
+	if len(chunks) <= 1 {
+		// Short message: single embedding (preserves prior behaviour).
+		embedText := msg.Content
+		if len(embedText) > 8000 {
+			embedText = embedText[:8000]
+		}
+		return s.storeSingleVector(msg, embedText, fmt.Sprintf("msg_%d", msg.ID))
 	}
 
+	// Long message: embed each chunk and store as separate vectors.
+	// This improves retrieval recall by allowing fine-grained
+	// semantic matching against individual passages.
+	bgCtx, cancel := context.WithTimeout(
+		context.Background(), 90*time.Second,
+	)
+	defer cancel()
+
+	chunkTexts := make([]string, len(chunks))
+	for i, c := range chunks {
+		chunkTexts[i] = c.Text
+	}
+
+	vecs, err := s.embedder.Embed(bgCtx, chunkTexts)
+	if err != nil {
+		// Fall back to single-vector storage on batch failure.
+		embedText := msg.Content
+		if len(embedText) > 8000 {
+			embedText = embedText[:8000]
+		}
+		return s.storeSingleVector(msg, embedText, fmt.Sprintf("msg_%d", msg.ID))
+	}
+
+	metadata := map[string]string{
+		"session_id": msg.SessionID,
+		"user_id":    msg.UserID,
+		"role":       msg.Role,
+	}
+	var lastErr error
+	for i, vec := range vecs {
+		if len(vec) == 0 {
+			continue
+		}
+		key := fmt.Sprintf("msg_%d_chunk_%d", msg.ID, i)
+		chunkMeta := metadata
+		chunkMeta["chunk_idx"] = fmt.Sprintf("%d", i)
+		chunkMeta["chunk_total"] = fmt.Sprintf("%d", len(chunks))
+		if err := s.db.InsertTextWithVector(
+			bgCtx, key, chunks[i].Text, vecToFloat32(vec), chunkMeta,
+		); err != nil {
+			lastErr = err
+		}
+	}
+	return lastErr
+}
+
+// storeSingleVector embeds a single text and stores it in CortexDB.
+// Used for short messages that don't need chunking.
+func (s *CortexStore) storeSingleVector(
+	msg recall.ChatMessage, embedText, cacheKey string,
+) error {
 	bgCtx, cancel := context.WithTimeout(
 		context.Background(), 60*time.Second,
 	)
@@ -108,7 +180,6 @@ func (s *CortexStore) storeCortexVector(msg recall.ChatMessage) error {
 	var err error
 
 	// Use vector cache to avoid redundant embedding calls.
-	cacheKey := fmt.Sprintf("msg_%d", msg.ID)
 	if s.vectorCache != nil {
 		vector, err = s.vectorCache.GetOrComputeMessageVector(
 			bgCtx,
@@ -152,28 +223,175 @@ func (s *CortexStore) storeCortexVector(msg recall.ChatMessage) error {
 
 // Search uses CortexDB HNSW vector search when available, FTS5 otherwise.
 // The SearchGenome controls mode selection, TopK, and hybrid weighting.
+// When vertical routing is enabled and the query targets a known
+// vertical (arXiv, GitHub, Wikipedia, Reddit), results from the
+// platform's search API are merged with local retrieval according
+// to the configured MergeMode.
 func (s *CortexStore) Search(
 	query, userID string, limit int,
 ) ([]recall.SearchResult, error) {
+	start := time.Now()
 	if limit <= 0 {
 		limit = s.genome.EffectiveTopK()
 	}
 
+	// Vertical routing: dispatch to specialised backends when the
+	// query targets a known vertical. Failures are non-fatal; we
+	// fall through to local retrieval.
+	if s.router != nil && s.router.Enabled() {
+		ctx, cancel := context.WithTimeout(
+			context.Background(), 15*time.Second,
+		)
+		vResults, vErr := s.router.Search(ctx, query, limit)
+		cancel()
+		if vErr == nil && len(vResults) > 0 {
+			results := s.mergeVertical(query, userID, limit, vResults)
+			s.recordMetric(metrics.ModeVertical, start, len(results),
+				query, false, false, false, true,
+				string(s.router.DetectIntent(query)), "", len(results))
+			return results, nil
+		}
+	}
+
 	g := s.genome.Normalized()
+	var results []recall.SearchResult
+	var err error
+	var mode metrics.SearchMode
+
 	switch {
 	case g.IsLexicalOnly():
-		return s.lexical.search(query, userID, limit)
+		mode = metrics.ModeLexical
+		results, err = s.lexical.search(query, userID, limit)
 	case g.IsVectorOnly() && s.db != nil && s.embedder != nil:
-		return s.searchCortex(query, userID, limit)
+		mode = metrics.ModeVector
+		results, err = s.searchCortex(query, userID, limit)
 	case g.IsHybrid() && s.db != nil && s.embedder != nil:
-		return s.searchHybridCortex(query, userID, limit)
+		mode = metrics.ModeHybrid
+		results, err = s.searchHybridCortex(query, userID, limit)
 	default:
 		// Fallback: vector if available, else lexical.
 		if s.db != nil && s.embedder != nil {
-			return s.searchCortex(query, userID, limit)
+			mode = metrics.ModeFallback
+			results, err = s.searchCortex(query, userID, limit)
+		} else {
+			mode = metrics.ModeLexical
+			results, err = s.lexical.search(query, userID, limit)
 		}
-		return s.lexical.search(query, userID, limit)
 	}
+
+	// Record metrics for the search operation.
+	errStr := ""
+	if err != nil {
+		errStr = err.Error()
+	}
+	s.recordMetric(mode, start, len(results), query,
+		g.IsRRF(), g.RerankerEnabled, g.MMREnabled, false,
+		"", errStr, len(results))
+
+	return results, err
+}
+
+// recordMetric records a search event in the metrics collector.
+func (s *CortexStore) recordMetric(
+	mode metrics.SearchMode, start time.Time,
+	resultCount int, query string,
+	usedRRF, usedReranker, usedMMR, usedVertical bool,
+	verticalIntent, errMsg string,
+	preRerankCount int,
+) {
+	if s.metrics == nil {
+		return
+	}
+	s.metrics.Record(metrics.SearchEvent{
+		Mode:           mode,
+		Duration:       time.Since(start),
+		ResultCount:    resultCount,
+		QueryLen:       len(query),
+		UsedRRF:        usedRRF,
+		UsedReranker:   usedReranker,
+		UsedMMR:        usedMMR,
+		UsedVertical:   usedVertical,
+		VerticalIntent: verticalIntent,
+		Error:          errMsg,
+		PreRerankCount: preRerankCount,
+	})
+}
+
+// MetricsSnapshot returns the current search metrics for observability.
+// Returns nil if metrics collection is not initialised.
+func (s *CortexStore) MetricsSnapshot() metrics.Snapshot {
+	if s.metrics == nil {
+		return metrics.Snapshot{}
+	}
+	return s.metrics.Snapshot()
+}
+
+// mergeVertical combines vertical (platform API) results with local
+// retrieval according to the configured MergeMode:
+//   - replace: vertical results only
+//   - prepend: vertical first, then local (default)
+//   - append:  local first, then vertical
+//
+// The combined list is truncated to limit.
+func (s *CortexStore) mergeVertical(
+	query, userID string, limit int,
+	vResults []vertical.Result,
+) []recall.SearchResult {
+	mode := vertical.MergePrepend
+	if s.cfg != nil && s.cfg.VerticalRouting != nil {
+		mode = vertical.Config{
+			MergeMode: s.cfg.VerticalRouting.MergeMode,
+		}.EffectiveMergeMode()
+	}
+
+	verticalSR := make([]recall.SearchResult, 0, len(vResults))
+	for _, r := range vResults {
+		preview := r.Preview
+		if r.URL != "" {
+			preview = fmt.Sprintf("[%s] %s\n%s", r.Source, r.Title, r.Preview)
+		}
+		verticalSR = append(verticalSR, recall.SearchResult{
+			Score:   r.Score,
+			Preview: preview,
+			Message: recall.ChatMessage{
+				Role:    "vertical",
+				Content: fmt.Sprintf("%s\n%s", r.Title, r.URL),
+			},
+		})
+	}
+
+	if mode == vertical.MergeReplace {
+		if len(verticalSR) > limit {
+			verticalSR = verticalSR[:limit]
+		}
+		return verticalSR
+	}
+
+	// Fetch local results for prepend/append modes.
+	var local []recall.SearchResult
+	g := s.genome.Normalized()
+	switch {
+	case g.IsHybrid() && s.db != nil && s.embedder != nil:
+		local, _ = s.searchHybridCortex(query, userID, limit)
+	case g.IsVectorOnly() && s.db != nil && s.embedder != nil:
+		local, _ = s.searchCortex(query, userID, limit)
+	default:
+		local, _ = s.lexical.search(query, userID, limit)
+	}
+
+	var combined []recall.SearchResult
+	switch mode {
+	case vertical.MergeAppend:
+		combined = append(combined, local...)
+		combined = append(combined, verticalSR...)
+	default: // prepend
+		combined = append(combined, verticalSR...)
+		combined = append(combined, local...)
+	}
+	if len(combined) > limit {
+		combined = combined[:limit]
+	}
+	return combined
 }
 
 // SetGenome configures the search strategy parameters.
@@ -295,34 +513,81 @@ func (s *CortexStore) searchHybridCortex(
 		}
 	}
 
-	// Step 3: Merge and re-rank using genome weights.
+	// Step 3: Merge and re-rank.
 	merged := make(map[string]*recall.SearchResult)
-	// Lexical results: score contribution = TextWeight × (1 / rank).
-	for i, r := range lexResults {
-		key := r.Preview
-		if key == "" {
-			key = fmt.Sprintf("lex_%d", i)
+
+	if g.IsRRF() {
+		// Reciprocal Rank Fusion: scale-invariant, rewards
+		// documents that appear in both channels.
+		k := g.EffectiveRRFK()
+		lexChannel := make([]search.RRFEntry, 0, len(lexResults))
+		for i, r := range lexResults {
+			key := r.Preview
+			if key == "" {
+				key = fmt.Sprintf("lex_%d", i)
+			}
+			lexChannel = append(lexChannel, search.RRFEntry{
+				Key: key, Rank: i,
+			})
 		}
-		score := g.TextWeight * (1.0 / float64(i+1))
-		if existing, ok := merged[key]; ok {
-			existing.Score += score
-		} else {
-			r.Score = score
+		vecChannel := make([]search.RRFEntry, 0, len(vecResults))
+		for i, r := range vecResults {
+			key := r.Preview
+			if key == "" {
+				key = fmt.Sprintf("vec_%d", i)
+			}
+			vecChannel = append(vecChannel, search.RRFEntry{
+				Key: key, Rank: i,
+			})
+		}
+		fused := search.RRFFuse(
+			[][]search.RRFEntry{lexChannel, vecChannel}, k,
+		)
+		for i, r := range lexResults {
+			key := r.Preview
+			if key == "" {
+				key = fmt.Sprintf("lex_%d", i)
+			}
+			r.Score = fused[key]
 			merged[key] = &r
 		}
-	}
-	// Vector results: score contribution = DenseWeight × similarity.
-	for i, r := range vecResults {
-		key := r.Preview
-		if key == "" {
-			key = fmt.Sprintf("vec_%d", i)
+		for i, r := range vecResults {
+			key := r.Preview
+			if key == "" {
+				key = fmt.Sprintf("vec_%d", i)
+			}
+			if _, ok := merged[key]; !ok {
+				r.Score = fused[key]
+				merged[key] = &r
+			}
 		}
-		score := g.DenseWeight * r.Score
-		if existing, ok := merged[key]; ok {
-			existing.Score += score
-		} else {
-			r.Score = score
-			merged[key] = &r
+	} else {
+		// Weighted fusion (original): DenseWeight×sim + TextWeight×(1/rank).
+		for i, r := range lexResults {
+			key := r.Preview
+			if key == "" {
+				key = fmt.Sprintf("lex_%d", i)
+			}
+			score := g.TextWeight * (1.0 / float64(i+1))
+			if existing, ok := merged[key]; ok {
+				existing.Score += score
+			} else {
+				r.Score = score
+				merged[key] = &r
+			}
+		}
+		for i, r := range vecResults {
+			key := r.Preview
+			if key == "" {
+				key = fmt.Sprintf("vec_%d", i)
+			}
+			score := g.DenseWeight * r.Score
+			if existing, ok := merged[key]; ok {
+				existing.Score += score
+			} else {
+				r.Score = score
+				merged[key] = &r
+			}
 		}
 	}
 
@@ -337,6 +602,65 @@ func (s *CortexStore) searchHybridCortex(
 				all[i], all[j] = all[j], all[i]
 			}
 		}
+	}
+
+	// Step 4b: Cross-Encoder reranking (optional).
+	// Re-scores the top-N candidates using a dedicated rerank model,
+	// replacing fusion scores with cross-encoder relevance scores.
+	if s.reranker != nil && g.RerankerEnabled && len(all) > 1 {
+		rerankN := g.EffectiveRerankerTopN()
+		if rerankN > len(all) {
+			rerankN = len(all)
+		}
+		// Build document texts for reranking.
+		docs := make([]string, rerankN)
+		for i := 0; i < rerankN; i++ {
+			docs[i] = all[i].Preview
+		}
+		bgCtx2, cancel2 := context.WithTimeout(
+			context.Background(), 30*time.Second,
+		)
+		defer cancel2()
+		indices, scores, err := s.reranker.Rerank(
+			bgCtx2, query, docs, limit,
+		)
+		if err == nil && len(indices) > 0 {
+			reranked := make([]recall.SearchResult, 0, len(indices))
+			for i, idx := range indices {
+				if idx < 0 || idx >= len(all) {
+					continue
+				}
+				r := all[idx]
+				r.Score = scores[i]
+				reranked = append(reranked, r)
+			}
+			if len(reranked) > 0 {
+				all = reranked
+			}
+		}
+	}
+
+	// Step 4c: MMR diversity (optional).
+	// Promotes diversity in top-K using Maximal Marginal Relevance,
+	// preventing all results from clustering around one document.
+	if g.MMREnabled && len(all) > limit {
+		items := make([]search.MMRItem, len(all))
+		for i, r := range all {
+			items[i] = search.MMRItem{
+				Text:  r.Preview,
+				Score: r.Score,
+				Index: i,
+			}
+		}
+		selected := search.MMRSelect(
+			items, limit, g.EffectiveMMRLambda(),
+			search.TextJaccardSimilarity,
+		)
+		diverse := make([]recall.SearchResult, 0, len(selected))
+		for _, item := range selected {
+			diverse = append(diverse, all[item.Index])
+		}
+		all = diverse
 	}
 
 	// Step 5: Return top-K.
@@ -468,6 +792,12 @@ func cortexGenomeFromConfig(cfg *config.CortexConfig) search.SearchGenome {
 			KeywordMatchPercent: cfg.SearchStrategy.KeywordMatchPercent,
 			MaxRetrievedNum:     cfg.SearchStrategy.MaxRetrievedNum,
 			FTS5PoolSize:        cfg.SearchStrategy.FTS5PoolSize,
+			FusionMethod:        cfg.SearchStrategy.FusionMethod,
+			RRFK:                cfg.SearchStrategy.RRFK,
+			RerankerEnabled:     cfg.SearchStrategy.RerankerEnabled,
+			RerankerTopN:        cfg.SearchStrategy.RerankerTopN,
+			MMREnabled:          cfg.SearchStrategy.MMREnabled,
+			MMRLambda:           cfg.SearchStrategy.MMRLambda,
 		}.Normalized()
 	}
 	maxR := cfg.MaxResults
@@ -485,3 +815,47 @@ func cortexGenomeFromConfig(cfg *config.CortexConfig) search.SearchGenome {
 
 // Ensure types compile.
 var _ core.Store
+
+// verticalConfigFromCortex builds a vertical.Config from CortexConfig.
+// Returns a disabled config when VerticalRouting is nil.
+func verticalConfigFromCortex(cfg *config.CortexConfig) vertical.Config {
+	if cfg == nil || cfg.VerticalRouting == nil {
+		return vertical.Config{Enabled: false}
+	}
+	vc := cfg.VerticalRouting
+	return vertical.Config{
+		Enabled:      vc.Enabled,
+		TopN:         vc.TopN,
+		Timeout:      vc.Timeout,
+		GitHubAPIKey: vc.GitHubAPIKey,
+		MergeMode:    vc.MergeMode,
+	}
+}
+
+// chunkerFromConfig builds a chunking.Chunker from CortexConfig.
+// Returns nil (disabled) when Chunking is nil or not enabled.
+// When Chunking is nil, chunking defaults to enabled with sensible
+// defaults; set enabled: false to disable.
+func chunkerFromConfig(cfg *config.CortexConfig) *chunking.Chunker {
+	if cfg == nil {
+		return nil
+	}
+	// Default: enabled when not explicitly configured.
+	if cfg.Chunking == nil {
+		return chunking.New()
+	}
+	if !cfg.Chunking.Enabled {
+		return nil
+	}
+	c := chunking.New()
+	if cfg.Chunking.MaxSize > 0 {
+		c.WithMaxSize(cfg.Chunking.MaxSize)
+	}
+	if cfg.Chunking.Overlap >= 0 {
+		c.WithOverlap(cfg.Chunking.Overlap)
+	}
+	if cfg.Chunking.MinSize >= 0 {
+		c.WithMinSize(cfg.Chunking.MinSize)
+	}
+	return c
+}

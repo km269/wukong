@@ -49,6 +49,7 @@ type CloneDefaults struct {
 	ProxyEnabled         bool            `mapstructure:"proxy_enabled"`
 	ProxyPool            []string        `mapstructure:"proxy_pool"`
 	ProxyRotateEvery     int             `mapstructure:"proxy_rotate_every"`
+	ArchiveFallback      bool            `mapstructure:"archive_fallback"`
 }
 
 // PackDefaults holds default values for app packaging operations.
