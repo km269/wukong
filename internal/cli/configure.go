@@ -268,7 +268,7 @@ func defaultConfig() *config.WukongConfig {
 		},
 		Summon: config.SummonConfig{
 			Enabled:       true,
-			SkillsDir:     ".wukong/skills",
+			DelegatesDir:  ".wukong/skills",
 			MaxConcurrent: 5,
 		},
 	}

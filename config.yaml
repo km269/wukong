@@ -21,6 +21,7 @@
 #   - acp_server.api_key
 #   - cortex.embedding_api_key, embedding_base_url, embedding_model
 #   - cortex.reranker_api_key, reranker_base_url, reranker_model
+#   - cortex.vertical_routing.github_api_key
 #   - memoryflow.planner_model, memoryflow.extractor_model
 #   - graphflow.extractor_model
 #   - dify.api_secret
@@ -29,6 +30,9 @@
 #   - browser.search.tavily.api_key
 #   - browser.search.google.api_key, google.cse_id
 #   - browser.search.bing.api_key
+#
+# Unresolved ${VAR} (no :-default, VAR unset) is surfaced as a
+# startup warning so typos like ${OEPNAI_API_KEY} are visible.
 #
 # Path conventions:
 #   - .wukong/      — Runtime data (apps, cache, skills, visuals, okf, evals)
@@ -78,7 +82,7 @@ providers:
 
   - name: "vllm"
     type: "vllm"
-    api_key: " "
+    api_key: ""                       # vllm 不需要 api_key；留空即可（代码已跳过校验）
     base_url: "http://192.168.50.97:8081/"
     model: "qwen3.6-27b"
 
@@ -253,14 +257,14 @@ cortex:
   db_path: "wukong.db"
   max_results: 10
   max_messages_per_session: 200
-  embedding_base_url: "${EMBEDDING_BASE_URL:-http://192.168.50.97:1234}"
-  embedding_api_key: "${EMBEDDING_API_KEY:-lmstudio}"
-  embedding_model: "${EMBEDDING_MODEL:-qwen3-embedding-0.6b}"
+  embedding_base_url: "${EMBEDDING_BASE_URL:-http://192.168.50.97:8082}"
+  embedding_api_key: "${EMBEDDING_API_KEY:-vllm}"
+  embedding_model: "${EMBEDDING_MODEL:-bge-m3-Q8_0}"
   # Cross-Encoder reranker (optional; empty = disabled)
   # Reuses embedding_base_url/api_key when reranker_* not set.
-  reranker_base_url: "${RERANKER_BASE_URL:-}"
-  reranker_api_key: "${RERANKER_API_KEY:-}"
-  reranker_model: "${RERANKER_MODEL:-}"
+  reranker_base_url: "${RERANKER_BASE_URL:-http://192.168.50.97:8083}"
+  reranker_api_key: "${RERANKER_API_KEY:-vllm}"
+  reranker_model: "${RERANKER_MODEL:-bge-reranker-v2-m3-FP16}"
   # Search strategy tuning (optional)
   search_strategy:
     recall_mode: "hybrid"          # lexical | vector | hybrid
@@ -298,15 +302,15 @@ memoryflow:
   db_path: "wukong.db"
   namespace: "assistant"
   embedding_dimensions: 0
-  planner_model: "${LMSTUDIO_MODEL:-google/gemma-4-26b-a4b}"
-  extractor_model: "${LMSTUDIO_MODEL:-google/gemma-4-26b-a4b}"
+  planner_model: "${VLLM_MODEL:-qwen3.6-27b}"
+  extractor_model: "${VLLM_MODEL:-qwen3.6-27b}"
 
 graphflow:
   enabled: true
   db_path: "wukong.db"
   max_chars_per_doc: 8000
   auto_extract: true
-  extractor_model: "${LMSTUDIO_MODEL:-google/gemma-4-26b-a4b}"
+  extractor_model: "${VLLM_MODEL:-qwen3.6-27b}"
 
 importflow:
   enabled: true
@@ -407,22 +411,22 @@ apps:
     workers: 4
     asset_workers: 8
     browser_pages: 4
-    timeout: 60
-    render_timeout: 30
-    settle: 1500
+    timeout: 60                    # seconds — page navigation deadline
+    render_timeout: 30             # seconds — single render wait
+    settle: 1500                   # milliseconds — network idle wait
     scroll: false
     user_agent: ""
     asset_same_domain: true
     max_asset_bytes: 52428800
     respect_robots: true
-    crawl_delay: 0
+    crawl_delay: 0                 # milliseconds — delay between requests
     no_sitemap: false
     dedup_content: true
     mobile_readable: true
     enable_resume: true
     persist: true
     incremental: true
-    cache_max_age: 86400
+    cache_max_age: 86400           # seconds — cache TTL
     headless: true
     stealth: true
     chrome_profile: ".wukong/chrome/profile"
@@ -496,19 +500,25 @@ gateway:
 # ===========================================================================
 # K. Agent-to-Agent Communication
 # ===========================================================================
+# summon — Sub-agent delegation subsystem (internal/summon/delegate.go).
+# Loads .md delegate definitions from delegates_dir, wraps Skill agents
+# and remote A2A agents as callable tools for the main agent.
 summon:
-  enabled: true
-  skills_dir: ".wukong/skills"
-  max_concurrent: 5
-  a2a_remotes: []
+  enabled: true                     # false = skip sub-agent delegation entirely
+  delegates_dir: ".wukong/skills"   # 子代理委派定义目录（.md 文件，每个成为一个 Delegate）
+  max_concurrent: 5                 # max parallel sub-agent executions (>=0)
+  a2a_remotes: []                   # remote A2A agents; OAuth2 ones get auto token-refresh
 
+# anp — Agent Network Protocol stack. Implemented in internal/summon/
+# (meta_protocol.go, e2ee.go) but exposed as an independent config block.
+# These flags drive the summon package's MetaProtocol + E2EEMessenger.
 anp:
   enabled: false
   port: 9092
   discovery_enabled: true
-  meta_protocol_enabled: true
+  meta_protocol_enabled: true       # drives summon.NewMetaProtocol
   http_sign_enabled: true
-  e2ee_enabled: true
+  e2ee_enabled: true                # drives summon.NewE2EEMessenger
   a2a_enabled: true
   mcp_enabled: true
   agui_enabled: true
@@ -531,8 +541,8 @@ dify:
 # ===========================================================================
 knowledge:
   enabled: true
-  embedder_provider: "lmstudio"
-  embedder_model: "text-embedding-3-small"
+  embedder_provider: "vllm"              # 留空时回退到 cortex.embedding_* 配置，再回退到 default_provider
+  embedder_model: "bge-m3-Q8_0"
   vector_store: "inmemory"
   max_results: 5
   enable_source_sync: false

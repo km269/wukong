@@ -374,7 +374,7 @@ type Manager struct {
 | `memory` | `NewMemoryToolSet(cfg)` | 记忆管理 |
 | `auto_visualiser` | `NewVisualiserToolSet(cfg)` | 可视化 |
 | `tutorial` | `NewTutorialToolSet(cfg)` | 教程 |
-| `web` | `NewWebToolSet(cfg)` | 网页搜索 |
+| `web` | `NewWebToolSet(cfg)` | 网页搜索（聚合搜索 + 浏览器回退 + 本地 Readability） |
 | `ard` | `NewARDToolSet()` | 资源发现 |
 | `cortex` | `NewCortexToolSet(cfg)` | 知识搜索 |
 | `agent_tools` / `apps` / `code_mode` / `top_of_mind` | — | 返回 nil，在 bootstrapSession 中注入运行时依赖 |
@@ -855,24 +855,79 @@ type Guard struct {
 | **memory** | `memory.go` | `memory_add`、`memory_search`、`memory_update`、`memory_delete`、`memory_load`、`memory_clear` |
 | **auto_visualiser** | `auto_visualiser.go` | 图表/可视化生成 |
 | **tutorial** | `tutorial.go` | 交互式教程 |
-| **web** | `web.go` | 网页搜索（DuckDuckGo、SearXNG、Tavily、Google、Bing） |
+| **web** | `web.go` | 网页搜索工具集创建 + 浏览器/CortexStore 依赖注入 |
 | **code_mode** | `codemode.go` | JavaScript 代码执行沙箱 |
 | **apps** | `apps.go` | 应用克隆、打包、管理 |
 | **top_of_mind** | `topofmind.go` | 持久指令注入 |
 | **agent_tools** | `agent.go` | 子代理工具（code-reviewer、summarizer、code-generator） |
 | **ard** | `ard.go` | 资源发现工具 |
 | **cortex** | `cortex.go` | 知识搜索工具 |
-| **aggregate_search** | `aggregate_search.go` | 聚合搜索 |
-| **google** | `google.go` | Google 搜索 |
-| **bing** | `bing.go` | Bing 搜索 |
-| **searxng** | `searxng.go` | SearXNG 搜索 |
-| **tavily** | `tavily.go` | Tavily 搜索 |
+| **aggregate_search** | `aggregate_search.go` | 聚合搜索（6 API 后端 + 6 浏览器引擎回退 + 3 级内容抓取） |
+| **google** | `google.go` | Google 搜索（API 模式） |
+| **bing** | `bing.go` | Bing 搜索（API 模式） |
+| **searxng** | `searxng.go` | SearXNG 搜索（API 模式） |
+| **tavily** | `tavily.go` | Tavily 搜索（API 模式） |
 
 ### 15.2 MCP 外部工具
 
 - 通过 MCP 协议连接外部服务器（stdio 或 HTTP/SSE）
 - MCP Broker 模式：4 个 Broker 工具用于按需发现
 - Deeplink 注册
+
+### 15.3 Web 搜索工具详解 (`web_search`)
+
+`web_search` 是系统最核心的网络搜索工具，由 `aggregate_search.go` 实现。
+
+**输入参数：**
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `query` | string | 是 | 搜索关键词 |
+| `fetch_count` | int | 否 | 抓取前 N 条结果的完整页面内容（默认 3，设 0 跳过） |
+
+**输出结构：**
+
+```json
+{
+  "success": true,
+  "results": [
+    {"title": "...", "url": "...", "snippet": "...", "source": "bing"}
+  ],
+  "fetch_results": [
+    {"url": "...", "title": "...", "markdown": "..."}
+  ],
+  "error": ""
+}
+```
+
+**搜索后端：**
+
+| 层级 | 后端 | 触发条件 |
+|------|------|---------|
+| API 后端 | DuckDuckGo / SearXNG / Tavily / Google / Bing / CortexStore | 并发调用所有启用的后端 |
+| 浏览器回退 | Bing / Baidu / WeChat / Zhihu / DuckDuckGo / Google | API 后端全部返回 0 条时 |
+| 内容抓取 | Browser → Local Reader → HTTP | 对 Top-N 结果抓取完整页面 |
+
+**配置项 (`config.yaml`)：**
+
+```yaml
+browser:
+  search:
+    backends: [duckduckgo, searxng, tavily]
+    searxng:
+      url: "${SEARXNG_URL:-http://43.167.226.121:8080/}"
+    tavily:
+      api_key: "${TAVILY_API_KEY:-}"
+```
+
+**本地 Readability 提取 (`internal/apps/sanitize/readability.go`)：**
+
+完全本地实现的 Readability 算法，替代外部 API：
+
+| 函数 | 说明 |
+|------|------|
+| `ExtractReadableContent(htmlContent) → string` | 提取主体内容 HTML |
+| `ExtractReadableMarkdown(htmlContent) → string` | 提取 + 转 Markdown，自动回退 |
 
 ## 16. 数据持久化
 

@@ -12,9 +12,9 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
-// TestSummonManager_Integration_LoadSkills creates a temporary skills
-// directory, writes skill files, and verifies they are loaded correctly.
-func TestSummonManager_Integration_LoadSkills(t *testing.T) {
+// TestSummonManager_Integration_LoadDelegates creates a temporary skills
+// directory, writes delegate definition files, and verifies they are loaded correctly.
+func TestSummonManager_Integration_LoadDelegates(t *testing.T) {
 	// Create temporary skills directory
 	tmpDir := t.TempDir()
 	skillsDir := filepath.Join(tmpDir, "skills")
@@ -41,30 +41,30 @@ func TestSummonManager_Integration_LoadSkills(t *testing.T) {
 
 	cfg := &config.SummonConfig{
 		Enabled:       true,
-		SkillsDir:     skillsDir,
+		DelegatesDir:  skillsDir,
 		MaxConcurrent: 5,
 	}
 
 	mgr := NewSummonManager(cfg, nil)
 
 	// Load skills (no model, so delegates won't be created, but skills parsed)
-	if err := mgr.LoadSkills(context.Background()); err != nil {
-		t.Fatalf("LoadSkills: %v", err)
+	if err := mgr.LoadDelegates(context.Background()); err != nil {
+		t.Fatalf("LoadDelegates: %v", err)
 	}
 
-	// Verify skills were parsed
-	skills := mgr.ListSkills()
-	if len(skills) != 2 {
-		t.Errorf("expected 2 skills, got %d", len(skills))
+	// Verify delegates were parsed
+	infos := mgr.ListDelegateInfos()
+	if len(infos) != 2 {
+		t.Errorf("expected 2 delegate infos, got %d", len(infos))
 	}
 
-	// Check skill details
-	skillNames := make(map[string]SkillInfo)
-	for _, s := range skills {
-		skillNames[s.Name] = s
+	// Check delegate details
+	delegateNames := make(map[string]DelegateInfo)
+	for _, s := range infos {
+		delegateNames[s.Name] = s
 	}
 
-	if cr, ok := skillNames["code_review"]; ok {
+	if cr, ok := delegateNames["code_review"]; ok {
 		if cr.Description != "This skill performs automated code review." {
 			t.Errorf("unexpected description: %q", cr.Description)
 		}
@@ -72,7 +72,7 @@ func TestSummonManager_Integration_LoadSkills(t *testing.T) {
 		t.Error("code_review skill not found")
 	}
 
-	if tg, ok := skillNames["test_gen"]; ok {
+	if tg, ok := delegateNames["test_gen"]; ok {
 		if tg.Description != "This skill generates unit tests." {
 			t.Errorf("unexpected description: %q", tg.Description)
 		}
@@ -92,18 +92,18 @@ func TestSummonManager_Integration_EmptyDir(t *testing.T) {
 
 	cfg := &config.SummonConfig{
 		Enabled:       true,
-		SkillsDir:     skillsDir,
+		DelegatesDir:  skillsDir,
 		MaxConcurrent: 3,
 	}
 
 	mgr := NewSummonManager(cfg, nil)
-	if err := mgr.LoadSkills(context.Background()); err != nil {
-		t.Fatalf("LoadSkills on empty dir: %v", err)
+	if err := mgr.LoadDelegates(context.Background()); err != nil {
+		t.Fatalf("LoadDelegates on empty dir: %v", err)
 	}
 
-	skills := mgr.ListSkills()
-	if len(skills) != 0 {
-		t.Errorf("expected 0 skills in empty dir, got %d", len(skills))
+	infos := mgr.ListDelegateInfos()
+	if len(infos) != 0 {
+		t.Errorf("expected 0 delegate infos in empty dir, got %d", len(infos))
 	}
 }
 
@@ -131,21 +131,21 @@ func TestSummonManager_Integration_NonMarkdownFiles(t *testing.T) {
 
 	cfg := &config.SummonConfig{
 		Enabled:       true,
-		SkillsDir:     skillsDir,
+		DelegatesDir:  skillsDir,
 		MaxConcurrent: 3,
 	}
 
 	mgr := NewSummonManager(cfg, nil)
-	if err := mgr.LoadSkills(context.Background()); err != nil {
-		t.Fatalf("LoadSkills: %v", err)
+	if err := mgr.LoadDelegates(context.Background()); err != nil {
+		t.Fatalf("LoadDelegates: %v", err)
 	}
 
-	skills := mgr.ListSkills()
-	if len(skills) != 1 {
-		t.Errorf("expected 1 skill, got %d", len(skills))
+	infos := mgr.ListDelegateInfos()
+	if len(infos) != 1 {
+		t.Errorf("expected 1 delegate info, got %d", len(infos))
 	}
-	if len(skills) > 0 && skills[0].Name != "valid" {
-		t.Errorf("expected 'valid' skill, got %q", skills[0].Name)
+	if len(infos) > 0 && infos[0].Name != "valid" {
+		t.Errorf("expected 'valid' delegate, got %q", infos[0].Name)
 	}
 }
 
@@ -218,21 +218,21 @@ func TestSummonManager_Integration_Lifecycle(t *testing.T) {
 
 	cfg := &config.SummonConfig{
 		Enabled:       true,
-		SkillsDir:     skillsDir,
+		DelegatesDir:  skillsDir,
 		MaxConcurrent: 5,
 	}
 
 	mgr := NewSummonManager(cfg, nil)
 
 	// Load skills
-	if err := mgr.LoadSkills(context.Background()); err != nil {
-		t.Fatalf("LoadSkills: %v", err)
+	if err := mgr.LoadDelegates(context.Background()); err != nil {
+		t.Fatalf("LoadDelegates: %v", err)
 	}
 
-	// List skills
-	skills := mgr.ListSkills()
-	if len(skills) != 1 {
-		t.Errorf("expected 1 skill, got %d", len(skills))
+	// List delegate infos
+	infos := mgr.ListDelegateInfos()
+	if len(infos) != 1 {
+		t.Errorf("expected 1 delegate info, got %d", len(infos))
 	}
 
 	// Close

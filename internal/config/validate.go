@@ -13,6 +13,7 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"strings"
 )
 
 // validateURLField returns a non-empty warning string if raw is non-empty
@@ -325,7 +326,140 @@ func (c *WukongConfig) Validate() error {
 		}
 	}
 
+	// Validate summon config (only when enabled).
+	if c.Summon.Enabled {
+		if c.Summon.MaxConcurrent < 0 {
+			return fmt.Errorf(
+				"summon.max_concurrent must be >= 0, got %d",
+				c.Summon.MaxConcurrent,
+			)
+		}
+		for _, r := range c.Summon.A2ARemotes {
+			if r.Name == "" {
+				return fmt.Errorf(
+					"summon.a2a_remotes[].name is required")
+			}
+			if r.ServerURL == "" {
+				return fmt.Errorf(
+					"summon.a2a_remotes[%q].server_url is required",
+					r.Name,
+				)
+			}
+			switch r.AuthType {
+			case "", "api_key", "jwt", "oauth2":
+				// Valid.
+			default:
+				return fmt.Errorf(
+					"summon.a2a_remotes[%q].auth_type %q is invalid; "+
+						"use api_key, jwt, or oauth2",
+					r.Name, r.AuthType,
+				)
+			}
+		}
+	}
+
+	// Validate browser search backends.
+	if c.Browser.Enabled {
+		validBackends := map[string]bool{
+			"duckduckgo": true,
+			"searxng":    true,
+			"tavily":     true,
+			"google":     true,
+			"bing":       true,
+		}
+		for _, b := range c.Browser.Search.Backends {
+			if !validBackends[b] {
+				return fmt.Errorf(
+					"browser.search.backends contains unknown backend %q; "+
+						"use duckduckgo, searxng, tavily, google, or bing",
+					b,
+				)
+			}
+		}
+	}
+
+	// Validate cortex.search_strategy ranges.
+	if c.Cortex.Enabled && c.Cortex.SearchStrategy != nil {
+		ss := c.Cortex.SearchStrategy
+		if ss.DenseWeight < 0.0 || ss.DenseWeight > 1.0 {
+			return fmt.Errorf(
+				"cortex.search_strategy.dense_weight %.2f is out of range [0.0, 1.0]",
+				ss.DenseWeight,
+			)
+		}
+		if ss.TextWeight < 0.0 || ss.TextWeight > 1.0 {
+			return fmt.Errorf(
+				"cortex.search_strategy.text_weight %.2f is out of range [0.0, 1.0]",
+				ss.TextWeight,
+			)
+		}
+		if ss.MMRLambda < 0.0 || ss.MMRLambda > 1.0 {
+			return fmt.Errorf(
+				"cortex.search_strategy.mmr_lambda %.2f is out of range [0.0, 1.0]",
+				ss.MMRLambda,
+			)
+		}
+		if ss.FTS5PoolSize > 0 && ss.RerankerTopN > 0 &&
+			ss.RerankerTopN > ss.FTS5PoolSize {
+			return fmt.Errorf(
+				"cortex.search_strategy.reranker_top_n (%d) must be <= "+
+					"fts5_pool_size (%d); reranker cannot receive more "+
+					"candidates than the pool provides",
+				ss.RerankerTopN, ss.FTS5PoolSize,
+			)
+		}
+	}
+
+	// Validate service port conflicts. Collects (name, port) for all
+	// enabled servers and fails if two services share the same port.
+	// ANP uses a bare int Port field; others use Address like ":9090".
+	type svcPort struct {
+		name string
+		port string
+	}
+	var ports []svcPort
+	if c.A2AServer.Enabled && c.A2AServer.Address != "" {
+		ports = append(ports, svcPort{"a2a_server", portFromAddr(c.A2AServer.Address)})
+	}
+	if c.AGUI.Enabled && c.AGUI.Address != "" {
+		ports = append(ports, svcPort{"agui", portFromAddr(c.AGUI.Address)})
+	}
+	if c.ACPServer.Enabled && c.ACPServer.Address != "" {
+		ports = append(ports, svcPort{"acp_server", portFromAddr(c.ACPServer.Address)})
+	}
+	if c.ACPMCP.Enabled && c.ACPMCP.Address != "" {
+		ports = append(ports, svcPort{"acp_mcp", portFromAddr(c.ACPMCP.Address)})
+	}
+	if c.MCPServer.Enabled && c.MCPServer.Address != "" {
+		ports = append(ports, svcPort{"mcp_server", portFromAddr(c.MCPServer.Address)})
+	}
+	if c.ANP.Enabled && c.ANP.Port > 0 {
+		ports = append(ports, svcPort{"anp", fmt.Sprintf("%d", c.ANP.Port)})
+	}
+	seen := make(map[string]string, len(ports))
+	for _, p := range ports {
+		if p.port == "" {
+			continue
+		}
+		if prev, ok := seen[p.port]; ok {
+			return fmt.Errorf(
+				"port conflict: %s and %s both bind to port %s",
+				prev, p.name, p.port,
+			)
+		}
+		seen[p.port] = p.name
+	}
+
 	return nil
+}
+
+// portFromAddr extracts the port suffix from a "host:port" or ":port"
+// address. Returns empty string if no port can be identified.
+func portFromAddr(addr string) string {
+	if i := strings.LastIndex(addr, ":"); i != -1 {
+		return addr[i+1:]
+	}
+	return ""
 }
 
 // Warnings returns non-fatal configuration issues as human-readable
@@ -450,6 +584,125 @@ func (c *WukongConfig) Warnings() []string {
 		if w := validateURLField(r.ServerURL,
 			"summon.a2a_remotes["+r.Name+"].server_url"); w != "" {
 			warnings = append(warnings, w)
+		}
+	}
+
+	// Browser search backend configuration consistency. A backend
+	// listed in backends[] must have its required fields populated;
+	// otherwise it will fail at query time.
+	if c.Browser.Enabled {
+		// Build a set of active backends for enabled-field cross-check.
+		active := make(map[string]bool, len(c.Browser.Search.Backends))
+		for _, b := range c.Browser.Search.Backends {
+			active[b] = true
+			switch b {
+			case "searxng":
+				if c.Browser.Search.SearXNG.URL == "" {
+					warnings = append(warnings,
+						"browser.search.backends contains searxng but "+
+							"searxng.url is empty; this backend will fail")
+				}
+			case "tavily":
+				if c.Browser.Search.Tavily.APIKey == "" {
+					warnings = append(warnings,
+						"browser.search.backends contains tavily but "+
+							"tavily.api_key is empty; this backend will fail")
+				}
+			case "google":
+				if c.Browser.Search.Google.APIKey == "" ||
+					c.Browser.Search.Google.CSEID == "" {
+					warnings = append(warnings,
+						"browser.search.backends contains google but "+
+							"google.api_key or google.cse_id is empty; "+
+							"this backend will fail")
+				}
+			case "bing":
+				if c.Browser.Search.Bing.APIKey == "" {
+					warnings = append(warnings,
+						"browser.search.backends contains bing but "+
+							"bing.api_key is empty; this backend will fail")
+				}
+			}
+		}
+		// Warn about deprecated enabled=false mismatching backends list.
+		// The enabled field has no runtime effect; this warning helps
+		// users notice the inconsistency and migrate to backends-only.
+		if c.Browser.Search.DuckDuckGo.Enabled && !active["duckduckgo"] {
+			warnings = append(warnings,
+				"browser.search.duckduckgo.enabled is true but "+
+					"duckduckgo is not in browser.search.backends; "+
+					"the enabled field is deprecated and has no effect")
+		}
+		if c.Browser.Search.SearXNG.Enabled && !active["searxng"] {
+			warnings = append(warnings,
+				"browser.search.searxng.enabled is true but "+
+					"searxng is not in browser.search.backends; "+
+					"the enabled field is deprecated and has no effect")
+		}
+		if c.Browser.Search.Tavily.Enabled && !active["tavily"] {
+			warnings = append(warnings,
+				"browser.search.tavily.enabled is true but "+
+					"tavily is not in browser.search.backends; "+
+					"the enabled field is deprecated and has no effect")
+		}
+		if c.Browser.Search.Google.Enabled && !active["google"] {
+			warnings = append(warnings,
+				"browser.search.google.enabled is true but "+
+					"google is not in browser.search.backends; "+
+					"the enabled field is deprecated and has no effect")
+		}
+		if c.Browser.Search.Bing.Enabled && !active["bing"] {
+			warnings = append(warnings,
+				"browser.search.bing.enabled is true but "+
+					"bing is not in browser.search.backends; "+
+					"the enabled field is deprecated and has no effect")
+		}
+	}
+
+	// Cortex embedding base URL is required when cortex is enabled.
+	if c.Cortex.Enabled && c.Cortex.EmbeddingBaseURL == "" {
+		warnings = append(warnings,
+			"cortex.enabled is true but embedding_base_url is empty; "+
+				"semantic search will not work")
+	}
+
+	// Surface unresolved ${VAR} references so users can spot typos
+	// like ${OEPNAI_API_KEY} that would silently resolve to empty.
+	for _, msg := range c.unresolvedEnvVars {
+		warnings = append(warnings, msg)
+	}
+
+	// apps.clone vs browser anti-crawl consistency. Per project hard
+	// constraint, apps download and apps clone must use identical
+	// anti-crawling measures. Warn when key fields diverge so users
+	// notice the mismatch. Only Stealth/Headless divergence is checked
+	// here; BrowserBackend string mismatch is covered when both are set.
+	if c.Apps.Enabled && c.Browser.Enabled {
+		if c.Apps.Clone.Stealth != c.Browser.Stealth {
+			warnings = append(warnings,
+				fmt.Sprintf(
+					"apps.clone.stealth=%v but browser.stealth=%v; "+
+						"anti-crawl measures should be identical per "+
+						"project constraint",
+					c.Apps.Clone.Stealth, c.Browser.Stealth))
+		}
+		if c.Apps.Clone.Headless != c.Browser.Headless {
+			warnings = append(warnings,
+				fmt.Sprintf(
+					"apps.clone.headless=%v but browser.headless=%v; "+
+						"anti-crawl measures should be identical per "+
+						"project constraint",
+					c.Apps.Clone.Headless, c.Browser.Headless))
+		}
+		if c.Apps.Clone.BrowserBackend != "" &&
+			c.Browser.Backend != "" &&
+			c.Apps.Clone.BrowserBackend != c.Browser.Backend {
+			warnings = append(warnings,
+				fmt.Sprintf(
+					"apps.clone.browser_backend=%q but browser.backend=%q; "+
+						"anti-crawl measures should be identical per "+
+						"project constraint",
+					c.Apps.Clone.BrowserBackend, c.Browser.Backend))
 		}
 	}
 

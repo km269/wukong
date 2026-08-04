@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/km269/wukong/internal/browser"
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/cortex"
 	"github.com/km269/wukong/internal/util"
 
 	"trpc.group/trpc-go/trpc-agent-go/tool"
@@ -12,14 +14,23 @@ import (
 )
 
 type WebToolSet struct {
-	tools  []tool.Tool
-	inited bool
-	closed bool
+	tools       []tool.Tool
+	inited      bool
+	closed      bool
+	browser     *browser.Controller
+	cortexStore *cortex.CortexStore
+	userID      string
+	aggregate   *aggregateSearchTool // reference for late injection
 }
 
 func NewWebToolSet(cfg *config.WukongConfig) *WebToolSet {
 	ts := &WebToolSet{}
 	ts.tools = make([]tool.Tool, 0, 4)
+
+	// Create browser controller for page fetching with anti-detection.
+	if cfg != nil {
+		ts.browser = browser.NewController(&cfg.Browser)
+	}
 
 	var enabledBackends []string
 	var searxngURL string
@@ -113,10 +124,31 @@ func NewWebToolSet(cfg *config.WukongConfig) *WebToolSet {
 		if util.DebugEnabled {
 			fmt.Printf("[wukong/web] aggregating %d search backends\n", len(validBackends))
 		}
-		ts.tools = append(ts.tools, NewAggregateSearchTool(validBackends, searxngURL, searxngAPIKey, tavilyAPIKey, googleAPIKey, googleCSEID, bingAPIKey))
+		aggTool, agg := NewAggregateSearchTool(
+			validBackends, searxngURL, searxngAPIKey, tavilyAPIKey,
+			googleAPIKey, googleCSEID, bingAPIKey,
+			ts.browser, ts.cortexStore, ts.userID,
+		)
+		ts.tools = append(ts.tools, aggTool)
+		ts.aggregate = agg
 	}
 
 	return ts
+}
+
+// SetCortexStore injects the CortexStore for internal index search.
+// Called after Initialize when the store becomes available.
+// Accepts any to match the manager's dynamic interface pattern.
+func (ts *WebToolSet) SetCortexStore(cs any, userID string) {
+	store, ok := cs.(*cortex.CortexStore)
+	if !ok || store == nil {
+		return
+	}
+	ts.cortexStore = store
+	ts.userID = userID
+	if ts.aggregate != nil {
+		ts.aggregate.SetCortexStore(store, userID)
+	}
 }
 
 func (ts *WebToolSet) Tools(_ context.Context) []tool.Tool {
@@ -134,5 +166,9 @@ func (ts *WebToolSet) Init(_ context.Context) error {
 
 func (ts *WebToolSet) Close() error {
 	ts.closed = true
+	if ts.browser != nil {
+		// Controller doesn't have a Close method, but the backend
+		// (chromedp/rod) is cleaned up via its own context cancellation.
+	}
 	return nil
 }

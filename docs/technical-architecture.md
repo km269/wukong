@@ -93,6 +93,7 @@
 | 并发池 | `panjf2000/ants/v2` | v2.10.0 | goroutine 池 |
 | 机器人排除 | `temoto/robotstxt` | v1.1.2 | robots.txt 解析 |
 | HTML→Markdown | `JohannesKaufmann/html-to-markdown/v2` | v2.5.2 | 网页内容转换 |
+| HTML 解析 | `golang.org/x/net` | v0.55.0 | DOM 解析, Readability 算法, 搜索结果提取 |
 | 语法高亮 | `alecthomas/chroma/v2` | v2.20.0 | 代码高亮 |
 | 中文分词 | `go-ego/gse` | v1.0.2 | 中文分词搜索 |
 | JS 运行时 | `dop251/goja` | v0.0.0 | 纯 Go JS 沙箱执行 |
@@ -528,12 +529,32 @@ type BrowserBackend interface {
 ### 6.2 搜索回退链
 
 ```
-HNSW 向量搜索 → FTS5 全文搜索 → 空结果
+API 后端搜索 → 浏览器自动化搜索 → 空结果
 ```
 
-当 HNSW 搜索返回结果不足时, 自动回退到 FTS5 搜索; 如果仍无结果, 返回空结果而非错误。
+**Web 搜索回退**（`aggregate_search.go`）：
+1. 并发调用所有启用的 API 后端（DuckDuckGo/SearXNG/Tavily/Google/Bing + CortexStore）
+2. 0 条结果 → `searchViaBrowser`：用浏览器自动化访问 6 个搜索引擎（Bing→Baidu→WeChat→Zhihu→DuckDuckGo→Google），解析 HTML DOM 提取结果
+3. 仍无结果 → 返回错误
 
-### 6.3 浏览器后端回退
+**本地知识搜索回退**（CortexStore）：
+```
+HNSW 向量搜索 → FTS5 全文搜索 → 空结果
+```
+当 HNSW 搜索返回结果不足时, 自动回退到 FTS5 搜索。
+
+### 6.3 页面内容抓取回退链
+
+```
+Browser (JS渲染 + stealth) → Local Reader (Readability + Markdown) → HTTP GET + sanitize
+```
+
+三级回退确保页面内容抓取的高可用性：
+1. **Browser**：chromedp/rod 后端，完整 JS 渲染 + 反检测，最慢但最完整
+2. **Local Reader**：HTTP GET + 本地 Readability 算法提取主体内容 + HTML→Markdown 转换，无需外部 API
+3. **HTTP GET**：简单 HTTP 请求 + `sanitize.ExtractMainContentMarkdown`，最后兜底
+
+### 6.4 浏览器后端回退
 
 ```
 Rod 后端 → Chromedp 后端
@@ -541,7 +562,7 @@ Rod 后端 → Chromedp 后端
 
 当 Rod 后端初始化失败时, 自动回退到 Chromedp 后端。
 
-### 6.4 连接回退
+### 6.5 连接回退
 
 ```
 浏览器渲染 → HTTP 客户端 → Wayback Machine
@@ -549,13 +570,13 @@ Rod 后端 → Chromedp 后端
 
 网页获取按优先级尝试: 浏览器渲染 → 基本 HTTP 获取 → Internet Archive Wayback Machine 回退。
 
-### 6.5 网关错误回复
+### 6.6 网关错误回复
 
 - 代理执行错误不会直接暴露给用户, 而是转为用户友好的错误消息
 - 去重层丢弃平台 SDK 重试导致的重复消息（基于 MessageID）
 - 速率限制拒绝返回友好提示
 
-### 6.6 反检测升级
+### 6.7 反检测升级
 
 ```
 检测 → 分类 → 升级 → 重试

@@ -2,6 +2,14 @@
 // Wukong's tRPC-Agent-Go event system with ANP-compatible JSON-RPC
 // messages, enabling interoperability with native ANP agents.
 //
+// STATUS: WORK IN PROGRESS — NOT WIRED INTO PRODUCTION CODE.
+// Several conversion paths are incomplete (notably ConvertTaskToEvent
+// which returns an empty event). The adapter is exposed so future
+// native-ANP interop work can build on it, but no production code
+// path currently instantiates NewANPAdapter. Do not depend on it
+// for runtime correctness yet — use the E2EEMessenger and
+// MetaProtocol components, which ARE wired in via bootstrapSession.
+//
 // The adapter supports:
 //   - P1 Core Binding: JSON-RPC 2.0 request/response/error conventions
 //   - P3 Direct Messaging: Agent-to-agent message semantics

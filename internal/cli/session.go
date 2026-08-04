@@ -224,18 +224,19 @@ func runSession(cmd *cobra.Command, args []string) error {
 type BootstrapState struct {
 	shutdownState // idempotent shutdown guard (see shutdown.go)
 
-	A2AServer     *summon.A2AServer
-	AGUIServer    *server.AGUIServer
-	ACPServer     *server.ACPServer
-	ACPMCPBridge  *extension.ACPMCPBridge
-	MCPServer     *extension.MCPServer
-	ARDRegistry   *ard.RegistryServer
-	ANPServer     *http.Server
-	ANPMeta       *summon.MetaProtocol
-	ANPMessenger  *summon.E2EEMessenger
-	KnowledgeMgr  *knowledge.Manager
-	ProjectMgr    *project.Manager
-	GatewayServer *gateway.GatewayServer
+	A2AServer         *summon.A2AServer
+	AGUIServer        *server.AGUIServer
+	ACPServer         *server.ACPServer
+	ACPMCPBridge      *extension.ACPMCPBridge
+	MCPServer         *extension.MCPServer
+	ARDRegistry       *ard.RegistryServer
+	ANPServer         *http.Server
+	ANPMeta           *summon.MetaProtocol
+	ANPMessenger      *summon.E2EEMessenger
+	CredentialRotator *summon.CredentialRotator
+	KnowledgeMgr      *knowledge.Manager
+	ProjectMgr        *project.Manager
+	GatewayServer     *gateway.GatewayServer
 
 	// DBPing probes the shared database pool for liveness; wired by
 	// bootstrapSession and consumed by health checks. Nil when no DB
@@ -540,6 +541,11 @@ func bootstrapSession(
 		}
 	}
 
+	// Inject CortexStore into the web toolset for internal index search.
+	if cortexStore != nil {
+		extMgr.SetCortexStore(cortexStore, userID)
+	}
+
 	// Create MemoryFlow service for conversation transcript,
 	// wake-up context, and fact promotion. When CortexStore is
 	// also enabled, share the same CortexDB instance to avoid
@@ -730,27 +736,19 @@ func bootstrapSession(
 	// Configurable via agent.agent_tools_enabled and agent.agent_tools_stream.
 	agentToolSet := builtin.NewAgentToolSet(factory, &wukongCfg.Agent)
 
-	// Create Summon manager and register delegates as tools
-	summonMdl, err := factory.CreateDefaultModel()
-	if err != nil {
-		util.Logger.Warn("failed to create summon model, "+
-			"sub-agent delegation disabled",
-			"error", err.Error())
-	}
-	summonMgr := summon.NewSummonManager(&wukongCfg.Summon, summonMdl)
-	// Load skills if any
-	if err := summonMgr.LoadSkills(context.Background()); err != nil {
-		util.Logger.Warn("summon skills load failed",
-			slog.String("error", err.Error()))
-	}
-
 	// Collect Summon delegate tools with concurrency control.
 	// Each delegate tool is wrapped to acquire a slot from the summon
 	// manager's semaphore before execution, enforcing MaxConcurrent.
 	var summonTools []tool.Tool
+	// credRotator holds the A2A credential rotator when any OAuth2
+	// remote agent is configured. Wired into BootstrapState below so
+	// shutdownBootstrap can stop the background loop cleanly.
+	var credRotator *summon.CredentialRotator
 
 	// Initialize Skill system using trpc-agent-go's FSRepository.
 	// Skills are SKILL.md files that define specialized agent workflows.
+	// Independent of Summon — skill agents are also usable without
+	// sub-agent delegation enabled.
 	skillMgr := skill.NewManager(wukongCfg.Skill)
 	if err := skillMgr.Initialize(context.Background()); err != nil {
 		util.Logger.Warn("skill system init failed",
@@ -784,22 +782,35 @@ func bootstrapSession(
 		}
 	}
 
-	// Register Skill agents as Summon delegates so the main agent
-	// can delegate to specialized skill agents. Each skill is
-	// loaded as a sub-agent and wrapped with concurrency control.
-	if skillMgr.SkillCount() > 0 {
-		if summonMdl != nil {
+	// Summon: sub-agent delegation. The entire subsystem (local
+	// delegates, skill-as-delegate registration, A2A remote agents)
+	// is skipped when summon.enabled is false.
+	if wukongCfg.Summon.Enabled {
+		summonMdl, sErr := factory.CreateDefaultModel()
+		if sErr != nil {
+			util.Logger.Warn("failed to create summon model, "+
+				"sub-agent delegation disabled",
+				"error", sErr.Error())
+		}
+		summonMgr := summon.NewSummonManager(&wukongCfg.Summon, summonMdl)
+		if lErr := summonMgr.LoadDelegates(context.Background()); lErr != nil {
+			util.Logger.Warn("summon delegates load failed",
+				slog.String("error", lErr.Error()))
+		}
+
+		// Register Skill agents as Summon delegates so the main
+		// agent can delegate to specialized skill agents.
+		if skillMgr.SkillCount() > 0 && summonMdl != nil {
 			for _, s := range skillMgr.ListSummaries() {
-				skillAgent, err := skillMgr.CreateSkillAgent(
+				skillAgent, aErr := skillMgr.CreateSkillAgent(
 					context.Background(), s.Name, summonMdl, nil,
 				)
-				if err != nil {
+				if aErr != nil {
 					util.Logger.Warn("skill agent creation failed",
 						"skill", s.Name,
-						"error", err.Error())
+						"error", aErr.Error())
 					continue
 				}
-				// Wrap the skill agent as a tool for Summon
 				skillTool := summon.NewDelegateTool(
 					skillAgent, "skill_"+s.Name, s.Description,
 				)
@@ -808,39 +819,78 @@ func bootstrapSession(
 				)
 			}
 		}
-	}
 
-	// Register Summon skill delegates as function tools
-	for _, d := range summonMgr.ListDelegates() {
-		summonTools = append(summonTools,
-			summonMgr.WrapTool(d.Tool(), d.Name()),
-		)
-	}
-
-	// Register A2A remote agents as summon delegates.
-	// Each remote agent is configured with a server URL and auth,
-	// and wrapped as a tool that the main agent can delegate to.
-	// Uses RemoteDelegateTool (agenttool.NewTool) to expose the
-	// A2A agent as a callable function tool with concurrency control.
-	for _, remote := range wukongCfg.Summon.A2ARemotes {
-		a2aAgent := a2aRemoteToConfig(remote)
-		if a2aAgent == nil {
-			util.Logger.Warn("A2A remote agent init failed",
-				"agent", remote.Name)
-			continue
+		// Register local Summon delegates as function tools.
+		for _, d := range summonMgr.ListDelegates() {
+			summonTools = append(summonTools,
+				summonMgr.WrapTool(d.Tool(), d.Name()),
+			)
 		}
-		// Wrap the A2A agent as a tool for the main agent.
-		remoteTool := summon.RemoteDelegateTool(
-			"a2a_"+remote.Name,
-			"Remote A2A agent: "+remote.ServerURL,
-			a2aAgent.Agent(),
-		)
-		summonTools = append(summonTools,
-			summonMgr.WrapTool(remoteTool, remote.Name),
-		)
-		util.Logger.Info("A2A remote agent registered as tool",
-			"agent", remote.Name,
-			"server_url", remote.ServerURL)
+
+		// Register A2A remote agents as summon delegates.
+		// OAuth2-authenticated remotes are also registered with a
+		// CredentialRotator so their access tokens are refreshed
+		// automatically before expiry (client_credentials grant).
+		var oauthRemotes []config.A2ARemoteConfig
+		for _, remote := range wukongCfg.Summon.A2ARemotes {
+			if remote.AuthType == "oauth2" &&
+				remote.OAuthTokenURL != "" &&
+				remote.OAuthClientID != "" {
+				oauthRemotes = append(oauthRemotes, remote)
+			}
+		}
+		if len(oauthRemotes) > 0 {
+			// Default rotation interval: 1 hour. The rotator checks
+			// each credential's NextRotation; refreshes when due.
+			credRotator = summon.NewCredentialRotator(time.Hour)
+			for _, remote := range oauthRemotes {
+				gen := summon.NewOAuth2RefreshGenerator(
+					summon.OAuth2RefreshOptions{
+						TokenURL:     remote.OAuthTokenURL,
+						ClientID:     remote.OAuthClientID,
+						ClientSecret: remote.OAuthClientSecret,
+					})
+				initial := summon.CredentialSet{
+					OAuthTokenURL:     remote.OAuthTokenURL,
+					OAuthClientID:     remote.OAuthClientID,
+					OAuthClientSecret: remote.OAuthClientSecret,
+					// Access token left empty; the first rotation
+					// tick will populate it. The rotator's pending
+					// generator call in Register() also primes it.
+				}
+				if rErr := credRotator.Register(
+					context.Background(),
+					remote.Name, "oauth2", initial, gen,
+				); rErr != nil {
+					util.Logger.Warn("A2A OAuth2 rotator register failed",
+						"agent", remote.Name,
+						"error", rErr.Error())
+				}
+			}
+			credRotator.Start(context.Background(), nil)
+			util.Logger.Info("A2A OAuth2 credential rotator started",
+				"registered", credRotator.CredentialCount())
+		}
+
+		for _, remote := range wukongCfg.Summon.A2ARemotes {
+			a2aAgent := a2aRemoteToConfig(remote)
+			if a2aAgent == nil {
+				util.Logger.Warn("A2A remote agent init failed",
+					"agent", remote.Name)
+				continue
+			}
+			remoteTool := summon.RemoteDelegateTool(
+				"a2a_"+remote.Name,
+				"Remote A2A agent: "+remote.ServerURL,
+				a2aAgent.Agent(),
+			)
+			summonTools = append(summonTools,
+				summonMgr.WrapTool(remoteTool, remote.Name),
+			)
+			util.Logger.Info("A2A remote agent registered as tool",
+				"agent", remote.Name,
+				"server_url", remote.ServerURL)
+		}
 	}
 
 	// Create todo manager
@@ -1046,11 +1096,12 @@ func bootstrapSession(
 	}
 
 	state := &BootstrapState{
-		KnowledgeMgr: knowledgeMgr,
-		ProjectMgr:   projectMgr,
-		ARDRegistry:  ardRegistryServer,
-		ACPMCPBridge: acpMCPBridge,
-		MCPServer:    mcpServer,
+		KnowledgeMgr:      knowledgeMgr,
+		ProjectMgr:        projectMgr,
+		ARDRegistry:       ardRegistryServer,
+		ACPMCPBridge:      acpMCPBridge,
+		MCPServer:         mcpServer,
+		CredentialRotator: credRotator,
 		// Wire a real DB ping so the health DBChecker is no longer a
 		// no-op. dbPool is the shared SQLite pool created above.
 		DBPing: func(ctx context.Context) error {

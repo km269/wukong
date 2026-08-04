@@ -1,6 +1,6 @@
 # Wukong 系统架构文档
 
-> 版本: 0.2.8 | 模块: `github.com/km269/wukong` | Go 版本: 1.26
+> 版本: 0.3.0 | 模块: `github.com/km269/wukong` | Go 版本: 1.26
 
 ---
 
@@ -585,7 +585,70 @@ Factory.CreateModel(name)
 - **FTS5 全文搜索**：关键词搜索
 - **混合搜索**：向量 + 全文融合
 
-### 3.10 搜索系统 (`internal/search/`)
+### 3.10 搜索系统 (`internal/search/` + `internal/extension/builtin/aggregate_search.go`)
+
+#### Web 搜索聚合工具
+
+`aggregate_search.go` 是系统的核心网络搜索工具，注册为 `web_search` function tool，LLM Agent 可直接调用。
+
+**搜索流程：**
+
+```
+web_search(query, fetch_count)
+  │
+  ├─ 1. 并发调用所有启用的 API 后端 (sync.WaitGroup)
+  │     ├─ DuckDuckGo API  → GET api.duckduckgo.com
+  │     ├─ SearXNG API     → GET {searxng_url}/search
+  │     ├─ Tavily API      → POST api.tavily.com/search
+  │     ├─ Google CSE API  → GET googleapis.com/customsearch/v1
+  │     ├─ Bing API        → GET api.bing.microsoft.com/v7.0/search
+  │     └─ CortexStore     → 本地 FTS5 + HNSW 向量搜索
+  │
+  ├─ 2. 合并 + URL 去重，截断到 20 条
+  │
+  ├─ 3. 0 条结果？→ searchViaBrowser（浏览器自动化搜索回退）
+  │     ├─ Bing      → www.bing.com/search
+  │     ├─ Baidu     → www.baidu.com/s
+  │     ├─ WeChat    → weixin.sogou.com/weixin
+  │     ├─ Zhihu     → www.zhihu.com/search
+  │     ├─ DuckDuckGo → html.duckduckgo.com/html/
+  │     └─ Google    → www.google.com/search
+  │     跨引擎去重，累计 >= 5 条提前返回
+  │
+  └─ 4. 抓取 Top-N 页面完整内容 (fetch_count, 默认 3)
+        ├─ Browser (chromedp/rod + stealth + JS渲染)
+        ├─ Local Reader (HTTP GET + Readability算法 + Markdown)
+        └─ HTTP GET + sanitize (简单兜底)
+```
+
+**浏览器搜索回退（`searchViaBrowser`）：**
+
+当所有 API 后端失败或返回 0 条结果时自动触发。使用浏览器自动化（stealth 模式）直接访问搜索引擎页面，解析 HTML DOM 提取结果。6 个引擎按优先级依次尝试，每个引擎有独立的 HTML 解析器：
+
+| 解析器 | 目标平台 | DOM 选择器 |
+|--------|---------|-----------|
+| `parseBingSearchResults` | Bing | `<li class="b_algo">` |
+| `parseBaiduSearchResults` | 百度 | `<div class="result">` / `<div class="c-container">` |
+| `parseSogouWeChatResults` | 微信公众号 | `<div class="txt-box">` |
+| `parseZhihuSearchResults` | 知乎 | `<a href="/question/...">` |
+| `parseDuckDuckGoHTMLResults` | DuckDuckGo HTML | `<a class="result__a">` |
+| `parseGoogleSearchResults` | Google | `<a>` 含 `<h3>` |
+
+**本地 Readability 内容提取（`internal/apps/sanitize/readability.go`）：**
+
+替代外部服务，完全本地实现的 Readability 算法，灵感来自 Mozilla Readability.js：
+
+1. **移除非内容元素**：script/style/nav/footer/aside + 类名黑名单（advert/sidebar/comment 等）
+2. **优先查找 `<article>` 或 `<main>` 标签**
+3. **DOM 评分**：遍历 block 元素，评分公式 = textLength/100 + paragraphCount×3 - linkDensity_penalty + tagBonus + classBonus
+4. **选最高分节点**，提取 HTML → Markdown 转换
+5. **回退**：提取内容 < 200 字符时回退到 `ExtractMainContentMarkdown`
+
+**依赖注入：**
+
+- `WebToolSet` 在构造时创建 `browser.Controller`（与 `ComputerControllerToolSet` 相同方式）
+- `WebToolSet.SetCortexStore()` 支持延迟注入 CortexStore
+- `Manager.SetCortexStore()` 通过动态接口注入，避免循环依赖
 
 #### SearchGenome
 
@@ -1100,6 +1163,38 @@ GatewayServer.dispatch()
 
 ### 4.4 搜索流程
 
+#### 4.4.1 Web 搜索聚合流程（`aggregate_search.go`）
+
+```
+LLM 调用 web_search(query, fetch_count)
+  │
+  ├─→ 1. 并发 API 搜索 (goroutine + WaitGroup)
+  │     ├─→ DuckDuckGo API
+  │     ├─→ SearXNG API
+  │     ├─→ Tavily API
+  │     ├─→ Google CSE API
+  │     ├─→ Bing API
+  │     └─→ CortexStore (本地 FTS5 + HNSW)
+  │
+  ├─→ 2. 合并 + URL 去重 → 截断 20 条
+  │
+  ├─→ 3. 0 条？→ searchViaBrowser (浏览器搜索回退)
+  │     ├─→ Bing HTML   → parseBingSearchResults
+  │     ├─→ Baidu HTML  → parseBaiduSearchResults
+  │     ├─→ WeChat HTML → parseSogouWeChatResults
+  │     ├─→ Zhihu HTML  → parseZhihuSearchResults
+  │     ├─→ DDG HTML    → parseDuckDuckGoHTMLResults
+  │     └─→ Google HTML → parseGoogleSearchResults
+  │     (跨引擎去重, >= 5 条提前返回)
+  │
+  └─→ 4. 抓取 Top-N 页面内容 (fetch_count, 默认 3)
+        ├─→ Browser: ExtractText() (JS渲染 + stealth)
+        ├─→ Local Reader: HTTP GET + Readability + Markdown
+        └─→ HTTP GET + sanitize.ExtractMainContentMarkdown
+```
+
+#### 4.4.2 本地知识搜索流程（CortexStore）
+
 ```
 Query
   │
@@ -1378,6 +1473,10 @@ e:\myVibeCoding\km269\wukong/
 │   │   ├── clone/               # 网站克隆器
 │   │   ├── pack/                # ZIM 打包器
 │   │   ├── sanitize/            # 内容清理
+│   │   │   ├── cleaner.go       # 基础 HTML 清理
+│   │   │   ├── enhanced.go      # 增强清理 (CleanHTMLWithOptions)
+│   │   │   ├── markdown.go      # HTML→Markdown 转换
+│   │   │   └── readability.go   # 本地 Readability 算法
 │   │   ├── mcpapps/             # MCP 应用桥接
 │   │   ├── server/              # 应用服务器
 │   │   ├── manager.go           # 应用管理器
@@ -1574,4 +1673,4 @@ cmd/wukong/main.go
 
 ---
 
-*本文档基于 Wukong v0.2.8 代码库自动生成，最后更新于 2026-08-02。*
+*本文档基于 Wukong v0.3.0 代码库自动生成，最后更新于 2026-08-03。*

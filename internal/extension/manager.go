@@ -281,6 +281,28 @@ func (m *Manager) SetMemoryService(svc any, appName, userID string) {
 	}
 }
 
+// SetCortexStore injects the CortexStore into the web toolset for
+// internal index search. Must be called after Initialize.
+func (m *Manager) SetCortexStore(cs any, userID string) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	ts, ok := m.toolSets["web"]
+	if !ok || ts == nil {
+		return
+	}
+
+	type cortexStoreSetter interface {
+		SetCortexStore(cs any, userID string)
+	}
+	if setter, ok := ts.(cortexStoreSetter); ok {
+		setter.SetCortexStore(cs, userID)
+		util.Logger.Info("SetCortexStore: cortex store injected into web toolset",
+			"user_id", userID,
+		)
+	}
+}
+
 // toolSetKeys returns the names of all registered tool sets.
 // Caller must hold m.mu (at least RLock).
 func (m *Manager) toolSetKeys() []string {

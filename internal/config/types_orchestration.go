@@ -18,7 +18,7 @@ type ARDConfig struct {
 // SummonConfig defines sub-agent delegation and A2A remote agent settings.
 type SummonConfig struct {
 	Enabled       bool              `mapstructure:"enabled"`
-	SkillsDir     string            `mapstructure:"skills_dir"`
+	DelegatesDir  string            `mapstructure:"delegates_dir"`
 	MaxConcurrent int               `mapstructure:"max_concurrent"`
 	A2ARemotes    []A2ARemoteConfig `mapstructure:"a2a_remotes"`
 }

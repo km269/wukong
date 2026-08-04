@@ -50,7 +50,7 @@ type CacheEntry struct {
 func NewCloneCache(cacheDir, host string) (*CloneCache, error) {
 	if cacheDir == "" {
 		homeDir, _ := os.UserHomeDir()
-		cacheDir = filepath.Join(homeDir, ".wukong/apps", "clone_cache", host)
+		cacheDir = filepath.Join(homeDir, ".wukong/apps", "clone/cache", host)
 	}
 
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {

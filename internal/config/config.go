@@ -57,6 +57,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -250,6 +251,19 @@ type WukongConfig struct {
 	// ProjectDir is the directory for project tracking data.
 	// Default: ~/.config/wukong/ (resolved at runtime).
 	ProjectDir string `mapstructure:"project_dir"`
+
+	// unresolvedEnvVars tracks ${VAR} references (without :-default)
+	// that could not be resolved because VAR is unset in the
+	// environment. Populated by expandSecrets during Load() and
+	// surfaced via Warnings() so users can spot typos like
+	// ${OEPNAI_API_KEY}. Not populated from YAML directly.
+	unresolvedEnvVars []string `mapstructure:"-"`
+
+	// deprecationWarnings tracks usage of deprecated config keys
+	// that have been renamed or removed. Populated by
+	// migrateDeprecatedFields during Load() and surfaced via
+	// Warnings() so users know to update their config files.
+	deprecationWarnings []string `mapstructure:"-"`
 }
 
 // ============================================================================
@@ -336,97 +350,149 @@ func expandEnv(s string) string {
 	})
 }
 
+// unresolvedVarRE matches ${VAR} references that do NOT use the
+// ${VAR:-default} fallback form. These references silently resolve
+// to empty strings when VAR is unset, which usually indicates a
+// typo or missing environment configuration.
+var unresolvedVarRE = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// expandEnvTracked is expandEnv with unresolved-variable tracking.
+// For each ${VAR} (without :-default) in the input where VAR is
+// unset, a descriptive message is appended to *unresolved so the
+// caller can surface it via Warnings().
+func expandEnvTracked(s, field string, unresolved *[]string) string {
+	if !strings.Contains(s, "${") {
+		return s
+	}
+	for _, m := range unresolvedVarRE.FindAllStringSubmatch(s, -1) {
+		if os.Getenv(m[1]) == "" {
+			*unresolved = append(*unresolved,
+				fmt.Sprintf("%s references unset env var ${%s}", field, m[1]))
+		}
+	}
+	return expandEnv(s)
+}
+
 // expandSecrets expands ${ENV_VAR} references in all secret fields
 // that support environment variable injection. This is a security
 // measure that keeps secrets out of config files and version control.
+//
+// Unresolved ${VAR} references (no :-default, VAR unset) are recorded
+// in cfg.unresolvedEnvVars and surfaced via Warnings() so users can
+// spot typos like ${OEPNAI_API_KEY}.
 func (l *Loader) expandSecrets(cfg *WukongConfig) {
+	u := &cfg.unresolvedEnvVars
+
 	// Provider API keys, base URLs, and models.
 	for i := range cfg.Providers {
-		cfg.Providers[i].APIKey = expandEnv(cfg.Providers[i].APIKey)
-		cfg.Providers[i].BaseURL = expandEnv(cfg.Providers[i].BaseURL)
-		cfg.Providers[i].Model = expandEnv(cfg.Providers[i].Model)
+		p := &cfg.Providers[i]
+		p.APIKey = expandEnvTracked(p.APIKey,
+			"providers["+p.Name+"].api_key", u)
+		p.BaseURL = expandEnvTracked(p.BaseURL,
+			"providers["+p.Name+"].base_url", u)
+		p.Model = expandEnvTracked(p.Model,
+			"providers["+p.Name+"].model", u)
 	}
 
 	// A2A remote secrets.
 	for i := range cfg.Summon.A2ARemotes {
-		cfg.Summon.A2ARemotes[i].APIKey =
-			expandEnv(cfg.Summon.A2ARemotes[i].APIKey)
-		cfg.Summon.A2ARemotes[i].JWTSecret =
-			expandEnv(cfg.Summon.A2ARemotes[i].JWTSecret)
-		cfg.Summon.A2ARemotes[i].OAuthClientSecret =
-			expandEnv(cfg.Summon.A2ARemotes[i].OAuthClientSecret)
+		r := &cfg.Summon.A2ARemotes[i]
+		r.APIKey = expandEnvTracked(r.APIKey,
+			"summon.a2a_remotes["+r.Name+"].api_key", u)
+		r.JWTSecret = expandEnvTracked(r.JWTSecret,
+			"summon.a2a_remotes["+r.Name+"].jwt_secret", u)
+		r.OAuthClientSecret = expandEnvTracked(r.OAuthClientSecret,
+			"summon.a2a_remotes["+r.Name+"].oauth_client_secret", u)
 	}
 
 	// Gateway Feishu channel secrets.
-	cfg.Gateway.Feishu.AppSecret =
-		expandEnv(cfg.Gateway.Feishu.AppSecret)
-	cfg.Gateway.Feishu.EncryptKey =
-		expandEnv(cfg.Gateway.Feishu.EncryptKey)
-	cfg.Gateway.Feishu.VerificationToken =
-		expandEnv(cfg.Gateway.Feishu.VerificationToken)
+	cfg.Gateway.Feishu.AppSecret = expandEnvTracked(
+		cfg.Gateway.Feishu.AppSecret, "gateway.feishu.app_secret", u)
+	cfg.Gateway.Feishu.EncryptKey = expandEnvTracked(
+		cfg.Gateway.Feishu.EncryptKey, "gateway.feishu.encrypt_key", u)
+	cfg.Gateway.Feishu.VerificationToken = expandEnvTracked(
+		cfg.Gateway.Feishu.VerificationToken,
+		"gateway.feishu.verification_token", u)
 
 	// Observability (Langfuse) secrets.
-	cfg.Observability.LangfusePublicKey =
-		expandEnv(cfg.Observability.LangfusePublicKey)
-	cfg.Observability.LangfuseSecretKey =
-		expandEnv(cfg.Observability.LangfuseSecretKey)
+	cfg.Observability.LangfusePublicKey = expandEnvTracked(
+		cfg.Observability.LangfusePublicKey,
+		"observability.langfuse_public_key", u)
+	cfg.Observability.LangfuseSecretKey = expandEnvTracked(
+		cfg.Observability.LangfuseSecretKey,
+		"observability.langfuse_secret_key", u)
 
 	// Artifact COS credentials.
-	cfg.Artifact.COSSecretID =
-		expandEnv(cfg.Artifact.COSSecretID)
-	cfg.Artifact.COSSecretKey =
-		expandEnv(cfg.Artifact.COSSecretKey)
+	cfg.Artifact.COSSecretID = expandEnvTracked(
+		cfg.Artifact.COSSecretID, "artifact.cos_secret_id", u)
+	cfg.Artifact.COSSecretKey = expandEnvTracked(
+		cfg.Artifact.COSSecretKey, "artifact.cos_secret_key", u)
 
 	// ACP Server API key (nested under Security.Auth).
-	cfg.ACPServer.Security.Auth.APIKey =
-		expandEnv(cfg.ACPServer.Security.Auth.APIKey)
+	cfg.ACPServer.Security.Auth.APIKey = expandEnvTracked(
+		cfg.ACPServer.Security.Auth.APIKey,
+		"acp_server.api_key", u)
 
 	// CortexDB embedding settings.
-	cfg.Cortex.EmbeddingAPIKey =
-		expandEnv(cfg.Cortex.EmbeddingAPIKey)
-	cfg.Cortex.EmbeddingBaseURL =
-		expandEnv(cfg.Cortex.EmbeddingBaseURL)
-	cfg.Cortex.EmbeddingModel =
-		expandEnv(cfg.Cortex.EmbeddingModel)
+	cfg.Cortex.EmbeddingAPIKey = expandEnvTracked(
+		cfg.Cortex.EmbeddingAPIKey, "cortex.embedding_api_key", u)
+	cfg.Cortex.EmbeddingBaseURL = expandEnvTracked(
+		cfg.Cortex.EmbeddingBaseURL, "cortex.embedding_base_url", u)
+	cfg.Cortex.EmbeddingModel = expandEnvTracked(
+		cfg.Cortex.EmbeddingModel, "cortex.embedding_model", u)
 
 	// CortexDB reranker settings.
-	cfg.Cortex.RerankerAPIKey =
-		expandEnv(cfg.Cortex.RerankerAPIKey)
-	cfg.Cortex.RerankerBaseURL =
-		expandEnv(cfg.Cortex.RerankerBaseURL)
-	cfg.Cortex.RerankerModel =
-		expandEnv(cfg.Cortex.RerankerModel)
+	cfg.Cortex.RerankerAPIKey = expandEnvTracked(
+		cfg.Cortex.RerankerAPIKey, "cortex.reranker_api_key", u)
+	cfg.Cortex.RerankerBaseURL = expandEnvTracked(
+		cfg.Cortex.RerankerBaseURL, "cortex.reranker_base_url", u)
+	cfg.Cortex.RerankerModel = expandEnvTracked(
+		cfg.Cortex.RerankerModel, "cortex.reranker_model", u)
 
 	// Vertical routing GitHub API key.
 	if cfg.Cortex.VerticalRouting != nil {
-		cfg.Cortex.VerticalRouting.GitHubAPIKey =
-			expandEnv(cfg.Cortex.VerticalRouting.GitHubAPIKey)
+		cfg.Cortex.VerticalRouting.GitHubAPIKey = expandEnvTracked(
+			cfg.Cortex.VerticalRouting.GitHubAPIKey,
+			"cortex.vertical_routing.github_api_key", u)
 	}
 
 	// MemoryFlow model settings.
-	cfg.MemoryFlow.PlannerModel =
-		expandEnv(cfg.MemoryFlow.PlannerModel)
-	cfg.MemoryFlow.ExtractorModel =
-		expandEnv(cfg.MemoryFlow.ExtractorModel)
+	cfg.MemoryFlow.PlannerModel = expandEnvTracked(
+		cfg.MemoryFlow.PlannerModel, "memoryflow.planner_model", u)
+	cfg.MemoryFlow.ExtractorModel = expandEnvTracked(
+		cfg.MemoryFlow.ExtractorModel, "memoryflow.extractor_model", u)
 
 	// GraphFlow model settings.
-	cfg.GraphFlow.ExtractorModel =
-		expandEnv(cfg.GraphFlow.ExtractorModel)
+	cfg.GraphFlow.ExtractorModel = expandEnvTracked(
+		cfg.GraphFlow.ExtractorModel, "graphflow.extractor_model", u)
 
 	// Dify API secret.
-	cfg.Dify.APISecret =
-		expandEnv(cfg.Dify.APISecret)
+	cfg.Dify.APISecret = expandEnvTracked(
+		cfg.Dify.APISecret, "dify.api_secret", u)
 
 	// Session Redis URL.
-	cfg.Session.RedisURL = expandEnv(cfg.Session.RedisURL)
+	cfg.Session.RedisURL = expandEnvTracked(
+		cfg.Session.RedisURL, "session.redis_url", u)
 
 	// Search provider secrets.
-	cfg.Browser.Search.SearXNG.URL = expandEnv(cfg.Browser.Search.SearXNG.URL)
-	cfg.Browser.Search.SearXNG.APIKey = expandEnv(cfg.Browser.Search.SearXNG.APIKey)
-	cfg.Browser.Search.Tavily.APIKey = expandEnv(cfg.Browser.Search.Tavily.APIKey)
-	cfg.Browser.Search.Google.APIKey = expandEnv(cfg.Browser.Search.Google.APIKey)
-	cfg.Browser.Search.Google.CSEID = expandEnv(cfg.Browser.Search.Google.CSEID)
-	cfg.Browser.Search.Bing.APIKey = expandEnv(cfg.Browser.Search.Bing.APIKey)
+	cfg.Browser.Search.SearXNG.URL = expandEnvTracked(
+		cfg.Browser.Search.SearXNG.URL,
+		"browser.search.searxng.url", u)
+	cfg.Browser.Search.SearXNG.APIKey = expandEnvTracked(
+		cfg.Browser.Search.SearXNG.APIKey,
+		"browser.search.searxng.api_key", u)
+	cfg.Browser.Search.Tavily.APIKey = expandEnvTracked(
+		cfg.Browser.Search.Tavily.APIKey,
+		"browser.search.tavily.api_key", u)
+	cfg.Browser.Search.Google.APIKey = expandEnvTracked(
+		cfg.Browser.Search.Google.APIKey,
+		"browser.search.google.api_key", u)
+	cfg.Browser.Search.Google.CSEID = expandEnvTracked(
+		cfg.Browser.Search.Google.CSEID,
+		"browser.search.google.cse_id", u)
+	cfg.Browser.Search.Bing.APIKey = expandEnvTracked(
+		cfg.Browser.Search.Bing.APIKey,
+		"browser.search.bing.api_key", u)
 }
 
 // Load parses the configuration into a WukongConfig.

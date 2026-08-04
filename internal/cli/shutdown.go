@@ -138,6 +138,10 @@ func runShutdown(
 		}
 		fmt.Println("  ANP server stopped")
 	}
+	if state.CredentialRotator != nil {
+		state.CredentialRotator.Stop()
+		fmt.Println("  Credential rotator stopped")
+	}
 
 	// 3. Knowledge manager.
 	if state.KnowledgeMgr != nil {

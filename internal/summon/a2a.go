@@ -290,8 +290,11 @@ func buildAuthHeaders(remote config.A2ARemoteConfig) map[string]string {
 			headers["Authorization"] = "Bearer " + remote.JWTSecret
 		}
 	case "oauth2":
-		// OAuth2 tokens are managed by the credential rotator
-		// at runtime. The initial client_secret is used.
+		// OAuth2 access tokens are refreshed at runtime by the
+		// CredentialRotator (wired in bootstrapSession when at least
+		// one OAuth2 remote is configured). At build-auth-headers time
+		// we fall back to the static client_secret as the initial
+		// bearer token; the rotator's first refresh replaces it.
 		if remote.OAuthClientSecret != "" {
 			headers["Authorization"] =
 				"Bearer " + remote.OAuthClientSecret

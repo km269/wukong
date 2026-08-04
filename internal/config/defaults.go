@@ -302,7 +302,7 @@ func (l *Loader) setOrchestrationDefaults() {
 
 	// Summon
 	l.v.SetDefault("summon.enabled", true)
-	l.v.SetDefault("summon.skills_dir", ".wukong/skills")
+	l.v.SetDefault("summon.delegates_dir", ".wukong/skills")
 	l.v.SetDefault("summon.max_concurrent", 5)
 
 	// Skill
@@ -317,6 +317,8 @@ func (l *Loader) setOrchestrationDefaults() {
 	l.v.SetDefault("anp.e2ee_enabled", true)
 	l.v.SetDefault("anp.a2a_enabled", true)
 	l.v.SetDefault("anp.agui_enabled", true)
+	l.v.SetDefault("anp.http_sign_enabled", true)
+	l.v.SetDefault("anp.mcp_enabled", true)
 
 	// Evolution
 	l.v.SetDefault("evolution.enabled", false)

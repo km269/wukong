@@ -614,10 +614,19 @@ fork bomb
 
 ### 14.2 Summon 子 Agent 委派
 
+> **字段命名说明**：`summon.delegates_dir` 与 [15.2 节](#152-skill-技能管理) 的 `skill.skills_dir` 语义不同，分属独立子系统：
+>
+> | 字段 | 子系统 | 消费者 | 加载内容 |
+> |------|--------|--------|----------|
+> | `summon.delegates_dir` | 子 Agent 委派 | `internal/summon/delegate.go` | 委派代理行为定义（.md 文件，每个实例化为一个 `Delegate`） |
+> | `skill.skills_dir` | 技能仓库 + 自演化 | `internal/skill/manager.go`、`internal/evolution/engine.go` | 可演化技能包（带版本控制） |
+>
+> 两者默认均为 `.wukong/skills`，但可分别指向不同目录。
+
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `summon.enabled` | bool | false | 是否启用 Summon |
-| `summon.skills_dir` | string | - | 技能目录 |
+| `summon.delegates_dir` | string | - | 子 Agent 委派定义目录（.md 文件） |
 | `summon.max_concurrent` | int | - | 最大并发子 Agent |
 | `summon.a2a_remotes` | []A2ARemoteConfig | - | 远程 A2A Agent 列表 |
 
@@ -677,10 +686,12 @@ fork bomb
 
 ### 15.2 Skill 技能管理
 
+> **字段命名说明**：`skill.skills_dir` 与 [14.2 节](#142-summon-子-agent-委派) 的 `summon.delegates_dir` 语义不同。本字段服务于技能仓库与自演化引擎（加载可演化技能包），前者服务于子 Agent 委派（加载委派代理定义）。详见 14.2 节的对照表。
+
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `skill.enabled` | bool | false | 是否启用技能系统 |
-| `skill.skills_dir` | string | - | 技能目录 |
+| `skill.skills_dir` | string | - | 可演化技能包目录 |
 | `skill.auto_load` | bool | false | 是否自动加载 |
 | `skill.max_skills` | int | - | 最大技能数 |
 
@@ -780,7 +791,7 @@ fork bomb
 | `apps.clone.browser_pages` | int | - | 浏览器标签池大小 |
 | `apps.clone.timeout` | int | - | 页面超时 (秒) |
 | `apps.clone.render_timeout` | int | - | 渲染超时 (秒) |
-| `apps.clone.settle` | int | - | 网络空闲等待 (秒) |
+| `apps.clone.settle` | int | - | 网络空闲等待 (毫秒) |
 | `apps.clone.scroll` | bool | false | 是否自动滚动 |
 | `apps.clone.respect_robots` | bool | true | 是否遵守 robots.txt |
 | `apps.clone.crawl_delay` | int | - | 爬取延迟 (毫秒) |

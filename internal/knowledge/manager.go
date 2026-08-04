@@ -186,7 +186,13 @@ func (m *Manager) collectSources() ([]knowledgesource.Source, error) {
 }
 
 // resolveEmbedderCredentials determines embedder API credentials.
-// Priority: knowledge.embedder_provider → default LLM provider → env vars.
+// Priority:
+//  1. knowledge.embedder_provider (must match a name in providers[])
+//  2. cortex.embedding_base_url + cortex.embedding_api_key (when cortex.enabled)
+//  3. default LLM provider
+//
+// The cortex fallback lets knowledge share the embedding service configured
+// for CortexDB without requiring a duplicate provider entry.
 func resolveEmbedderCredentials(
 	providerName string,
 	wukongCfg *config.WukongConfig,
@@ -198,7 +204,15 @@ func resolveEmbedderCredentials(
 		}
 	}
 
-	// Fall back to default provider.
+	// Fall back to CortexDB embedding settings (shared embedding service).
+	if wukongCfg.Cortex.Enabled {
+		if wukongCfg.Cortex.EmbeddingBaseURL != "" {
+			return wukongCfg.Cortex.EmbeddingAPIKey,
+				wukongCfg.Cortex.EmbeddingBaseURL
+		}
+	}
+
+	// Final fallback: default LLM provider.
 	if dp := wukongCfg.DefaultProviderConfig(); dp != nil {
 		return dp.APIKey, dp.BaseURL
 	}
