@@ -95,7 +95,7 @@ func (m *RecallManager) searchRecall(
 	if m.memoryReader != nil {
 		// Use cross-search: conversation history + tRPC memories.
 		results, err = m.store.SearchWithMemory(
-			req.Query, "", req.Limit, m.memoryReader,
+			ctx, req.Query, "", req.Limit, m.memoryReader,
 		)
 	} else {
 		// Session-scoped search bypasses cross-search.
@@ -105,7 +105,7 @@ func (m *RecallManager) searchRecall(
 			)
 		} else {
 			results, err = m.store.Search(
-				req.Query, "", req.Limit,
+				ctx, req.Query, "", req.Limit,
 			)
 		}
 	}

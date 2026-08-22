@@ -110,11 +110,14 @@ func (a *DifyAgent) runStream(
 		q := extractDifyQuery(inv)
 		body, err := a.chatStreaming(ctx, q)
 		if err != nil {
-			out <- event.New(inv.InvocationID, a.name,
+			select {
+			case out <- event.New(inv.InvocationID, a.name,
 				event.WithObject("error"),
 				event.WithResponse(&model.Response{
 					Error: &model.ResponseError{Message: err.Error()},
-				}))
+				})):
+			case <-ctx.Done():
+			}
 			return
 		}
 		defer body.Close()
@@ -139,30 +142,40 @@ func (a *DifyAgent) runStream(
 				continue
 			}
 			if c.Event == "error" {
-				out <- event.New(inv.InvocationID, a.name,
+				select {
+				case out <- event.New(inv.InvocationID, a.name,
 					event.WithObject("error"),
 					event.WithResponse(&model.Response{
 						Error: &model.ResponseError{Message: "dify SSE error"},
-					}))
+					})):
+				case <-ctx.Done():
+				}
 				return
 			}
 			if c.Event == "message" || c.Event == "agent_message" {
 				full += c.Answer
 				choice := model.Choice{Index: 0}
 				choice.Delta.Content = c.Answer
-				out <- event.NewResponseEvent(inv.InvocationID,
+				select {
+				case out <- event.NewResponseEvent(inv.InvocationID,
 					a.name,
-					&model.Response{Choices: []model.Choice{choice}})
+					&model.Response{Choices: []model.Choice{choice}}):
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
-		out <- event.NewResponseEvent(inv.InvocationID, a.name,
+		select {
+		case out <- event.NewResponseEvent(inv.InvocationID, a.name,
 			&model.Response{
 				Done: true,
 				Choices: []model.Choice{{
 					Index:   0,
 					Message: model.NewAssistantMessage(full),
 				}},
-			})
+			}):
+		case <-ctx.Done():
+		}
 	}()
 	return out, nil
 }

@@ -319,6 +319,10 @@ func (m *Manager) Close() error {
 	defer m.mu.Unlock()
 
 	for name, ts := range m.toolSets {
+		if ts == nil {
+			delete(m.toolSets, name)
+			continue
+		}
 		if err := ts.Close(); err != nil {
 			return fmt.Errorf(
 				"close extension %q: %w", name, err,
@@ -455,10 +459,10 @@ func (m *Manager) registerExternalLocked(
 // transport connection metadata.
 func buildARDEntry(ext config.ExtensionConfig) ard.CatalogEntry {
 	entry := ard.CatalogEntry{
-		Identifier: "urn:air:wukong.local:mcp:" + ext.Name,
+		Identifier:  "urn:air:wukong.local:mcp:" + ext.Name,
 		DisplayName: ext.Name,
-		Type:       ard.MediaTypeMCPServerCard,
-		Tags:       []string{"mcp", "external", ext.Transport},
+		Type:        ard.MediaTypeMCPServerCard,
+		Tags:        []string{"mcp", "external", ext.Transport},
 	}
 
 	// Store connection metadata in the Data field.

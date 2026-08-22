@@ -836,6 +836,7 @@ Examples:
 				CookieFile:      cookieFile,
 				ChromeProfile:   chromeProfile,
 				NoChromeProfile: noChromeProfile,
+				NoHeadless:      noHeadless,
 				NoStealth:       noStealth,
 				BrowserBackend:  browserBackend,
 				KeepMedia:       keepMedia,

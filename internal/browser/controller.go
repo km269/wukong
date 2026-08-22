@@ -360,56 +360,32 @@ func (c *Controller) Screenshot(
 	ctx context.Context, url string, outputPath string,
 ) (*ScreenshotResult, error) {
 	if c.isBrowserMode() {
-		return c.screenshotWithBrowser(ctx, url, outputPath)
+		// Preferred path: capture a real pixel screenshot via CDP.
+		// If the capture fails for any reason, fall back to the
+		// self-contained HTML snapshot so the user still gets output.
+		imagePath, err := c.backend.Screenshot(ctx, url, outputPath)
+		if err == nil {
+			// Fetch title/status best-effort for the result metadata.
+			navResult, _ := c.navigateWithBrowser(ctx, url)
+			title, statusCode := "", 200
+			if navResult != nil {
+				title = navResult.Title
+				if navResult.StatusCode != 0 {
+					statusCode = navResult.StatusCode
+				}
+			}
+			return &ScreenshotResult{
+				Success:    true,
+				URL:        url,
+				ImagePath:  imagePath,
+				Title:      title,
+				StatusCode: statusCode,
+			}, nil
+		}
+		logutil.Warn("browser screenshot failed, falling back to HTML snapshot", "error", err.Error())
+		return c.screenshotWithHTTP(ctx, url, outputPath)
 	}
 	return c.screenshotWithHTTP(ctx, url, outputPath)
-}
-
-// screenshotWithBrowser captures a screenshot using the configured browser backend.
-// Saves the page content as a self-contained HTML file for offline viewing.
-func (c *Controller) screenshotWithBrowser(
-	ctx context.Context, url string, outputPath string,
-) (*ScreenshotResult, error) {
-	navResult, err := c.navigateWithBrowser(ctx, url)
-	if err != nil {
-		return &ScreenshotResult{
-			Success: false,
-			URL:     url,
-			Error:   err.Error(),
-		}, nil
-	}
-
-	if !navResult.Success {
-		return &ScreenshotResult{
-			Success:    false,
-			URL:        url,
-			StatusCode: navResult.StatusCode,
-			Error:      navResult.Error,
-		}, nil
-	}
-
-	htmlContent := navResult.Content
-	screenshotHTML := buildScreenshotPage(
-		navResult.Title, navResult.URL, htmlContent,
-	)
-
-	if err := os.WriteFile(
-		outputPath, []byte(screenshotHTML), 0644,
-	); err != nil {
-		return &ScreenshotResult{
-			Success: false,
-			URL:     url,
-			Error:   fmt.Sprintf("write screenshot: %v", err),
-		}, nil
-	}
-
-	return &ScreenshotResult{
-		Success:    true,
-		URL:        url,
-		ImagePath:  outputPath,
-		Title:      navResult.Title,
-		StatusCode: navResult.StatusCode,
-	}, nil
 }
 
 // screenshotWithHTTP saves page content as a self-contained HTML file.

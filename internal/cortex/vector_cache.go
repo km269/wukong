@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/km269/wukong/internal/util"
@@ -77,6 +78,8 @@ func WithCleanupInterval(interval time.Duration) VectorCacheOption {
 }
 
 func (c *VectorCache) startCleanup() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.isRunning {
 		return
 	}
@@ -127,6 +130,9 @@ func (c *VectorCache) cleanup() {
 }
 
 func (c *VectorCache) Stop() {
+	// Guard against concurrent Stop() calls double-closing c.stop.
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if !c.isRunning {
 		return
 	}
@@ -134,8 +140,8 @@ func (c *VectorCache) Stop() {
 	c.isRunning = false
 
 	util.Logger.Info("cortex: vector cache stopped",
-		slog.Int64("hits", c.hits),
-		slog.Int64("misses", c.misses),
+		slog.Int64("hits", atomic.LoadInt64(&c.hits)),
+		slog.Int64("misses", atomic.LoadInt64(&c.misses)),
 		slog.Float64("hit_rate", c.HitRate()))
 }
 
@@ -145,16 +151,16 @@ func (c *VectorCache) GetMessageVector(key string) ([]float32, bool) {
 
 	entry, ok := c.messageCache[key]
 	if !ok {
-		c.misses++
+		atomic.AddInt64(&c.misses, 1)
 		return nil, false
 	}
 
 	if time.Since(entry.Timestamp) > c.cacheTTL {
-		c.misses++
+		atomic.AddInt64(&c.misses, 1)
 		return nil, false
 	}
 
-	c.hits++
+	atomic.AddInt64(&c.hits, 1)
 	return entry.Vector, true
 }
 
@@ -178,16 +184,16 @@ func (c *VectorCache) GetQueryVector(query string) ([]float32, bool) {
 
 	entry, ok := c.queryCache[query]
 	if !ok {
-		c.misses++
+		atomic.AddInt64(&c.misses, 1)
 		return nil, false
 	}
 
 	if time.Since(entry.Timestamp) > c.cacheTTL {
-		c.misses++
+		atomic.AddInt64(&c.misses, 1)
 		return nil, false
 	}
 
-	c.hits++
+	atomic.AddInt64(&c.hits, 1)
 	return entry.Vector, true
 }
 
@@ -229,16 +235,16 @@ func (c *VectorCache) Clear() {
 
 	c.messageCache = make(map[string]*VectorCacheEntry)
 	c.queryCache = make(map[string]*VectorCacheEntry)
-	c.hits = 0
-	c.misses = 0
+	atomic.StoreInt64(&c.hits, 0)
+	atomic.StoreInt64(&c.misses, 0)
 }
 
 func (c *VectorCache) HitRate() float64 {
-	total := c.hits + c.misses
+	total := atomic.LoadInt64(&c.hits) + atomic.LoadInt64(&c.misses)
 	if total == 0 {
 		return 0.0
 	}
-	return float64(c.hits) / float64(total)
+	return float64(atomic.LoadInt64(&c.hits)) / float64(total)
 }
 
 func (c *VectorCache) Stats() map[string]interface{} {
@@ -246,8 +252,8 @@ func (c *VectorCache) Stats() map[string]interface{} {
 	defer c.mu.RUnlock()
 
 	return map[string]interface{}{
-		"hits":               c.hits,
-		"misses":             c.misses,
+		"hits":               atomic.LoadInt64(&c.hits),
+		"misses":             atomic.LoadInt64(&c.misses),
 		"hit_rate":           c.HitRate(),
 		"message_cache_size": len(c.messageCache),
 		"query_cache_size":   len(c.queryCache),
@@ -316,11 +322,11 @@ func (c *VectorCache) BatchGetOrComputeMessageVectors(
 	for key, text := range items {
 		if vector, ok := c.messageCache[key]; ok && time.Since(vector.Timestamp) <= c.cacheTTL {
 			result[key] = vector.Vector
-			c.hits++
+			atomic.AddInt64(&c.hits, 1)
 		} else {
 			missKeys = append(missKeys, key)
 			missTexts = append(missTexts, text)
-			c.misses++
+			atomic.AddInt64(&c.misses, 1)
 		}
 	}
 	c.mu.RUnlock()

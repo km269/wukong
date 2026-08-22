@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,6 +37,10 @@ type Options struct {
 	ProfileDir       string
 	DisableDownloads bool
 	Proxy            string // Proxy URL (http://user:pass@host:port or socks5://...)
+	// InsecureTLS disables Chrome's certificate verification. Strict
+	// verification is the default; enable only for intranet/.mil hosts
+	// whose certs chain to a non-public root CA.
+	InsecureTLS bool
 }
 
 type Pool struct {
@@ -105,9 +110,12 @@ func New(opts Options) (*Pool, error) {
 		l = l.Set("disable-ipv6", "")
 		l = l.Set("disable-gpu", "")
 		l = l.Set("disable-http-cache", "")
-		// Ignore certificate errors — many .mil/.gov sites use
-		// DoD certificates not in the standard trust store.
-		l = l.Set("ignore-certificate-errors", "")
+		// Only ignore certificate errors when InsecureTLS is enabled —
+		// .mil/.gov sites use DoD certificates not in the standard store.
+		// Otherwise Chrome performs strict (default) verification.
+		if opts.InsecureTLS {
+			l = l.Set("ignore-certificate-errors", "")
+		}
 		// Disable Safe Browsing to prevent ERR_BLOCKED_BY_CLIENT
 		// when navigating directly to binary resources (images, etc.).
 		l = l.Set("safebrowsing-disable-download-protection", "")
@@ -202,6 +210,82 @@ func (p *Pool) RotateUA() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.currentUA = p.escalator.RotateUserAgent()
+}
+
+// Screenshot navigates to url in a fresh tab and captures a real pixel
+// screenshot as PNG, written to outputPath. It applies the same UA override,
+// stealth injection and settle-wait as Render so the captured page matches
+// a real browsing session.
+func (p *Pool) Screenshot(
+	ctx context.Context, url string, outputPath string,
+) (string, error) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return "", fmt.Errorf("pool closed")
+	}
+	p.mu.Unlock()
+
+	ssCtx, cancel := context.WithTimeout(ctx, p.opts.RenderTimeout)
+	defer cancel()
+
+	page, err := p.browser.Page(proto.TargetCreateTarget{})
+	if err != nil {
+		return "", fmt.Errorf("create page: %w", err)
+	}
+	defer page.Close()
+	page = page.Context(ssCtx)
+
+	// Inject stealth scripts to hide automation indicators.
+	if p.opts.Stealth {
+		_, err := proto.PageAddScriptToEvaluateOnNewDocument{
+			Source: stealth.Script,
+		}.Call(page)
+		if err != nil {
+			logutil.Warn("screenshot stealth injection warning", slog.Any("error", err))
+		}
+	}
+
+	ua := p.getCurrentUA()
+	if ua != nil {
+		uaOverride := proto.NetworkSetUserAgentOverride{
+			UserAgent: ua.UserAgent,
+		}
+		uaOverride.Call(page)
+
+		proto.NetworkSetExtraHTTPHeaders{
+			Headers: proto.NetworkHeaders{
+				"Accept":                    gson.New("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
+				"Upgrade-Insecure-Requests": gson.New("1"),
+			},
+		}.Call(page)
+	}
+
+	if err := page.Navigate(url); err != nil {
+		return "", fmt.Errorf("screenshot navigate: %w", err)
+	}
+	if err := page.WaitLoad(); err != nil {
+		return "", fmt.Errorf("screenshot waitload: %w", err)
+	}
+	// Let the page reach network-idle before capturing.
+	_ = page.WaitRequestIdle(p.opts.Settle, nil, nil, nil)
+
+	// Capture a full-page real pixel PNG via Page.captureScreenshot.
+	png, err := page.Screenshot(true, &proto.PageCaptureScreenshot{
+		Format: proto.PageCaptureScreenshotFormatPng,
+	})
+	if err != nil {
+		return "", fmt.Errorf("screenshot capture: %w", err)
+	}
+	if len(png) == 0 {
+		return "", fmt.Errorf("screenshot capture: empty image data")
+	}
+
+	if err := os.WriteFile(outputPath, png, 0o644); err != nil {
+		return "", fmt.Errorf("screenshot write: %w", err)
+	}
+
+	return outputPath, nil
 }
 
 func (p *Pool) workerLoop(w *worker) {
@@ -475,8 +559,14 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 
 		var successCount, failCount int
 
-		// Fetch each asset via JS eval with timeout control.
-		for _, af := range toFetch {
+		// Fetch assets concurrently inside a single page JS evaluation.
+		// Each chunk issues one CDP Eval whose JS body runs Promise.allSettled
+		// over the chunk's URLs, so the browser fetches them truly in parallel
+		// (fetch has no hard browser-side concurrency cap and reuses the page's
+		// cookies/credentials). Chunking bounds memory: we never hold more than
+		// chunkSize base64 bodies in flight, and per-asset size is capped below.
+		const chunkSize = 10
+		for start := 0; start < len(toFetch); start += chunkSize {
 			// Check context cancellation.
 			select {
 			case <-ctx.Done():
@@ -484,68 +574,87 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 			default:
 			}
 
-			// Use a separate context with timeout for each fetch.
-			assetCtx, cancel := context.WithTimeout(ctx, perAssetTimeout)
+			end := start + chunkSize
+			if end > len(toFetch) {
+				end = len(toFetch)
+			}
+			chunk := toFetch[start:end]
 
-			// JS code to fetch the asset and return as base64.
-			jsCode := fmt.Sprintf(`
-				async (url, maxSize) => {
-					try {
-						const controller = new AbortController();
-						const signal = controller.signal;
-						const timeoutId = setTimeout(() => controller.abort(), %d);
-						const resp = await fetch(url, {
-							signal,
-							credentials: 'include',
-							mode: 'cors',
-							cache: 'force-cache'
-						}).catch(() => null);
-						clearTimeout(timeoutId);
-						if (!resp || !resp.ok) return null;
-						const buf = await resp.arrayBuffer();
-						if (buf.byteLength > maxSize) return null;
-						const bytes = new Uint8Array(buf);
-						let binary = '';
-						for (let i = 0; i < bytes.length; i++) {
-							binary += String.fromCharCode(bytes[i]);
-						}
-						return btoa(binary);
-					} catch(e) {
-						return null;
-					}
+			// Build a JS async function that fetches every URL in the chunk
+			// concurrently and returns [{url, b64|null}] as JSON. Each fetch
+			// has its own AbortController so one hung asset cannot stall the
+			// whole chunk beyond perAssetTimeout.
+			var jsBuf strings.Builder
+			jsBuf.WriteString("(async () => {\n")
+			jsBuf.WriteString("  const fetchOne = async (url, maxSize) => {\n")
+			jsBuf.WriteString("    const controller = new AbortController();\n")
+			jsBuf.WriteString("    const timeoutId = setTimeout(() => controller.abort(), ")
+			jsBuf.WriteString(strconv.Itoa(int(perAssetTimeout.Milliseconds())))
+			jsBuf.WriteString(");\n")
+			jsBuf.WriteString("    try {\n")
+			jsBuf.WriteString("      const resp = await fetch(url, { signal: controller.signal, credentials: 'include', mode: 'cors', cache: 'force-cache' }).catch(() => null);\n")
+			jsBuf.WriteString("      if (!resp || !resp.ok) return null;\n")
+			jsBuf.WriteString("      const buf = await resp.arrayBuffer();\n")
+			jsBuf.WriteString("      if (buf.byteLength > maxSize) return null;\n")
+			jsBuf.WriteString("      const bytes = new Uint8Array(buf);\n")
+			jsBuf.WriteString("      let binary = '';\n")
+			jsBuf.WriteString("      for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);\n")
+			jsBuf.WriteString("      return btoa(binary);\n")
+			jsBuf.WriteString("    } catch (e) { return null; } finally { clearTimeout(timeoutId); }\n")
+			jsBuf.WriteString("  };\n")
+			jsBuf.WriteString("  return JSON.stringify(await Promise.all([\n")
+			for i, af := range chunk {
+				if i > 0 {
+					jsBuf.WriteString(",\n")
 				}
-			`, int(perAssetTimeout.Milliseconds()))
+				jsBuf.WriteString("    fetchOne(")
+				jsBuf.WriteString(strconv.Quote(af.url))
+				jsBuf.WriteString(", ")
+				jsBuf.WriteString(strconv.Itoa(maxAssetSize))
+				jsBuf.WriteString(")")
+			}
+			jsBuf.WriteString("\n  ]));\n})")
 
-			result, err := page.Context(assetCtx).Eval(jsCode, af.url, maxAssetSize)
+			assetCtx, cancel := context.WithTimeout(ctx, perAssetTimeout+2*time.Second)
+			result, evalErr := page.Context(assetCtx).Eval(jsBuf.String())
 			cancel()
 
-			if err != nil || result == nil || result.Value.Nil() {
-				failCount++
+			if evalErr != nil || result == nil || result.Value.Nil() {
+				// The whole chunk failed (e.g. page navigated away). Mark each
+				// asset in this chunk as failed and move on.
+				failCount += len(chunk)
 				continue
 			}
 
-			b64 := result.Value.String()
-			if b64 == "" {
-				failCount++
+			type chunkAsset struct {
+				URL string      `json:"url"`
+				B64 interface{} `json:"b64"`
+			}
+			var chunkResults []chunkAsset
+			if err := json.Unmarshal([]byte(result.Value.String()), &chunkResults); err != nil ||
+				len(chunkResults) != len(chunk) {
+				failCount += len(chunk)
 				continue
 			}
 
-			bodyBytes, err := base64.StdEncoding.DecodeString(b64)
-			if err != nil || len(bodyBytes) == 0 {
-				failCount++
-				continue
-			}
-
-			if len(bodyBytes) <= maxAssetSize {
-				collectedAssets[af.url] = &types.CollectedAsset{
-					URL:         af.url,
+			for i, cr := range chunkResults {
+				b64s, ok := cr.B64.(string)
+				if !ok || b64s == "" {
+					failCount++
+					continue
+				}
+				bodyBytes, derr := base64.StdEncoding.DecodeString(b64s)
+				if derr != nil || len(bodyBytes) == 0 || len(bodyBytes) > maxAssetSize {
+					failCount++
+					continue
+				}
+				collectedAssets[chunk[i].url] = &types.CollectedAsset{
+					URL:         chunk[i].url,
 					Body:        bodyBytes,
-					ContentType: af.mimeType,
+					ContentType: chunk[i].mimeType,
 					StatusCode:  200,
 				}
 				successCount++
-			} else {
-				failCount++
 			}
 		}
 	doneCollecting:

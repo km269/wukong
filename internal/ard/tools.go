@@ -25,7 +25,7 @@ type ToolSet struct {
 // NewToolSet creates a new ARD tool set.
 func NewToolSet(registryURL string, catalogPath string) (*ToolSet, error) {
 	ts := &ToolSet{
-		client:      NewClient(30),
+		client:       NewClient(30),
 		registryURLs: []string{},
 	}
 
@@ -107,7 +107,9 @@ func (ts *ToolSet) Search(
 	// Apply filters
 	if filters != nil {
 		if filters["type"] != nil {
-			req.Filters.Type = filters["type"].(string)
+			if t, ok := filters["type"].(string); ok {
+				req.Filters.Type = t
+			}
 		}
 		if filters["capabilities"] != nil {
 			if caps, ok := filters["capabilities"].([]string); ok {

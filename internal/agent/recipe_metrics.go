@@ -29,8 +29,8 @@ type MetricsCollector interface {
 // metricsRegistry stores MetricsCollector instances so the stats
 // tool can query them. Thread-safe.
 type metricsRegistry struct {
-	mu          sync.RWMutex
-	collectors  map[string]MetricsCollector // keyed by recipe name
+	mu         sync.RWMutex
+	collectors map[string]MetricsCollector // keyed by recipe name
 }
 
 // globalMetricsRegistry is the singleton used by recipe_stats.
@@ -67,7 +67,7 @@ func (mr *metricsRegistry) collectAllMetrics() []recipeMetricsEntry {
 
 // recipeMetricsEntry pairs a recipe name with its metrics.
 type recipeMetricsEntry struct {
-	Name    string         `json:"name"`
+	Name    string        `json:"name"`
 	Metrics RecipeMetrics `json:"metrics"`
 }
 

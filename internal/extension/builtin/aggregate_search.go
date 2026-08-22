@@ -63,12 +63,12 @@ func NewAggregateSearchTool(
 	userID string,
 ) (tool.Tool, *aggregateSearchTool) {
 	st := &aggregateSearchTool{
-		duckduckgoClient: httpclient.New(httpclient.Options{Timeout: 15 * time.Second}),
-		searxngClient:    httpclient.New(httpclient.Options{Timeout: 15 * time.Second}),
-		tavilyClient:     httpclient.New(httpclient.Options{Timeout: 20 * time.Second}),
-		googleClient:     httpclient.New(httpclient.Options{Timeout: 15 * time.Second}),
-		bingClient:       httpclient.New(httpclient.Options{Timeout: 15 * time.Second}),
-		fetchClient:      httpclient.New(httpclient.Options{Timeout: 30 * time.Second}),
+		duckduckgoClient: newSearchHTTPClient(15 * time.Second),
+		searxngClient:    newSearchHTTPClient(15 * time.Second),
+		tavilyClient:     newSearchHTTPClient(20 * time.Second),
+		googleClient:     newSearchHTTPClient(15 * time.Second),
+		bingClient:       newSearchHTTPClient(15 * time.Second),
+		fetchClient:      newSearchHTTPClient(30 * time.Second),
 		searxngURL:       searxngURL,
 		searxngAPIKey:    searxngAPIKey,
 		tavilyAPIKey:     tavilyAPIKey,
@@ -93,6 +93,24 @@ func NewAggregateSearchTool(
 				"Use this tool to get comprehensive search coverage across multiple sources.",
 		),
 	), st
+}
+
+// newSearchHTTPClient builds an httpclient for web search backends with
+// retry, rate limiting, and a real Chrome TLS fingerprint enabled
+// (transient failures and 5xx are retried up to MaxRetries times; requests
+// are throttled at 10/s). Using the shared connection pool keeps search
+// backends from fragmenting their own pools, and the utls fingerprint
+// avoids being blocked by TLS-fingerprinting WAFs.
+func newSearchHTTPClient(timeout time.Duration) *httpclient.Client {
+	return httpclient.New(httpclient.Options{
+		Timeout:            timeout,
+		MaxRetries:         3,
+		RetryDelay:         500 * time.Millisecond,
+		EnableRateLimit:    true,
+		RateLimitPerSecond: 10,
+		RateLimitBurst:     20,
+		TLSFingerprint:     true,
+	})
 }
 
 // SetCortexStore allows late injection of CortexStore after the tool
@@ -270,9 +288,9 @@ func (a *aggregateSearchTool) search(
 // searchCortexIndex searches the local CortexStore knowledge index and
 // converts results to the unified searchResult format.
 func (a *aggregateSearchTool) searchCortexIndex(
-	_ context.Context, query string,
+	ctx context.Context, query string,
 ) ([]searchResult, error) {
-	results, err := a.cortexStore.Search(query, a.userID, 5)
+	results, err := a.cortexStore.Search(ctx, query, a.userID, 5)
 	if err != nil {
 		return nil, err
 	}

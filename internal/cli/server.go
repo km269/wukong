@@ -109,7 +109,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build health registry
-	healthReg := health.NewRegistry(Version)
+	healthReg := health.NewRegistry(util.Version)
 	registerHealthCheckers(healthReg, wukongCfg, bootstrapState)
 
 	// Expose the health registry over HTTP so it is actually reachable

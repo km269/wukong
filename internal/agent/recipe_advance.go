@@ -198,12 +198,12 @@ func (dt *recipeDiscoveryTool) Call(
 // hotReloader watches the recipe directory for YAML file changes and
 // triggers rebuilds of the tool set.
 type hotReloader struct {
-	mu        sync.RWMutex
-	tools     []tool.Tool
-	configs   map[string]*RecipeConfig
+	mu      sync.RWMutex
+	tools   []tool.Tool
+	configs map[string]*RecipeConfig
 
-	factory  providerModelFactory
-	dir      string
+	factory providerModelFactory
+	dir     string
 
 	// allowReloadTool is set by the rebuild callback so the
 	// reload_recipes tool can trigger a refresh.
@@ -242,11 +242,11 @@ func newHotReloader(
 	}
 
 	hr := &hotReloader{
-		factory:  factory,
-		dir:      dir,
-		rebuild:  rebuild,
-		watcher:  w,
-		closeCh:  make(chan struct{}),
+		factory: factory,
+		dir:     dir,
+		rebuild: rebuild,
+		watcher: w,
+		closeCh: make(chan struct{}),
 	}
 	hr.wg.Add(1)
 	go hr.watchLoop()
@@ -322,7 +322,7 @@ func (hr *hotReloader) Close() error {
 // reloadTool implements the `reload_recipes` tool that the main agent
 // or user can call to manually trigger a recipe reload from disk.
 type reloadTool struct {
-	decl  *tool.Declaration
+	decl   *tool.Declaration
 	reload func() string
 }
 

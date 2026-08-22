@@ -602,10 +602,10 @@ func (p *Packer) packBinary(ctx context.Context, sourceDir, outputPath string) (
 	}
 	defer os.Remove(tmpZIM)
 
-	zimData, err := os.ReadFile(tmpZIM)
-	if err != nil {
+	zimInfo, statErr := os.Stat(tmpZIM)
+	if statErr != nil {
 		return nil, newPackError("packBinary", tmpZIM,
-			fmt.Errorf("read ZIM data: %w", err))
+			fmt.Errorf("stat ZIM data: %w", statErr))
 	}
 
 	baseBinary := p.opts.BaseBinary
@@ -632,7 +632,7 @@ func (p *Packer) packBinary(ctx context.Context, sourceDir, outputPath string) (
 
 	marker := fmt.Sprintf(
 		"\n---WUKONG_ZIM_BEGIN:%d:%s:%s:%d---\n",
-		len(zimData),
+		zimInfo.Size(),
 		p.opts.AppName,
 		p.opts.AppVersion,
 		zimResult.FilesProcessed,
@@ -642,9 +642,23 @@ func (p *Packer) packBinary(ctx context.Context, sourceDir, outputPath string) (
 			fmt.Errorf("write ZIM marker: %w", err))
 	}
 
-	if _, err := outFile.Write(zimData); err != nil {
+	// Stream the ZIM archive into the output instead of loading the whole
+	// file into memory — the archive can be hundreds of MB, and there is no
+	// need to hold it all at once just to append it.
+	zimFile, err := os.Open(tmpZIM)
+	if err != nil {
+		return nil, newPackError("packBinary", tmpZIM,
+			fmt.Errorf("open ZIM data: %w", err))
+	}
+	copied, copyErr := io.Copy(outFile, zimFile)
+	zimFile.Close()
+	if copyErr != nil {
 		return nil, newPackError("packBinary", outputPath,
-			fmt.Errorf("write ZIM data: %w", err))
+			fmt.Errorf("write ZIM data: %w", copyErr))
+	}
+	if copied != zimInfo.Size() {
+		return nil, newPackError("packBinary", outputPath,
+			fmt.Errorf("write ZIM data: short write (got %d, want %d)", copied, zimInfo.Size()))
 	}
 
 	endMarker := "\n---WUKONG_ZIM_END---\n"

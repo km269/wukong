@@ -235,13 +235,21 @@ func (e *EvolutionEngine) processTrace(
 			"error", err.Error(),
 		)
 		// Record the attempt
-		_ = e.store.RecordEvolution(rec)
+		if err := e.store.RecordEvolution(rec); err != nil {
+			util.Logger.Warn("evolution: record failed",
+				"skill", trace.SkillName,
+				"error", err.Error())
+		}
 		return
 	}
 
 	if suggestion == nil {
 		// No issue found — record and return
-		_ = e.store.RecordEvolution(rec)
+		if err := e.store.RecordEvolution(rec); err != nil {
+			util.Logger.Warn("evolution: record failed",
+				"skill", trace.SkillName,
+				"error", err.Error())
+		}
 		return
 	}
 
@@ -266,7 +274,11 @@ func (e *EvolutionEngine) processTrace(
 				"skill", suggestion.SkillName,
 				"error", patchErr.Error(),
 			)
-			_ = e.store.RecordEvolution(rec)
+			if err := e.store.RecordEvolution(rec); err != nil {
+				util.Logger.Warn("evolution: record failed",
+					"skill", trace.SkillName,
+					"error", err.Error())
+			}
 			return
 		}
 

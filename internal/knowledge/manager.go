@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/util"
@@ -124,7 +125,11 @@ func NewManager(
 	)
 
 	m.kb = kb
-	m.searchTool = searchTool
+	if ct, ok := searchTool.(tool.CallableTool); ok {
+		m.searchTool = &gracefulSearchTool{inner: ct}
+	} else {
+		m.searchTool = searchTool
+	}
 	m.loaded = true
 
 	util.Logger.Info("knowledge: manager initialized",
@@ -218,4 +223,29 @@ func resolveEmbedderCredentials(
 	}
 
 	return "", ""
+}
+
+// gracefulSearchTool wraps the knowledge search tool so that
+// "no relevant documents found" is returned as a normal (non-error)
+// result. This lets the agent gracefully fall back to other tools
+// (e.g. web search) instead of treating an empty knowledge base hit
+// as a tool-call failure.
+type gracefulSearchTool struct {
+	inner tool.CallableTool
+}
+
+func (g *gracefulSearchTool) Declaration() *tool.Declaration {
+	return g.inner.Declaration()
+}
+
+func (g *gracefulSearchTool) Call(
+	ctx context.Context, jsonArgs []byte,
+) (any, error) {
+	result, err := g.inner.Call(ctx, jsonArgs)
+	if err != nil &&
+		strings.Contains(err.Error(), "no relevant documents found") {
+		return "No relevant documents found in the knowledge base " +
+			"for this query. Consider using web search instead.", nil
+	}
+	return result, err
 }

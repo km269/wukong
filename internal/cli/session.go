@@ -234,6 +234,7 @@ type BootstrapState struct {
 	ANPMeta           *summon.MetaProtocol
 	ANPMessenger      *summon.E2EEMessenger
 	CredentialRotator *summon.CredentialRotator
+	ExtMgr            *extension.Manager
 	KnowledgeMgr      *knowledge.Manager
 	ProjectMgr        *project.Manager
 	GatewayServer     *gateway.GatewayServer
@@ -324,6 +325,30 @@ func bootstrapSession(
 		return nil, nil, nil, fmt.Errorf("create session: %w", err)
 	}
 
+	// Create the model-visible event log. This records the messages
+	// the model ACTUALLY sees after context enrichment (wakeup/
+	// recall/persistent), enforcing the "model-visible means logged"
+	// invariant. It shares the session SQLite pool so it lives in
+	// the same database file as the framework session events.
+	var modelEventLog *wksession.ModelEventLog
+	if wukongCfg.Session.EnableModelEventLog {
+		sharedDB, dbErr := dbPool.Shared().GetDB()
+		if dbErr != nil {
+			util.Logger.Warn("model event log: open shared db failed, "+
+				"continuing without model-visible logging",
+				"error", dbErr.Error())
+		} else {
+			mel, melErr := wksession.NewModelEventLog(sharedDB)
+			if melErr != nil {
+				util.Logger.Warn("model event log: init failed, "+
+					"continuing without model-visible logging",
+					"error", melErr.Error())
+			} else {
+				modelEventLog = mel
+			}
+		}
+	}
+
 	// Create memory manager with auto-extract support.
 	// If an extractor_provider or extractor_model is configured in
 	// the memory block, use that instead of the default provider.
@@ -379,6 +404,31 @@ func bootstrapSession(
 
 	// Create security guard
 	guard := security.NewGuard(&wukongCfg.Security)
+	// Build a single guard callback used by both ACP and MCP servers.
+	// Centralising here keeps the non-interactive rejection policy
+	// consistent across both surfaces and avoids duplicating the
+	// command/permission/approval logic at each call site.
+	guardCheck := func(toolName string, args map[string]any, argsJSON []byte) error {
+		if err := guard.CheckToolPermission(toolName, nil); err != nil {
+			return err
+		}
+		// Validate command arguments for shell-like tools.
+		switch toolName {
+		case "developer_command_execute", "bash", "shell", "command_execute":
+			if cmdStr, _ := args["command"].(string); cmdStr != "" {
+				if err := guard.ValidateCommand(cmdStr); err != nil {
+					return err
+				}
+			}
+		}
+		// ACP/MCP are non-interactive: reject tools that require
+		// human approval, since there is no client to confirm.
+		if guard.NeedsApproval(toolName, argsJSON) {
+			return fmt.Errorf("tool %q requires human approval; "+
+				"non-interactive endpoint cannot confirm", toolName)
+		}
+		return nil
+	}
 
 	// Create extension manager and initialize
 	extMgr := extension.NewManager(wukongCfg)
@@ -474,7 +524,7 @@ func bootstrapSession(
 		if addr == "" {
 			addr = ":9091"
 		}
-		mcpServer = extension.NewMCPServer(extMgr, addr)
+		mcpServer = extension.NewMCPServerWithSecurity(extMgr, addr, wukongCfg.MCPServer.Security, guardCheck)
 		if err := mcpServer.Start(); err != nil {
 			util.Logger.Warn("mcp server start failed",
 				"error", err.Error())
@@ -1077,6 +1127,7 @@ func bootstrapSession(
 		MemoryClose:           memoryMgr.Close,
 		EvolutionClose:        evoEngineClose(evoEngine),
 		DBPoolClose:           dbPool.Close,
+		ModelEventLog:         modelEventLog,
 	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create agent loop: %w", err)
@@ -1102,6 +1153,7 @@ func bootstrapSession(
 		ACPMCPBridge:      acpMCPBridge,
 		MCPServer:         mcpServer,
 		CredentialRotator: credRotator,
+		ExtMgr:            extMgr,
 		// Wire a real DB ping so the health DBChecker is no longer a
 		// no-op. dbPool is the shared SQLite pool created above.
 		DBPing: func(ctx context.Context) error {
@@ -1172,9 +1224,19 @@ func bootstrapSession(
 	// Exposes the agent via Agent Client Protocol endpoints
 	// for ACP-compatible client applications.
 	if wukongCfg.ACPServer.Enabled {
+		// Wire the asynchronous Approval protocol: a broker in HTTP
+		// external-resolver mode lets the agent loop's BeforeTool
+		// gate block on human decisions, which ACP clients then
+		// resolve via /approvals/resolve. When ACP is disabled the
+		// guard has no broker and falls back to the legacy
+		// synchronous-deny path (safety never regresses).
+		broker := security.NewApprovalBroker(nil, 0)
+		guard.SetApprovalBroker(broker)
 		acpCfg := &server.ACPServerConfig{
 			Runner:          loop.GetRunner(),
 			Agent:           loop.GetAgent(),
+			GuardCheck:      server.ToolGuardCheck(guardCheck),
+			ApprovalSink:    &approvalSinkAdapter{broker: broker},
 			Path:            wukongCfg.ACPServer.Path,
 			EnableStreaming: wukongCfg.ACPServer.EnableStreaming,
 		}

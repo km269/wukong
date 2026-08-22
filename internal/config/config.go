@@ -555,6 +555,67 @@ func (c *WukongConfig) DefaultProviderConfig() *ProviderConfig {
 	return c.FindProvider(c.DefaultProvider)
 }
 
+// defaultContextWindowByType returns a conservative default context
+// window for a provider type when ContextWindow is not explicitly set.
+// Values reflect the lowest commonly-available tier for each family to
+// avoid overflow on small-footprint deployments. Users should set
+// ProviderConfig.ContextWindow explicitly when the actual model differs.
+func defaultContextWindowByType(t ProviderType) int {
+	switch t {
+	case ProviderOpenAI:
+		// gpt-4o family: 128K, but older gpt-3.5 tiers were 16K.
+		// Conservative default: 16K; users with gpt-4o should override.
+		return 16000
+	case ProviderAnthropic:
+		// claude-sonnet-4: 200K. Conservative default: 100K.
+		return 100000
+	case ProviderGoogle:
+		// gemini-2.0-flash: 1M. Conservative default: 32K.
+		return 32000
+	case ProviderDeepSeek:
+		// deepseek-chat: 64K.
+		return 64000
+	case ProviderOllama, ProviderLMStudio, ProviderVLLM:
+		// Local inference servers vary widely. Default to 8K — a
+		// floor that nearly all locally-served models exceed. Users
+		// must set ContextWindow explicitly for accurate clamping.
+		return 8000
+	case ProviderACP:
+		// ACP agents vary; default to 32K.
+		return 32000
+	default:
+		return 32000
+	}
+}
+
+// EffectiveContextWindow returns the effective context window for the
+// provider. If ContextWindow is set explicitly, that value wins;
+// otherwise fall back to defaultContextWindowByType. Returns 0 if p is nil.
+func (p *ProviderConfig) EffectiveContextWindow() int {
+	if p == nil {
+		return 0
+	}
+	if p.ContextWindow > 0 {
+		return p.ContextWindow
+	}
+	return defaultContextWindowByType(ProviderType(p.Type))
+}
+
+// EffectiveContextWindowForDefault returns the effective context window
+// for the default provider. Falls back to Revision.MaxContextTokens when
+// no default provider is configured. This is the value ContextRevisionEngine
+// should clamp against.
+func (c *WukongConfig) EffectiveContextWindowForDefault() int {
+	if p := c.DefaultProviderConfig(); p != nil {
+		return p.EffectiveContextWindow()
+	}
+	// No provider — use Revision as the configured global limit.
+	if c.Revision.MaxContextTokens > 0 {
+		return c.Revision.MaxContextTokens
+	}
+	return 32000
+}
+
 // EffectiveLightweightModel returns the effective lightweight model
 // name. Falls back from LightweightModel to the default provider's
 // model.

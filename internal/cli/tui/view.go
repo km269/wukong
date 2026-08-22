@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/km269/wukong/internal/util"
 )
 
 // ThemeType defines available color themes.
@@ -497,7 +498,7 @@ func RenderHeader(
 	status string,
 	width int,
 ) string {
-	return RenderBanner("v0.2.7", providerName, width)
+	return RenderBanner(util.Version, providerName, width)
 }
 
 // RenderModal renders a modal window.

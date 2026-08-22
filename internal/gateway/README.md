@@ -57,16 +57,16 @@ intranet host.
 ## 快速开始：添加新平台
 
 1. Implement the `Channel` interface (see below) in a new subpackage,
-   e.g. `internal/gateway/slack/`. Establish whatever transport the
+   e.g. `internal/gateway/<platform>/`. Establish whatever transport the
    platform requires inside `Start`.
 2. Register it during bootstrap in `internal/cli/session.go`:
    ```go
-   sc := slack.NewSlackChannel(wukongCfg)
-   if err := sc.Validate(); err != nil { /* fail fast */ }
-   state.GatewayServer.RegisterChannel(sc)
+   ch := yourplatform.NewChannel(wukongCfg)
+   if err := ch.Validate(); err != nil { /* fail fast */ }
+   state.GatewayServer.RegisterChannel(ch)
    ```
 3. Add platform config under `gateway` in `config.yaml` and the
-   matching struct in `internal/config/types.go`.
+   matching struct in `internal/gateway/config.go`.
 
 ## Channel 接口详解
 

@@ -34,6 +34,12 @@ type Guard struct {
 	// IgnoreMatcher provides file-access blacklisting via
 	// .wukongignore (gitignore-compatible syntax).
 	ignoreMatcher *IgnoreMatcher
+
+	// broker, when set, routes NeedsApproval=true tool calls through
+	// the asynchronous Approval protocol (human-in-the-loop). When
+	// nil (default), the legacy synchronous deny behavior is kept —
+	// safety never regresses when the feature is off.
+	broker *ApprovalBroker
 }
 
 // NewGuard creates a new security guard.
@@ -201,19 +207,24 @@ func (g *Guard) isHighRiskOperation(toolName string, argsJSON []byte) bool {
 	return false
 }
 
-// isDangerousCommand checks if a command contains high-risk patterns.
+// isDangerousCommand checks if a command contains high-risk patterns
+// using token-level analysis. This catches obfuscated variants like
+// "rm --recursive --force /" or "rm -r -f /" that substring matching
+// would miss.
 func isDangerousCommand(command string) bool {
-	cmdLower := strings.ToLower(command)
-	dangerous := []string{
-		"rm -rf", "sudo ", "chmod 777", "chown",
-		"dd if=", "mkfs.", "format",
-		"curl | sh", "wget -O - | sh",
-		">/dev/sda", ">/dev/sdb",
-		"git push --force", "git push -f",
-		"docker rm -f", "docker system prune",
+	// Token-level analysis first (catches flag rewrites).
+	if isDangerousCommandTokens(command) {
+		return true
 	}
-	for _, d := range dangerous {
-		if strings.Contains(cmdLower, strings.ToLower(d)) {
+	// Fall back to substring matching for user-configured patterns
+	// and edge cases not covered by token rules.
+	cmdLower := strings.ToLower(command)
+	substringDangerous := []string{
+		"curl | sh", "wget -o - | sh",
+		">/dev/sda", ">/dev/sdb",
+	}
+	for _, d := range substringDangerous {
+		if strings.Contains(cmdLower, d) {
 			return true
 		}
 	}

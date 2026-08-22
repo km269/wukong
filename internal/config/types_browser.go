@@ -44,8 +44,9 @@ type ProxyConfig struct {
 }
 
 // SearchConfig defines search engine configurations.
+// Each backend is activated by its own Enabled field; the
+// Backends list has been removed.
 type SearchConfig struct {
-	Backends   []string         `mapstructure:"backends"`
 	DuckDuckGo DuckDuckGoConfig `mapstructure:"duckduckgo"`
 	SearXNG    SearXNGConfig    `mapstructure:"searxng"`
 	Tavily     TavilyConfig     `mapstructure:"tavily"`
@@ -54,17 +55,12 @@ type SearchConfig struct {
 }
 
 // DuckDuckGoConfig defines DuckDuckGo search configuration.
-//
-// The Enabled field is deprecated: backend activation is controlled
-// exclusively by the top-level SearchConfig.Backends list. The field
-// is retained for backward compatibility but has no runtime effect.
 type DuckDuckGoConfig struct {
 	Enabled bool   `mapstructure:"enabled"`
 	URL     string `mapstructure:"url"`
 }
 
 // SearXNGConfig defines SearXNG search configuration.
-// See DuckDuckGoConfig for the deprecated Enabled field semantics.
 type SearXNGConfig struct {
 	Enabled bool   `mapstructure:"enabled"`
 	URL     string `mapstructure:"url"`
@@ -72,14 +68,12 @@ type SearXNGConfig struct {
 }
 
 // TavilyConfig defines Tavily AI search configuration.
-// See DuckDuckGoConfig for the deprecated Enabled field semantics.
 type TavilyConfig struct {
 	Enabled bool   `mapstructure:"enabled"`
 	APIKey  string `mapstructure:"api_key"`
 }
 
 // GoogleConfig defines Google search configuration.
-// See DuckDuckGoConfig for the deprecated Enabled field semantics.
 type GoogleConfig struct {
 	Enabled bool   `mapstructure:"enabled"`
 	APIKey  string `mapstructure:"api_key"`
@@ -87,7 +81,6 @@ type GoogleConfig struct {
 }
 
 // BingConfig defines Bing search configuration.
-// See DuckDuckGoConfig for the deprecated Enabled field semantics.
 type BingConfig struct {
 	Enabled bool   `mapstructure:"enabled"`
 	APIKey  string `mapstructure:"api_key"`

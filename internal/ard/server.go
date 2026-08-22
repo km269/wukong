@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/km269/wukong/internal/cors"
 )
 
 // RegistryServer provides the ARD HTTP API endpoints.
@@ -183,13 +185,10 @@ func (s *RegistryServer) handleNotFound(w http.ResponseWriter, r *http.Request) 
 	s.writeError(w, http.StatusNotFound, "Not found")
 }
 
-// handleCORS wraps a handler with CORS headers.
+// handleCORS wraps a handler with localhost-only CORS headers.
 func (s *RegistryServer) handleCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Max-Age", "86400")
+		cors.SetLocalhostOnly(w, r)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 
 		if r.Method == http.MethodOptions {

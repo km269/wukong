@@ -151,7 +151,7 @@ func TestTimeoutTool_DeadlineExceeded(t *testing.T) {
 		}},
 	}
 	// Use a real deadline that exceeds.
-	tt := newTimeoutTool(inner, 1 * time.Millisecond)
+	tt := newTimeoutTool(inner, 1*time.Millisecond)
 	ctx, cancel := context.WithTimeout(
 		context.Background(), 1*time.Nanosecond)
 	defer cancel()

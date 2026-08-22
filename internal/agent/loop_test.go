@@ -325,4 +325,3 @@ func TestCoreLoop_CloseRejectsNewRun(t *testing.T) {
 		t.Fatal("expected Run to be rejected after Close")
 	}
 }
-

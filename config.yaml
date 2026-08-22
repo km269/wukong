@@ -18,7 +18,7 @@
 #   - gateway.feishu.app_secret, encrypt_key, verification_token
 #   - observability.langfuse_public_key, langfuse_secret_key
 #   - artifact.cos_secret_id, cos_secret_key
-#   - acp_server.api_key
+#   - acp_server.security.auth.api_key
 #   - cortex.embedding_api_key, embedding_base_url, embedding_model
 #   - cortex.reranker_api_key, reranker_base_url, reranker_model
 #   - cortex.vertical_routing.github_api_key
@@ -46,7 +46,7 @@
 log_level: "info"                    # debug | info | warn | error
 default_provider: "vllm"         # must match a name in providers[]
 lightweight_provider: "vllm"     # background tasks (empty = default_provider)
-lightweight_model: "qwen3.6-27b"  # background lightweight model
+lightweight_model: "deepseek-v4-flash-0731"  # background lightweight model name
 
 # ===========================================================================
 # B. Providers — LLM backends
@@ -83,8 +83,9 @@ providers:
   - name: "vllm"
     type: "vllm"
     api_key: ""                       # vllm 不需要 api_key；留空即可（代码已跳过校验）
-    base_url: "http://192.168.50.97:8081/"
-    model: "qwen3.6-27b"
+    base_url: "http://192.168.50.115:8888/v1"   # 必须带 /v1 后缀；vllm OpenAI 兼容端点
+    model: "deepseek-v4-flash-0731" #"claude-opus-4-8" #
+    context_window: 131072          # match vllm serve --max-model-len; prevents 400 overflow
 
   - name: "ollama"
     type: "ollama"
@@ -139,8 +140,9 @@ providers:
 # ===========================================================================
 agent:
   max_llm_calls: 50                  # 0 = unlimited
-  max_tool_iterations: 30
-  max_run_duration: "900s"           # wall-clock time limit
+  max_tool_iterations: 50
+  max_run_duration: "3600s"          # wall-clock time limit (1h, 本地大模型复杂任务)
+  tool_call_timeout: "120s"          # per-tool-call deadline; bounds a single hung/slow tool so it can't exhaust the run budget
 
   parallel_tools: true               # concurrent independent tool calls
   streaming: true                    # real-time token streaming in TUI
@@ -199,6 +201,22 @@ security:
   guardrail_enabled: false
   ignore_file_enabled: true
   ignore_file: ".wukongignore"
+  # Process-level sandbox for shell execution (developer toolset).
+  # Limits cap CPU / memory / file-size / process-count per command;
+  # kill_on_parent_exit binds child processes to wukong's lifetime.
+  # Zero values mean "unlimited" — leave commented defaults in place
+  # for legacy behavior. Enabling requires platform support:
+  #   Windows: Job Object (no admin needed; low-integrity label is
+  #            best-effort and decoupled from limits).
+  #   Linux:   setrlimit + Landlock (kernel 5.13+).
+  #   macOS:   sandbox-exec (limits not enforced — no-op).
+  sandbox:
+    kill_on_parent_exit: false
+    limits:
+      max_cpu_seconds: 0      # Windows: JOB_OBJECT_LIMIT_PROCESS_TIME; Linux: RLIMIT_CPU
+      max_memory_bytes: 0     # Windows: JOB_OBJECT_LIMIT_PROCESS_MEMORY; Linux: RLIMIT_AS
+      max_file_bytes: 0       # Linux only (RLIMIT_FSIZE); ignored on Windows
+      max_processes: 0        # Windows: JOB_OBJECT_LIMIT_ACTIVE_PROCESS; Linux: RLIMIT_NPROC
 
 # ===========================================================================
 # E. Storage — SQLite-backed persistence layer
@@ -212,6 +230,8 @@ session:
   ttl: "0h"
   enable_summary: true
   summary_trigger: 50
+  # 记录模型实际看到的消息（含上下文富化后的），强制 "model-visible means logged" 不变式
+  enable_model_event_log: true
   redis_url: "${REDIS_URL:-}"
 
 memory:
@@ -257,7 +277,7 @@ cortex:
   db_path: "wukong.db"
   max_results: 10
   max_messages_per_session: 200
-  embedding_base_url: "${EMBEDDING_BASE_URL:-http://192.168.50.97:8082}"
+  embedding_base_url: "${EMBEDDING_BASE_URL:-http://192.168.50.97:8082/v1}"
   embedding_api_key: "${EMBEDDING_API_KEY:-vllm}"
   embedding_model: "${EMBEDDING_MODEL:-bge-m3-Q8_0}"
   # Cross-Encoder reranker (optional; empty = disabled)
@@ -329,7 +349,11 @@ revision:
   max_command_output: 8000
   enable_semantic_search: false
   search_strategy: "include_all"
-  max_context_tokens: 64000
+  max_context_tokens: 24000         #保守上限。vllm qwen3.6-27b n_ctx=32768，
+                                    #留 8000+ buffer 给单次 user input + tool results。
+                                    #ContextRevisionEngine 异步触发，需预留暴涨空间，
+                                    #否则单次输入会让 prompt 突破 model n_ctx 触发 400。
+                                    #可被 providers[].context_window 进一步收紧。
   trim_ratio: 0.3
 
 # ===========================================================================
@@ -356,12 +380,8 @@ browser:
     pool: []
     rotate_every: 10
   search:
-    backends:
-      - duckduckgo
-      - searxng
-      - tavily
     duckduckgo:
-      enabled: true
+      enabled: false
       url: "https://api.duckduckgo.com/"
     searxng:
       enabled: true
@@ -438,6 +458,13 @@ apps:
     proxy_enabled: false
     proxy_pool: []
     proxy_rotate_every: 10
+    # --- TLS (克隆/下载的证书校验策略) ---
+    # insecure_tls: 设为 true 才跳过证书校验（仅适用于内网/.mil/.gov 等无法
+    #               链到公共根的证书场景）。默认 false = 严格校验（安全）。
+    insecure_tls: false
+    # tls_ca_cert_path: 指向 PEM 格式 CA 证书包（如 DoD 根证书包），用于在保持
+    #                 严格校验的同时信任 .mil/.gov 站点证书。留空 = 用系统根。
+    tls_ca_cert_path: ""
 
   pack:
     compress: true
@@ -470,15 +497,30 @@ acp_server:
   address: ":9091"
   path: "/acp"
   enable_streaming: true
-  auth_type: ""
+  # 认证必须嵌套在 security.auth.* 下，顶层 auth_type/api_key 会被
+  # Viper 静默丢弃（无 mapstructure tag），导致认证形同虚设。
+  security:
+    auth:
+      type: ""                          # "" | "api_key" | "jwt"
+      api_key: "${ACP_API_KEY:-}"       # 与 expandSecrets 中 cfg.ACPServer.Security.Auth.APIKey 对应
 
 acp_mcp:
   enabled: true
   address: ":3400"
   path: "/mcp"
 
+# 独立 MCP 服务器（expose agent 工具为 MCP tools）
+# security 与 acp_server.security 结构相同；留空 type 则不启用认证
+mcp_server:
+  enabled: false
+  address: ":3401"
+  security:
+    auth:
+      type: ""                          # "" | "api_key" | "jwt"
+      api_key: "${MCP_API_KEY:-}"
+
 gateway:
-  enabled: true
+  enabled: false
   default_timeout: "900s"
   max_concurrent_sessions: 100
   message_dedup_ttl: "5m"
@@ -486,7 +528,7 @@ gateway:
   rate_limit_window: "60s"
 
   feishu:
-    enabled: true
+    enabled: false
     app_id: "cli_aa98378746f8dcd7"
     app_secret: "${FEISHU_APP_SECRET}"
     api_base: "https://open.feishu.cn/open-apis"
@@ -541,12 +583,11 @@ dify:
 # ===========================================================================
 knowledge:
   enabled: true
-  embedder_provider: "vllm"              # 留空时回退到 cortex.embedding_* 配置，再回退到 default_provider
+  embedder_provider: ""                   # 留空 → 回退到 cortex.embedding_* (端口 8082)，再回退到 default_provider
   embedder_model: "bge-m3-Q8_0"
   vector_store: "inmemory"
   max_results: 5
   enable_source_sync: false
-  reranker_enabled: false
   search_tool_name: "knowledge_search"
 
 okf:
@@ -560,8 +601,6 @@ okf:
 skill:
   enabled: true
   skills_dir: ".wukong/skills"
-  auto_load: true
-  max_skills: 20
 
 evolution:
   enabled: true
@@ -583,9 +622,6 @@ workflow:
   mode: "single"
   max_iterations: 10
   cycle_mode: "default"
-  stream_mode: "none"
-  cache_enabled: false
-  engine: "bsp"
   sub_agents: []
   team_members: []
   claude_code_bin: ""

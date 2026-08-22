@@ -147,6 +147,9 @@ func (ls *lexicalStore) listSessions(userID string) ([]string, error) {
 		}
 		sessions = append(sessions, sid)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
+	}
 	return sessions, nil
 }
 
@@ -472,6 +475,9 @@ func scanResults(rows *sql.Rows) ([]recall.SearchResult, error) {
 			Preview: truncatePreview(msg.Content, 200),
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
+	}
 	return results, nil
 }
 
@@ -492,6 +498,9 @@ func scanResultsNoRank(
 			Score:   calcScore(query, msg.Content),
 			Preview: truncatePreview(msg.Content, 200),
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
 	}
 	return results, nil
 }

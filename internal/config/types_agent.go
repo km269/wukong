@@ -14,6 +14,11 @@ type AgentConfig struct {
 	ParallelTools                        bool             `mapstructure:"parallel_tools"`
 	Streaming                            bool             `mapstructure:"streaming"`
 	MaxRunDuration                       time.Duration    `mapstructure:"max_run_duration"`
+	// ToolCallTimeout caps the execution time of a single tool call.
+	// It prevents one slow or hung tool (e.g. a web fetch to a heavy
+	// site) from consuming the entire run budget. Zero disables the
+	// cap. Default 120s (see defaults.go).
+	ToolCallTimeout                      time.Duration    `mapstructure:"tool_call_timeout"`
 	Temperature                          float64          `mapstructure:"temperature"`
 	MaxTokens                            int              `mapstructure:"max_tokens"`
 	ToolRetryEnabled                     bool             `mapstructure:"tool_retry_enabled"`
@@ -73,4 +78,38 @@ type SecurityConfig struct {
 	GuardrailEnabled       bool           `mapstructure:"guardrail_enabled"`
 	IgnoreFileEnabled      bool           `mapstructure:"ignore_file_enabled"`
 	IgnoreFile             string         `mapstructure:"ignore_file"`
+	// Sandbox configures process-level resource limits and lifecycle
+	// binding for shell commands executed by the developer toolset.
+	// Defaults to all-zero (unlimited, no lifecycle binding) so
+	// existing behavior is unchanged unless explicitly enabled.
+	Sandbox                SandboxConfig   `mapstructure:"sandbox"`
+}
+
+// SandboxConfig configures the process-level sandbox applied to
+// shell execution. Resource caps map onto Windows Job Object limits
+// and Linux setrlimit. Zero values mean "unlimited" — leaving the
+// field unset keeps the legacy unsandboxed-from-limits behavior.
+type SandboxConfig struct {
+	Limits           SandboxLimitsConfig `mapstructure:"limits"`
+	KillOnParentExit bool                `mapstructure:"kill_on_parent_exit"`
+}
+
+// SandboxLimitsConfig mirrors sandbox.ResourceLimits without
+// importing pkg/sandbox, keeping the config package decoupled from
+// the runtime sandbox implementation. Zero = unlimited.
+//
+// Platform notes:
+//
+//	MaxCPUSeconds   — Windows: JOB_OBJECT_LIMIT_PROCESS_TIME
+//	                  Linux:   RLIMIT_CPU
+//	MaxMemoryBytes  — Windows: JOB_OBJECT_LIMIT_PROCESS_MEMORY
+//	                  Linux:   RLIMIT_AS
+//	MaxFileBytes    — Linux only (RLIMIT_FSIZE); ignored on Windows
+//	MaxProcesses    — Windows: JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+//	                  Linux:   RLIMIT_NPROC
+type SandboxLimitsConfig struct {
+	MaxCPUSeconds  uint64 `mapstructure:"max_cpu_seconds"`
+	MaxMemoryBytes uint64 `mapstructure:"max_memory_bytes"`
+	MaxFileBytes   uint64 `mapstructure:"max_file_bytes"`
+	MaxProcesses   uint64 `mapstructure:"max_processes"`
 }

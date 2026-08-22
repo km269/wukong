@@ -211,6 +211,9 @@ func (s *Store) Search(
 			Preview: preview,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
+	}
 
 	return results, nil
 }
@@ -270,6 +273,9 @@ func (s *Store) searchLike(
 			Score:   calculateScore(query, msg.Content),
 			Preview: preview,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
 	}
 
 	return results, nil
@@ -346,6 +352,9 @@ func (s *Store) SearchBySession(
 			Preview: preview,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
+	}
 
 	return results, nil
 }
@@ -413,6 +422,9 @@ func (s *Store) ListSessions(userID string) ([]string, error) {
 			return nil, err
 		}
 		sessions = append(sessions, sid)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
 	}
 	return sessions, nil
 }

@@ -9,13 +9,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/km269/wukong/pkg/httpclient"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 )
 
 type tavilyTool struct {
 	apiKey     string
-	httpClient *http.Client
+	httpClient *httpclient.Client
 }
 
 type tavilyResult struct {
@@ -39,10 +40,8 @@ type tavilyResponse struct {
 
 func NewTavilyTool(apiKey string) tool.Tool {
 	tt := &tavilyTool{
-		apiKey: apiKey,
-		httpClient: &http.Client{
-			Timeout: 20 * time.Second,
-		},
+		apiKey:     apiKey,
+		httpClient: newSearchHTTPClient(20 * time.Second),
 	}
 	return function.NewFunctionTool(
 		tt.search,

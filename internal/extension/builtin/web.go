@@ -43,8 +43,21 @@ func NewWebToolSet(cfg *config.WukongConfig) *WebToolSet {
 	if cfg != nil {
 		searchCfg := cfg.Browser.Search
 
-		if len(searchCfg.Backends) > 0 {
-			enabledBackends = searchCfg.Backends
+		// Build enabled backends from per-backend Enabled fields.
+		if searchCfg.SearXNG.Enabled {
+			enabledBackends = append(enabledBackends, "searxng")
+		}
+		if searchCfg.DuckDuckGo.Enabled {
+			enabledBackends = append(enabledBackends, "duckduckgo")
+		}
+		if searchCfg.Tavily.Enabled {
+			enabledBackends = append(enabledBackends, "tavily")
+		}
+		if searchCfg.Google.Enabled {
+			enabledBackends = append(enabledBackends, "google")
+		}
+		if searchCfg.Bing.Enabled {
+			enabledBackends = append(enabledBackends, "bing")
 		}
 
 		if searchCfg.SearXNG.URL != "" {
@@ -59,34 +72,13 @@ func NewWebToolSet(cfg *config.WukongConfig) *WebToolSet {
 		bingAPIKey = searchCfg.Bing.APIKey
 	}
 
+	// Default to DuckDuckGo when no backend is explicitly enabled.
 	if len(enabledBackends) == 0 {
 		enabledBackends = []string{"duckduckgo"}
 	}
 
-	validBackends := make([]string, 0, len(enabledBackends))
-	for _, backend := range enabledBackends {
-		switch backend {
-		case "duckduckgo", "searxng", "tavily", "google", "bing":
-			validBackends = append(validBackends, backend)
-			if util.DebugEnabled {
-				fmt.Printf("[wukong/web] enabled search backend: %s\n", backend)
-			}
-		default:
-			if util.DebugEnabled {
-				fmt.Printf("[wukong/web] warning: unknown search backend %q, skipping\n", backend)
-			}
-		}
-	}
-
-	if len(validBackends) == 0 {
-		validBackends = append(validBackends, "duckduckgo")
-		if util.DebugEnabled {
-			fmt.Println("[wukong/web] no valid backends configured, using default: duckduckgo")
-		}
-	}
-
-	if len(validBackends) == 1 {
-		switch validBackends[0] {
+	if len(enabledBackends) == 1 {
+		switch enabledBackends[0] {
 		case "searxng":
 			ts.tools = append(ts.tools, NewSearXNGTool(searxngURL, searxngAPIKey))
 		case "tavily":
@@ -122,10 +114,10 @@ func NewWebToolSet(cfg *config.WukongConfig) *WebToolSet {
 		}
 	} else {
 		if util.DebugEnabled {
-			fmt.Printf("[wukong/web] aggregating %d search backends\n", len(validBackends))
+			fmt.Printf("[wukong/web] aggregating %d search backends\n", len(enabledBackends))
 		}
 		aggTool, agg := NewAggregateSearchTool(
-			validBackends, searxngURL, searxngAPIKey, tavilyAPIKey,
+			enabledBackends, searxngURL, searxngAPIKey, tavilyAPIKey,
 			googleAPIKey, googleCSEID, bingAPIKey,
 			ts.browser, ts.cortexStore, ts.userID,
 		)

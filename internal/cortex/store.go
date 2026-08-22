@@ -14,6 +14,7 @@ import (
 	"github.com/km269/wukong/internal/search/chunking"
 	"github.com/km269/wukong/internal/search/metrics"
 	"github.com/km269/wukong/internal/search/vertical"
+	"github.com/km269/wukong/internal/util"
 
 	"github.com/liliang-cn/cortexdb/v2/pkg/core"
 	cortexdb "github.com/liliang-cn/cortexdb/v2/pkg/cortexdb"
@@ -85,7 +86,7 @@ func NewStore(
 
 // StoreMessage persists a chat message. With embedding, uses CortexDB's
 // HNSW index; otherwise falls back to FTS5 lexical.
-func (s *CortexStore) StoreMessage(msg recall.ChatMessage) error {
+func (s *CortexStore) StoreMessage(ctx context.Context, msg recall.ChatMessage) error {
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now()
 	}
@@ -99,12 +100,12 @@ func (s *CortexStore) StoreMessage(msg recall.ChatMessage) error {
 	msg.ID = msgID
 
 	if s.db != nil && s.embedder != nil {
-		return s.storeCortexVector(msg)
+		return s.storeCortexVector(ctx, msg)
 	}
 	return nil
 }
 
-func (s *CortexStore) storeCortexVector(msg recall.ChatMessage) error {
+func (s *CortexStore) storeCortexVector(ctx context.Context, msg recall.ChatMessage) error {
 	// Use semantic chunking for long messages; short messages
 	// skip the chunker entirely (single embedding).
 	var chunks []chunking.Chunk
@@ -117,15 +118,13 @@ func (s *CortexStore) storeCortexVector(msg recall.ChatMessage) error {
 		if len(embedText) > 8000 {
 			embedText = embedText[:8000]
 		}
-		return s.storeSingleVector(msg, embedText, fmt.Sprintf("msg_%d", msg.ID))
+		return s.storeSingleVector(ctx, msg, embedText, fmt.Sprintf("msg_%d", msg.ID))
 	}
 
 	// Long message: embed each chunk and store as separate vectors.
 	// This improves retrieval recall by allowing fine-grained
 	// semantic matching against individual passages.
-	bgCtx, cancel := context.WithTimeout(
-		context.Background(), 90*time.Second,
-	)
+	bgCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
 
 	chunkTexts := make([]string, len(chunks))
@@ -140,7 +139,7 @@ func (s *CortexStore) storeCortexVector(msg recall.ChatMessage) error {
 		if len(embedText) > 8000 {
 			embedText = embedText[:8000]
 		}
-		return s.storeSingleVector(msg, embedText, fmt.Sprintf("msg_%d", msg.ID))
+		return s.storeSingleVector(ctx, msg, embedText, fmt.Sprintf("msg_%d", msg.ID))
 	}
 
 	metadata := map[string]string{
@@ -169,11 +168,10 @@ func (s *CortexStore) storeCortexVector(msg recall.ChatMessage) error {
 // storeSingleVector embeds a single text and stores it in CortexDB.
 // Used for short messages that don't need chunking.
 func (s *CortexStore) storeSingleVector(
+	ctx context.Context,
 	msg recall.ChatMessage, embedText, cacheKey string,
 ) error {
-	bgCtx, cancel := context.WithTimeout(
-		context.Background(), 60*time.Second,
-	)
+	bgCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	var vector []float32
@@ -228,6 +226,7 @@ func (s *CortexStore) storeSingleVector(
 // platform's search API are merged with local retrieval according
 // to the configured MergeMode.
 func (s *CortexStore) Search(
+	ctx context.Context,
 	query, userID string, limit int,
 ) ([]recall.SearchResult, error) {
 	start := time.Now()
@@ -239,13 +238,11 @@ func (s *CortexStore) Search(
 	// query targets a known vertical. Failures are non-fatal; we
 	// fall through to local retrieval.
 	if s.router != nil && s.router.Enabled() {
-		ctx, cancel := context.WithTimeout(
-			context.Background(), 15*time.Second,
-		)
-		vResults, vErr := s.router.Search(ctx, query, limit)
+		vCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		vResults, vErr := s.router.Search(vCtx, query, limit)
 		cancel()
 		if vErr == nil && len(vResults) > 0 {
-			results := s.mergeVertical(query, userID, limit, vResults)
+			results := s.mergeVertical(ctx, query, userID, limit, vResults)
 			s.recordMetric(metrics.ModeVertical, start, len(results),
 				query, false, false, false, true,
 				string(s.router.DetectIntent(query)), "", len(results))
@@ -264,15 +261,15 @@ func (s *CortexStore) Search(
 		results, err = s.lexical.search(query, userID, limit)
 	case g.IsVectorOnly() && s.db != nil && s.embedder != nil:
 		mode = metrics.ModeVector
-		results, err = s.searchCortex(query, userID, limit)
+		results, err = s.searchCortex(ctx, query, userID, limit)
 	case g.IsHybrid() && s.db != nil && s.embedder != nil:
 		mode = metrics.ModeHybrid
-		results, err = s.searchHybridCortex(query, userID, limit)
+		results, err = s.searchHybridCortex(ctx, query, userID, limit)
 	default:
 		// Fallback: vector if available, else lexical.
 		if s.db != nil && s.embedder != nil {
 			mode = metrics.ModeFallback
-			results, err = s.searchCortex(query, userID, limit)
+			results, err = s.searchCortex(ctx, query, userID, limit)
 		} else {
 			mode = metrics.ModeLexical
 			results, err = s.lexical.search(query, userID, limit)
@@ -334,6 +331,7 @@ func (s *CortexStore) MetricsSnapshot() metrics.Snapshot {
 //
 // The combined list is truncated to limit.
 func (s *CortexStore) mergeVertical(
+	ctx context.Context,
 	query, userID string, limit int,
 	vResults []vertical.Result,
 ) []recall.SearchResult {
@@ -372,9 +370,9 @@ func (s *CortexStore) mergeVertical(
 	g := s.genome.Normalized()
 	switch {
 	case g.IsHybrid() && s.db != nil && s.embedder != nil:
-		local, _ = s.searchHybridCortex(query, userID, limit)
+		local, _ = s.searchHybridCortex(ctx, query, userID, limit)
 	case g.IsVectorOnly() && s.db != nil && s.embedder != nil:
-		local, _ = s.searchCortex(query, userID, limit)
+		local, _ = s.searchCortex(ctx, query, userID, limit)
 	default:
 		local, _ = s.lexical.search(query, userID, limit)
 	}
@@ -405,11 +403,10 @@ func (s *CortexStore) Genome() search.SearchGenome {
 }
 
 func (s *CortexStore) searchCortex(
+	ctx context.Context,
 	query, userID string, limit int,
 ) ([]recall.SearchResult, error) {
-	bgCtx, cancel := context.WithTimeout(
-		context.Background(), 30*time.Second,
-	)
+	bgCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	var queryVec []float32
@@ -466,6 +463,7 @@ func (s *CortexStore) searchCortex(
 // combined with HNSW vector search. Results are merged and re-ranked
 // using DenseWeight (vector) + TextWeight (lexical) from the genome.
 func (s *CortexStore) searchHybridCortex(
+	ctx context.Context,
 	query, userID string, limit int,
 ) ([]recall.SearchResult, error) {
 	g := s.genome.Normalized()
@@ -475,9 +473,7 @@ func (s *CortexStore) searchHybridCortex(
 	lexResults, _ := s.lexical.search(query, userID, poolSize)
 
 	// Step 2: HNSW vector search (wider pool).
-	bgCtx, cancel := context.WithTimeout(
-		context.Background(), 30*time.Second,
-	)
+	bgCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	var queryVec []float32
@@ -617,9 +613,7 @@ func (s *CortexStore) searchHybridCortex(
 		for i := 0; i < rerankN; i++ {
 			docs[i] = all[i].Preview
 		}
-		bgCtx2, cancel2 := context.WithTimeout(
-			context.Background(), 30*time.Second,
-		)
+		bgCtx2, cancel2 := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel2()
 		indices, scores, err := s.reranker.Rerank(
 			bgCtx2, query, docs, limit,
@@ -702,7 +696,10 @@ func (s *CortexStore) Close() error {
 		s.vectorCache.Stop()
 	}
 	if s.db != nil {
-		s.db.Close()
+		if err := s.db.Close(); err != nil {
+			util.Logger.Warn("cortex: db close error",
+				"error", err.Error())
+		}
 	}
 	return s.lexical.close() // no-op: DB managed by DatabasePool
 }
@@ -733,19 +730,19 @@ func (s *CortexStore) RecallStore() (*recall.Store, error) {
 // SearchWithMemory extends recall search to also query the tRPC memory
 // table. Returns combined results from both recall and memory stores.
 func (s *CortexStore) SearchWithMemory(
+	ctx context.Context,
 	query, userID string, limit int,
 	memoryReader func(ctx context.Context, query string) ([]string, error),
 ) ([]recall.SearchResult, error) {
 	// Search recall messages.
-	results, err := s.Search(query, userID, limit)
+	results, err := s.Search(ctx, query, userID, limit)
 	if err != nil {
 		results = nil
 	}
 
 	// Search tRPC memories via provided reader.
 	if memoryReader != nil {
-		memTexts, mErr := memoryReader(
-			context.Background(), query)
+		memTexts, mErr := memoryReader(ctx, query)
 		if mErr == nil {
 			for _, text := range memTexts {
 				results = append(results, recall.SearchResult{

@@ -166,11 +166,12 @@ func TestACPServer_CORSHeaders(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodOptions, "/acp/message/send", nil,
 	)
+	req.Header.Set("Origin", "http://localhost:3000")
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
 
-	if w.Header().Get("Access-Control-Allow-Origin") != "*" {
-		t.Error("CORS header missing")
+	if w.Header().Get("Access-Control-Allow-Origin") != "http://localhost:3000" {
+		t.Error("CORS header missing or not localhost-scoped")
 	}
 }
 

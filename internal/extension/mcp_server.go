@@ -13,11 +13,19 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
+// ToolGuardCheck mirrors server.ToolGuardCheck. Defined here (rather
+// than imported from internal/server) to avoid a cyclic dependency
+// through internal/config. Callers (cli/session.go) build a single
+// closure over *security.Guard and inject the same value into both
+// server.ACPServer and extension.MCPServer.
+type ToolGuardCheck func(toolName string, args map[string]any, argsJSON []byte) error
+
 type ToolHandler func(ctx context.Context, args interface{}) (interface{}, error)
 
 type MCPServer struct {
 	server        *http.Server
 	manager       *Manager
+	guardFn       ToolGuardCheck
 	auditLogger   *ToolAuditLogger
 	healthChecker *MCPHealthChecker
 	tools         map[string]ToolHandler
@@ -27,11 +35,37 @@ type MCPServer struct {
 }
 
 func NewMCPServer(manager *Manager, addr string) *MCPServer {
+	return NewMCPServerWithSecurity(manager, addr, nil, nil)
+}
+
+// NewMCPServerWithSecurity creates an MCP server with the supplied
+// security config applied. When secCfg is nil or has an empty auth
+// type, the server starts WITHOUT authentication — this is insecure
+// for network-exposed deployments and intended only for local dev or
+// trusted loopback use. Callers exposing the MCP server on a
+// non-loopback interface MUST pass a ServerSecurityConfig with a
+// non-empty auth type (api_key/jwt) to prevent unauthorized
+// tools/call access (which can execute arbitrary commands via
+// developer_command_execute etc.).
+//
+// guardFn, when non-nil, applies the same CheckToolPermission /
+// ValidateCommand / NeedsApproval checks as the agent loop, so that
+// tools/call cannot bypass permission_mode / blocked_commands.
+//
+// To avoid a cyclic import (extension → server → extension), the
+// signature accepts an opaque interface { ApplySecurity(http.Handler)
+// (http.Handler, interface{}) } satisfied by server.ServerSecurityConfig.
+type securityApplier interface {
+	ApplySecurity(http.Handler) (http.Handler, interface{})
+}
+
+func NewMCPServerWithSecurity(manager *Manager, addr string, secCfg securityApplier, guardFn ToolGuardCheck) *MCPServer {
 	auditLogger := NewToolAuditLogger(10000)
 	healthChecker := NewMCPHealthChecker(auditLogger)
 
 	s := &MCPServer{
 		manager:       manager,
+		guardFn:       guardFn,
 		auditLogger:   auditLogger,
 		healthChecker: healthChecker,
 		tools:         make(map[string]ToolHandler),
@@ -44,9 +78,18 @@ func NewMCPServer(manager *Manager, addr string) *MCPServer {
 	mux.HandleFunc("/mcp/health", s.handleHealth)
 	mux.HandleFunc("/mcp/tools", s.handleToolsList)
 
+	// Default handler is the bare mux; wrap with ApplySecurity if
+	// a security config is provided.
+	var handler http.Handler = mux
+	if secCfg != nil {
+		if secured, _ := secCfg.ApplySecurity(handler); secured != nil {
+			handler = secured
+		}
+	}
+
 	s.server = &http.Server{
 		Addr:         addr,
-		Handler:      mux,
+		Handler:      handler,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -284,6 +327,22 @@ func (s *MCPServer) handleToolsCall(w http.ResponseWriter, r *http.Request, req 
 		writeJSONRPCError(w, req.ID, errMethodNotFound,
 			fmt.Sprintf("Tool not found: %s", params.Name))
 		return
+	}
+
+	// Apply security guard checks — mirrors the agent loop's
+	// buildToolCallbacks. Without this, MCP tools/call can execute
+	// dangerous commands bypassing permission_mode / blocked_commands.
+	if s.guardFn != nil {
+		var argsMap map[string]any
+		if m, ok := args.(map[string]any); ok {
+			argsMap = m
+		}
+		if err := s.guardFn(params.Name, argsMap, params.Arguments); err != nil {
+			writeJSONRPCError(w, req.ID, errInvalidRequest,
+				fmt.Sprintf("tool %q blocked by guard: %v",
+					params.Name, err))
+			return
+		}
 	}
 
 	startTime := time.Now()

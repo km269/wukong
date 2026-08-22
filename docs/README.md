@@ -13,15 +13,20 @@
 | [系统架构](ARCHITECTURE.md) | 20 章系统全景详解 | CoreLoop、记忆系统、Evolution、ANP、ARD、Gateway |
 | [配置手册](CONFIG.md) | 15 组配置全字段说明 | providers、agent、security、cortex、apps |
 | [CLI & TUI 架构](CLI_TUI.md) | 命令树与终端 UI 架构 | Cobra、Bubble Tea、启动序列、流式传输 |
+| [技术实现详解](TECHNICAL_IMPLEMENTATION.md) | 核心模块实现与数据流 | CoreLoop、Provider、Extension、Security |
+| [API 参考](API_REFERENCE.md) | 内部接口签名与用法 | CoreLoop API、Provider Factory、Guard |
+| [开发者指南](DEVELOPER_GUIDE.md) | 环境搭建与开发任务 | Go 1.26、项目结构、测试、调试 |
+| [部署运维](DEPLOYMENT.md) | 部署、健康检查、故障排查 | Docker、GHCR、二进制、WAL |
 
 ### 专题指南
 
 | 文档 | 说明 | 关键词 |
 |------|------|--------|
-| [涉网应用深度分析](NETWORK_ANALYSIS.md) | 10 涉网子系统分析 + 分级升级建议 | HTTP Client、浏览器引擎、ANP、Gateway、ARD、反反爬 |
 | [网站克隆技术指南](CLONE_GUIDE.md) | 克隆引擎与 ZIM 打包详解 | EnhancedCloner、分页、反反爬、ZIM 打包 |
+| [Web 操作深度分析](WEB_OPERATIONS_ANALYSIS.md) | 浏览器/克隆/反爬/检索/HTTP 全链路剖析与优化建议 | 浏览器、EnhancedCloner、Antibot、aggregate_search、httpclient |
 | [反反爬技术详解](ANTIBOT_GUIDE.md) | 10 层反爬体系详解 | Antibot、Escalator、Stealth、Proxy Pool |
 | [记忆系统架构](MEMORY_ARCHITECTURE.md) | 双引擎三层记忆详解 | MemoryFlow、CortexDB、GraphFlow、SmartCleanup |
+| [OKF 知识格式](OKF_GUIDE.md) | OKF v0.1 规范与集成 | Bundle、Concept、Skill、Knowledge、Evolution |
 
 ### 其他
 
@@ -40,7 +45,6 @@
 | 整体系统是怎么设计的？ | [系统架构](ARCHITECTURE.md) |
 | 有哪些配置项？怎么配置？ | [配置手册](CONFIG.md) |
 | 命令行工具有哪些命令？ | [CLI & TUI 架构](CLI_TUI.md) |
-| 涉网应用有哪些？怎么升级？ | [涉网应用深度分析](NETWORK_ANALYSIS.md) |
 | 网站克隆怎么用？原理是什么？ | [网站克隆技术指南](CLONE_GUIDE.md) |
 | 反爬是怎么处理的？ | [反反爬技术详解](ANTIBOT_GUIDE.md) |
 | 记忆系统是怎么工作的？ | [记忆系统架构](MEMORY_ARCHITECTURE.md) |
@@ -90,11 +94,11 @@
 | 内部包 | 30+ |
 | 公共包 | 3 |
 | 配置结构体 | 34+ |
-| CLI 顶层命令 | 29 |
+| CLI 顶层命令 | 30 |
 | CLI 子命令 | 60+ |
 | 编排模式 | 10 种 |
 | LLM Provider | 7 种 |
-| 内置扩展 | 14 个 |
+| 内置扩展 | 12 个 |
 | 反反爬层级 | 10 层 |
 | 安全防御层 | 5 层 |
 | 服务端点 | 6 个协议 |

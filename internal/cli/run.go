@@ -181,6 +181,9 @@ func runOneShot(
 	ctx := context.Background()
 
 	if !noStream && cfg.Agent.Streaming {
+		// Print a separator newline before streaming output so the
+		// response isn't glued to bootstrap/wake-up log lines on stderr.
+		fmt.Println()
 		response, err := loop.RunStream(
 			ctx, userID, sessionID, msg,
 			streamToStdout,
@@ -343,4 +346,3 @@ func resolveUserID() string {
 // cleanupBootstrap has been replaced by the unified shutdownBootstrap
 // (see shutdown.go), which covers all BootstrapState fields (including
 // ARDRegistry and ANPServer) and is idempotent via sync.Once.
-

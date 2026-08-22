@@ -93,7 +93,11 @@ func (p *EvolutionPatcher) ApplyPatch(
 	// Step 6: Validate the new content is safe
 	if err := validateContent(updatedContent); err != nil {
 		// Remove the backup on validation failure
-		_ = os.Remove(backupPath)
+		if rmErr := os.Remove(backupPath); rmErr != nil {
+			util.Logger.Warn("evolution: remove backup failed",
+				"file", backupPath,
+				"error", rmErr.Error())
+		}
 		return 0, fmt.Errorf("content validation failed: %w", err)
 	}
 
@@ -104,10 +108,21 @@ func (p *EvolutionPatcher) ApplyPatch(
 	if err := os.WriteFile(
 		skillPath, []byte(updatedContent), 0644,
 	); err != nil {
-		// Restore from backup
-		_ = os.WriteFile(
-			skillPath, currentContent, 0644)
-		_ = os.Remove(backupPath)
+		// Restore from backup. If restore also fails, return
+		// immediately without removing the backup so it can be
+		// recovered manually.
+		if restoreErr := os.WriteFile(
+			skillPath, currentContent, 0644,
+		); restoreErr != nil {
+			return 0, fmt.Errorf(
+				"write updated skill: %w (restore failed: %v)",
+				err, restoreErr)
+		}
+		if rmErr := os.Remove(backupPath); rmErr != nil {
+			util.Logger.Warn("evolution: remove backup failed",
+				"file", backupPath,
+				"error", rmErr.Error())
+		}
 		return 0, fmt.Errorf("write updated skill: %w", err)
 	}
 

@@ -34,7 +34,7 @@ func (s *CortexSearcher) SearchWithGenome(
 	// Temporarily apply the genome for this search.
 	s.store.SetGenome(genome)
 
-	results, err := s.store.Search(query, "", genome.EffectiveTopK())
+	results, err := s.store.Search(ctx, query, "", genome.EffectiveTopK())
 	if err != nil {
 		return nil, fmt.Errorf("cortex searcher: %w", err)
 	}

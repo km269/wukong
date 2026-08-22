@@ -102,6 +102,12 @@ func (f *Factory) CreateModelWithName(
 			openai.WithBaseURL(p.BaseURL),
 			openai.WithAPIKey(p.APIKey),
 		}
+		if p.ContextWindow > 0 {
+			opts = append(opts,
+				openai.WithContextWindow(p.ContextWindow),
+				openai.WithEnableTokenTailoring(true),
+			)
+		}
 		return openai.New(modelName, opts...), nil
 	case "acp":
 		return f.createACP(p)
@@ -167,6 +173,16 @@ func (f *Factory) createOpenAI(p *config.ProviderConfig) model.Model {
 	opts := []openai.Option{
 		openai.WithBaseURL(p.BaseURL),
 		openai.WithAPIKey(p.APIKey),
+	}
+	// Pass the configured context window so the framework can perform
+	// accurate token-budget trimming. Without this, the framework falls
+	// back to its built-in model registry (128K default), which causes
+	// "exceed_context_size_error" on local models with smaller windows.
+	if p.ContextWindow > 0 {
+		opts = append(opts,
+			openai.WithContextWindow(p.ContextWindow),
+			openai.WithEnableTokenTailoring(true),
+		)
 	}
 	return openai.New(p.Model, opts...)
 }

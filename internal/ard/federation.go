@@ -116,11 +116,11 @@ func (m *FederationMetrics) GetStats() (registryCount int, entryCount int64, avg
 
 // FederationResult represents a federated search result.
 type FederationResult struct {
-	Results    []FederatedSearchResult
-	TotalCount int
+	Results       []FederatedSearchResult
+	TotalCount    int
 	RegistryCount int
-	Metrics    *FederationMetrics
-	Errors     []FederationError
+	Metrics       *FederationMetrics
+	Errors        []FederationError
 }
 
 // FederatedSearchResult extends SearchResult with registry info.
@@ -224,6 +224,8 @@ func (f *Federator) FederatedSearch(ctx context.Context, req *SearchRequest) (*F
 
 	searchCh := make(chan searchResult, len(registries))
 	var wg sync.WaitGroup
+	// Protects result.Errors — appended from multiple search goroutines.
+	var errorsMu sync.Mutex
 
 	for _, url := range registries {
 		// Skip local registry
@@ -243,11 +245,16 @@ func (f *Federator) FederatedSearch(ctx context.Context, req *SearchRequest) (*F
 
 			if err != nil {
 				f.metrics.RecordError(regURL)
+				// Multiple goroutines append to result.Errors
+				// concurrently — protect with a mutex to avoid
+				// data races on the shared slice header.
+				errorsMu.Lock()
 				result.Errors = append(result.Errors, FederationError{
 					RegistryURL: regURL,
 					Error:       err,
 					Timestamp:   time.Now(),
 				})
+				errorsMu.Unlock()
 			}
 
 			searchCh <- searchResult{
@@ -449,8 +456,6 @@ func (f *Federator) GetMetrics() *FederationMetrics {
 	return f.metrics
 }
 
-
-
 // ReferralMode represents how referrals are followed.
 type ReferralMode int
 
@@ -484,10 +489,10 @@ type FederationOptions struct {
 // DefaultFederationOptions returns default federation options.
 func DefaultFederationOptions() *FederationOptions {
 	return &FederationOptions{
-		ReferralMode:        ReferralModeChain,
-		IncludeMetrics:      true,
-		IncludeErrors:       true,
-		TimeoutPerRegistry:  10 * time.Second,
+		ReferralMode:          ReferralModeChain,
+		IncludeMetrics:        true,
+		IncludeErrors:         true,
+		TimeoutPerRegistry:    10 * time.Second,
 		MaxResultsPerRegistry: 50,
 	}
 }

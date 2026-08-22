@@ -62,6 +62,12 @@ type CloneDefaults struct {
 	ProxyPool           []string           `mapstructure:"proxy_pool"`
 	ProxyRotateEvery    int                `mapstructure:"proxy_rotate_every"`
 	ArchiveFallback     bool               `mapstructure:"archive_fallback"`
+	// InsecureTLS disables TLS certificate verification for clones and
+	// downloads (opt-out for intranet/.mil certificates). Default: verify.
+	InsecureTLS bool `mapstructure:"insecure_tls"`
+	// TLSCACertPath supplies a PEM CA bundle (e.g. the DoD Root CA package)
+	// so .mil/.gov certificates verify while strict validation stays on.
+	TLSCACertPath string `mapstructure:"tls_ca_cert_path"`
 }
 
 // PackDefaults holds default values for app packaging operations.

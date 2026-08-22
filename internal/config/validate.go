@@ -13,6 +13,7 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"runtime"
 	"strings"
 )
 
@@ -358,23 +359,38 @@ func (c *WukongConfig) Validate() error {
 		}
 	}
 
-	// Validate browser search backends.
+	// Validate browser search backends — check required fields
+	// for each backend that has enabled: true.
 	if c.Browser.Enabled {
-		validBackends := map[string]bool{
-			"duckduckgo": true,
-			"searxng":    true,
-			"tavily":     true,
-			"google":     true,
-			"bing":       true,
+		if c.Browser.Search.SearXNG.Enabled &&
+			c.Browser.Search.SearXNG.URL == "" {
+			return fmt.Errorf(
+				"browser.search.searxng.enabled is true but " +
+					"searxng.url is empty",
+			)
 		}
-		for _, b := range c.Browser.Search.Backends {
-			if !validBackends[b] {
+		if c.Browser.Search.Tavily.Enabled &&
+			c.Browser.Search.Tavily.APIKey == "" {
+			return fmt.Errorf(
+				"browser.search.tavily.enabled is true but " +
+					"tavily.api_key is empty",
+			)
+		}
+		if c.Browser.Search.Google.Enabled {
+			if c.Browser.Search.Google.APIKey == "" ||
+				c.Browser.Search.Google.CSEID == "" {
 				return fmt.Errorf(
-					"browser.search.backends contains unknown backend %q; "+
-						"use duckduckgo, searxng, tavily, google, or bing",
-					b,
+					"browser.search.google.enabled is true but " +
+						"google.api_key or google.cse_id is empty",
 				)
 			}
+		}
+		if c.Browser.Search.Bing.Enabled &&
+			c.Browser.Search.Bing.APIKey == "" {
+			return fmt.Errorf(
+				"browser.search.bing.enabled is true but " +
+					"bing.api_key is empty",
+			)
 		}
 	}
 
@@ -408,6 +424,44 @@ func (c *WukongConfig) Validate() error {
 				ss.RerankerTopN, ss.FTS5PoolSize,
 			)
 		}
+	}
+
+	// Validate sandbox resource limits. Zero values mean "unlimited"
+	// and are always legal; only non-zero values that are too small
+	// to ever let a shell start are fatal. These caps prevent
+	// operators from shipping a config where every command is
+	// killed before it can do useful work — the failure mode is
+	// otherwise opaque (commands exit non-zero with no clear cause).
+	const (
+		// minSandboxMemoryBytes is the floor for MaxMemoryBytes.
+		// Below 1 MiB even a bare cmd.exe / sh startup fails, so
+		// the limit can never produce useful behavior.
+		minSandboxMemoryBytes = 1 << 20 // 1 MiB
+		// minSandboxFileBytes is the floor for MaxFileBytes.
+		// 512 is one standard block; smaller caps make every
+		// write fail instantly.
+		minSandboxFileBytes = 512
+	)
+	sb := c.Security.Sandbox
+	if sb.Limits.MaxMemoryBytes != 0 &&
+		sb.Limits.MaxMemoryBytes < minSandboxMemoryBytes {
+		return fmt.Errorf(
+			"security.sandbox.limits.max_memory_bytes %d is too small; "+
+				"shell processes need at least %d bytes (~1 MiB) to start. "+
+				"Set to 0 for unlimited or >= %d",
+			sb.Limits.MaxMemoryBytes,
+			minSandboxMemoryBytes, minSandboxMemoryBytes,
+		)
+	}
+	if sb.Limits.MaxFileBytes != 0 &&
+		sb.Limits.MaxFileBytes < minSandboxFileBytes {
+		return fmt.Errorf(
+			"security.sandbox.limits.max_file_bytes %d is too small; "+
+				"minimum is %d bytes (one block). Set to 0 for unlimited "+
+				"or >= %d",
+			sb.Limits.MaxFileBytes,
+			minSandboxFileBytes, minSandboxFileBytes,
+		)
 	}
 
 	// Validate service port conflicts. Collects (name, port) for all
@@ -460,6 +514,24 @@ func portFromAddr(addr string) string {
 		return addr[i+1:]
 	}
 	return ""
+}
+
+// isLoopbackAddr returns true if addr binds to the loopback
+// interface. Recognised loopback hosts are: empty (defaults to all
+// interfaces — treated as non-loopback for safety), "127.0.0.1",
+// "localhost", and "::1". A bare ":port" binds to 0.0.0.0 and is
+// therefore NOT loopback.
+func isLoopbackAddr(addr string) bool {
+	host := addr
+	if i := strings.LastIndex(addr, ":"); i != -1 {
+		host = addr[:i]
+	}
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	switch host {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	}
+	return false
 }
 
 // Warnings returns non-fatal configuration issues as human-readable
@@ -544,10 +616,55 @@ func (c *WukongConfig) Warnings() []string {
 		}
 	}
 
+	// Security check: warn when MCP/ACP servers are enabled with no
+	// auth on non-loopback addresses. tools/call can execute arbitrary
+	// commands via developer_command_execute, so missing auth on a
+	// network-exposed interface is a Critical risk.
+	if c.MCPServer.Enabled && c.MCPServer.Security.Auth.Type == "" &&
+		!isLoopbackAddr(c.MCPServer.Address) {
+		warnings = append(warnings,
+			"mcp_server.enabled is true with empty security.auth.type "+
+				"and non-loopback address "+c.MCPServer.Address+"; "+
+				"tools/call is unauthenticated and can execute arbitrary "+
+				"commands. Set security.auth.type=api_key or bind to 127.0.0.1")
+	}
+	if c.ACPServer.Enabled && c.ACPServer.Security.Auth.Type == "" &&
+		!isLoopbackAddr(c.ACPServer.Address) {
+		warnings = append(warnings,
+			"acp_server.enabled is true with empty security.auth.type "+
+				"and non-loopback address "+c.ACPServer.Address+"; "+
+				"tools/call is unauthenticated and can bypass agent guard "+
+				"chain. Set security.auth.type=api_key or bind to 127.0.0.1")
+	}
+
 	// URL sanity checks for enabled subsystems. These catch malformed
 	// URLs (missing scheme/host, typos) before they reach a subsystem
 	// that would fail opaquely at runtime. Only non-empty fields are
 	// checked — empty means "use the default".
+	// Context overflow check: warn when revision.max_context_tokens
+	// exceeds the default provider's actual context window. Sending
+	// prompts larger than the model's n_ctx yields 400 Bad Request.
+	if c.Revision.MaxContextTokens > 0 && c.DefaultProvider != "" {
+		if p := c.FindProvider(c.DefaultProvider); p != nil {
+			effectiveWindow := p.EffectiveContextWindow()
+			if effectiveWindow > 0 &&
+				c.Revision.MaxContextTokens > effectiveWindow {
+				warnings = append(warnings,
+					fmt.Sprintf(
+						"revision.max_context_tokens (%d) exceeds the "+
+							"default provider %q effective context window (%d); "+
+							"LLM requests will fail with 400 when prompt grows "+
+							"past the model limit. Set providers[%s].context_window "+
+							"to override or lower revision.max_context_tokens.",
+						c.Revision.MaxContextTokens,
+						c.DefaultProvider,
+						effectiveWindow,
+						c.DefaultProvider,
+					))
+			}
+		}
+	}
+
 	if w := validateURLField(c.Session.RedisURL, "session.redis_url"); w != "" {
 		warnings = append(warnings, w)
 	}
@@ -579,6 +696,23 @@ func (c *WukongConfig) Warnings() []string {
 					"LLM requests will fail. Set the environment variable "+
 					"or configure base_url directly in config.yaml")
 		}
+		// Warn when context_window is not set for local inference
+		// servers. Their actual n_ctx varies by model and is easy
+		// to misconfigure; the conservative default (8K) may be
+		// either too low (truncating prematurely) or too high
+		// (causing 400 when prompts exceed real n_ctx).
+		if p.ContextWindow <= 0 {
+			switch ProviderType(p.Type) {
+			case ProviderVLLM, ProviderOllama, ProviderLMStudio:
+				warnings = append(warnings,
+					"providers["+p.Name+"].context_window is not set; "+
+						"using conservative default 8000. Local inference "+
+						"servers (vllm/ollama/lmstudio) vary widely — "+
+						"set context_window to match `--max-model-len` / "+
+						"num_ctx to avoid 400 Bad Request or premature "+
+						"context truncation.")
+			}
+		}
 	}
 	for _, r := range c.Summon.A2ARemotes {
 		if w := validateURLField(r.ServerURL,
@@ -587,77 +721,8 @@ func (c *WukongConfig) Warnings() []string {
 		}
 	}
 
-	// Browser search backend configuration consistency. A backend
-	// listed in backends[] must have its required fields populated;
-	// otherwise it will fail at query time.
-	if c.Browser.Enabled {
-		// Build a set of active backends for enabled-field cross-check.
-		active := make(map[string]bool, len(c.Browser.Search.Backends))
-		for _, b := range c.Browser.Search.Backends {
-			active[b] = true
-			switch b {
-			case "searxng":
-				if c.Browser.Search.SearXNG.URL == "" {
-					warnings = append(warnings,
-						"browser.search.backends contains searxng but "+
-							"searxng.url is empty; this backend will fail")
-				}
-			case "tavily":
-				if c.Browser.Search.Tavily.APIKey == "" {
-					warnings = append(warnings,
-						"browser.search.backends contains tavily but "+
-							"tavily.api_key is empty; this backend will fail")
-				}
-			case "google":
-				if c.Browser.Search.Google.APIKey == "" ||
-					c.Browser.Search.Google.CSEID == "" {
-					warnings = append(warnings,
-						"browser.search.backends contains google but "+
-							"google.api_key or google.cse_id is empty; "+
-							"this backend will fail")
-				}
-			case "bing":
-				if c.Browser.Search.Bing.APIKey == "" {
-					warnings = append(warnings,
-						"browser.search.backends contains bing but "+
-							"bing.api_key is empty; this backend will fail")
-				}
-			}
-		}
-		// Warn about deprecated enabled=false mismatching backends list.
-		// The enabled field has no runtime effect; this warning helps
-		// users notice the inconsistency and migrate to backends-only.
-		if c.Browser.Search.DuckDuckGo.Enabled && !active["duckduckgo"] {
-			warnings = append(warnings,
-				"browser.search.duckduckgo.enabled is true but "+
-					"duckduckgo is not in browser.search.backends; "+
-					"the enabled field is deprecated and has no effect")
-		}
-		if c.Browser.Search.SearXNG.Enabled && !active["searxng"] {
-			warnings = append(warnings,
-				"browser.search.searxng.enabled is true but "+
-					"searxng is not in browser.search.backends; "+
-					"the enabled field is deprecated and has no effect")
-		}
-		if c.Browser.Search.Tavily.Enabled && !active["tavily"] {
-			warnings = append(warnings,
-				"browser.search.tavily.enabled is true but "+
-					"tavily is not in browser.search.backends; "+
-					"the enabled field is deprecated and has no effect")
-		}
-		if c.Browser.Search.Google.Enabled && !active["google"] {
-			warnings = append(warnings,
-				"browser.search.google.enabled is true but "+
-					"google is not in browser.search.backends; "+
-					"the enabled field is deprecated and has no effect")
-		}
-		if c.Browser.Search.Bing.Enabled && !active["bing"] {
-			warnings = append(warnings,
-				"browser.search.bing.enabled is true but "+
-					"bing is not in browser.search.backends; "+
-					"the enabled field is deprecated and has no effect")
-		}
-	}
+	// Browser search backend required-field checks are handled above
+	// alongside the per-backend enabled validation.
 
 	// Cortex embedding base URL is required when cortex is enabled.
 	if c.Cortex.Enabled && c.Cortex.EmbeddingBaseURL == "" {
@@ -703,6 +768,65 @@ func (c *WukongConfig) Warnings() []string {
 						"anti-crawl measures should be identical per "+
 						"project constraint",
 					c.Apps.Clone.BrowserBackend, c.Browser.Backend))
+		}
+	}
+
+	// Sandbox resource-limit sanity. Fatal floor checks (too small to
+	// ever start a shell) live in Validate; here we surface config
+	// that is technically legal but likely to cause surprising
+	// command failures at runtime.
+	sb := c.Security.Sandbox
+	const smallSandboxMemoryBytes = 1 << 24 // 16 MiB
+	if sb.Limits.MaxMemoryBytes != 0 &&
+		sb.Limits.MaxMemoryBytes < smallSandboxMemoryBytes {
+		warnings = append(warnings,
+			fmt.Sprintf(
+				"security.sandbox.limits.max_memory_bytes %d is below "+
+					"the recommended %d (~16 MiB); cmd/sh startup "+
+					"footprint varies across platforms and may trip the "+
+					"limit, causing every command to be killed with no "+
+					"clear cause. Set to 0 for unlimited or >= %d unless "+
+					"you have measured the target shell's resident set.",
+				sb.Limits.MaxMemoryBytes,
+				smallSandboxMemoryBytes, smallSandboxMemoryBytes))
+	}
+	// MaxProcesses==1 means the shell itself uses the only slot and
+	// cannot fork any helper (e.g. `ls | head`, `cmd /C "a & b"`).
+	// Almost every non-trivial shell pipeline needs >= 2.
+	if sb.Limits.MaxProcesses == 1 {
+		warnings = append(warnings,
+			"security.sandbox.limits.max_processes=1 is too tight; "+
+				"the shell process itself occupies the single slot and "+
+				"cannot fork helpers (ls | head, cmd /C \"a & b\", etc.). "+
+				"Set to 0 for unlimited or >= 2")
+	}
+	// Platform coverage gaps. RLIMIT_FSIZE is Linux-only; Windows
+	// ignores it. macOS sandbox-exec does not enforce any of these
+	// limits. Surface these so operators on other platforms don't
+	// ship a config expecting enforcement that never happens.
+	switch runtime.GOOS {
+	case "windows":
+		if sb.Limits.MaxFileBytes != 0 {
+			warnings = append(warnings,
+				"security.sandbox.limits.max_file_bytes is set but "+
+					"Windows has no equivalent of RLIMIT_FSIZE; the "+
+					"limit is ignored on this platform. Either remove "+
+					"the field or run on Linux to enforce it.")
+		}
+	case "darwin":
+		// macOS sandbox-exec enforces filesystem write protection but
+		// not resource limits (CPU/memory/file-size/processes). Surface
+		// any non-zero limit so operators know it is a no-op here.
+		if sb.Limits.MaxCPUSeconds != 0 ||
+			sb.Limits.MaxMemoryBytes != 0 ||
+			sb.Limits.MaxFileBytes != 0 ||
+			sb.Limits.MaxProcesses != 0 {
+			warnings = append(warnings,
+				"security.sandbox.limits are set but macOS sandbox-exec "+
+					"does not enforce CPU/memory/file-size/process limits; "+
+					"only filesystem write protection is applied on this "+
+					"platform. Run on Linux (setrlimit) or Windows "+
+					"(Job Object) to enforce resource caps.")
 		}
 	}
 

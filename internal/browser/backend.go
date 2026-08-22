@@ -40,6 +40,9 @@ type BackendOptions struct {
 	ProfileDir       string
 	DisableDownloads bool
 	Proxy            string // Proxy URL (http://user:pass@host:port or socks5://...)
+	// InsecureTLS disables Chrome certificate verification (opt-out for
+	// intranet/.mil certs). Strict verification is the default.
+	InsecureTLS bool
 }
 
 func NewBackend(backendType BackendType, opts BackendOptions) (types.BrowserBackend, error) {
@@ -57,6 +60,7 @@ func NewBackend(backendType BackendType, opts BackendOptions) (types.BrowserBack
 			ProfileDir:       opts.ProfileDir,
 			DisableDownloads: opts.DisableDownloads,
 			Proxy:            opts.Proxy,
+			InsecureTLS:      opts.InsecureTLS,
 		})
 		if err != nil {
 			logutil.Warn("rod backend failed, falling back to chromedp",
@@ -73,6 +77,7 @@ func NewBackend(backendType BackendType, opts BackendOptions) (types.BrowserBack
 				Stealth:          opts.Stealth,
 				DisableDownloads: opts.DisableDownloads,
 				Proxy:            opts.Proxy,
+				InsecureTLS:      opts.InsecureTLS,
 			}), nil
 		}
 		return rodBackend, nil
@@ -88,6 +93,7 @@ func NewBackend(backendType BackendType, opts BackendOptions) (types.BrowserBack
 			Stealth:          opts.Stealth,
 			DisableDownloads: opts.DisableDownloads,
 			Proxy:            opts.Proxy,
+			InsecureTLS:      opts.InsecureTLS,
 		}), nil
 	}
 }

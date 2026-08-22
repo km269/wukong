@@ -1,47 +1,74 @@
 # Wukong 配置参考手册
 
-> 配置文件: `config.yaml` | 加载器: Viper + Cobra
-> 配置结构: 15 组 (A-O) | 配置代码: 13 文件 | 34 配置结构体
-> 验证规则: 致命错误 + 非致命警告 | 环境变量展开: 15 类敏感字段
+> 配置文件: `config.yaml`（项目根目录，完整模板） | 加载器: Viper + Cobra
+> 配置代码: `internal/config/`（13 文件，含 `config.go`、`defaults.go`、`validate.go` 及 9 个 `types_*.go`）
+> 配置结构: `WukongConfig` 根结构体（`config.go:97`）含 35+ 子配置段
+> 验证规则: 致命错误（`Validate()`）+ 非致命警告（`Warnings()`）| 环境变量展开: 20+ 类敏感字段
 
 ---
 
 ## 目录
 
-1. [加载优先级](#1-加载优先级-7-级)
+1. [加载优先级](#1-加载优先级7-级)
 2. [环境变量展开](#2-环境变量展开)
 3. [配置验证](#3-配置验证)
-4. [全局配置 (A 组)](#4-全局配置-a-组)
-5. [Providers 配置 (B 组)](#5-providers-配置-b-组)
-6. [Agent 配置 (C 组)](#6-agent-配置-c-组)
-7. [Security 配置 (D 组)](#7-security-配置-d-组)
-8. [Storage 配置 (E 组)](#8-storage-配置-e-组)
-9. [CortexDB 配置 (F 组)](#9-cortexdb-配置-f-组)
-10. [Context 配置 (G 组)](#10-context-配置-g-组)
-11. [Feature Tools 配置 (H 组)](#11-feature-tools-配置-h-组)
-12. [Extensions 配置 (I 组)](#12-extensions-配置-i-组)
-13. [Service Endpoints 配置 (J 组)](#13-service-endpoints-配置-j-组)
-14. [Agent Communication 配置 (K 组)](#14-agent-communication-配置-k-组)
-15. [Knowledge & Skill 配置 (L 组)](#15-knowledge--skill-配置-l-组)
-16. [Orchestration 配置 (M 组)](#16-orchestration-配置-m-组)
-17. [Observability 配置 (N 组)](#17-observability-配置-n-组)
-18. [Apps 配置 (O 组)](#18-apps-配置-o-组)
-19. [完整配置示例](#19-完整配置示例)
+4. [路径约定](#4-路径约定)
+5. [A. 全局配置](#a-全局配置)
+6. [B. Providers 配置](#b-providers-配置)
+7. [C. Agent 配置](#c-agent-配置)
+8. [D. Security 配置](#d-security-配置)
+9. [E. Session 配置](#e-session-配置)
+10. [F. Memory 配置](#f-memory-配置)
+11. [G. Todo 配置](#g-todo-配置)
+12. [H. Recall 配置](#h-recall-配置)
+13. [I. Cortex 配置](#i-cortex-配置)
+14. [J. MemoryFlow 配置](#j-memoryflow-配置)
+15. [K. GraphFlow 配置](#k-graphflow-配置)
+16. [L. ImportFlow 配置](#l-importflow-配置)
+17. [M. Revision 配置](#m-revision-配置)
+18. [N. Browser 配置](#n-browser-配置)
+19. [O. Visualiser 配置](#o-visualiser-配置)
+20. [P. Tutorial 配置](#p-tutorial-配置)
+21. [Q. TopOfMind 配置](#q-topofmind-配置)
+22. [R. CodeMode 配置](#r-codemode-配置)
+23. [S. Apps 配置](#s-apps-配置)
+24. [T. Extensions 配置](#t-extensions-配置)
+25. [U. A2A Server 配置](#u-a2a-server-配置)
+26. [V. AGUI 配置](#v-agui-配置)
+27. [W. ACP Server 配置](#w-acp-server-配置)
+28. [X. ACP-MCP 配置](#x-acp-mcp-配置)
+29. [Y. MCP Server 配置](#y-mcp-server-配置)
+30. [Z. Gateway 配置](#z-gateway-配置)
+31. [AA. Summon 配置](#aa-summon-配置)
+32. [AB. ANP 配置](#ab-anp-配置)
+33. [AC. ARD 配置](#ac-ard-配置)
+34. [AD. Dify 配置](#ad-dify-配置)
+35. [AE. Knowledge 配置](#ae-knowledge-配置)
+36. [AF. OKF 配置](#af-okf-配置)
+37. [AG. Skill 配置](#ag-skill-配置)
+38. [AH. Evolution 配置](#ah-evolution-配置)
+39. [AI. Workflow 配置](#ai-workflow-配置)
+40. [AJ. Telemetry 配置](#aj-telemetry-配置)
+41. [AK. Observability 配置](#ak-observability-配置)
+42. [AL. Eval 配置](#al-eval-配置)
+43. [AM. Artifact 配置](#am-artifact-配置)
+44. [完整配置示例](#完整配置示例)
 
 ---
 
-## 1. 加载优先级 (7 级)
+## 1. 加载优先级（7 级）
 
-配置按以下优先级从高到低解析，高优先级覆盖低优先级：
+配置按以下优先级从高到低解析，高优先级覆盖低优先级。源码定义于 `config.go` 包文档注释及 `NewLoader()`（`config.go:287`）。
 
 ```
-优先级 1 — CLI 参数 (最高)
+优先级 1 — CLI 参数（最高）
    ├── --provider, --model, --temperature, --max-tokens
-   ├── --config (指定配置文件路径)
-   └── --debug, --quiet (日志级别)
+   ├── --config（指定配置文件路径，可为目录或文件）
+   └── --debug, --quiet（日志级别覆盖）
 
 优先级 2 — 环境变量
-   └── WUKONG_ 前缀，下划线分隔，e.g. WUKONG_DEFAULT_PROVIDER
+   └── WUKONG_ 前缀，点号转下划线，e.g. WUKONG_DEFAULT_PROVIDER、WUKONG_AGENT_TEMPERATURE
+       （SetEnvPrefix("WUKONG") + SetEnvKeyReplacer("." → "_") + AutomaticEnv()）
 
 优先级 3 — --config 指定的配置文件
 
@@ -51,26 +78,28 @@
 优先级 5 — 用户目录配置文件
    └── ~/.config/wukong/config.yaml
 
-优先级 6 — 系统级配置文件 (非 Windows)
+优先级 6 — 系统级配置文件（非 Windows）
    └── /etc/wukong/config.yaml
 
-优先级 7 — 内置默认值 (最低)
-   └── internal/config/defaults.go
+优先级 7 — 内置默认值（最低）
+   └── internal/config/defaults.go（setDefaults() 注册到 Viper）
 ```
 
-**配置文件搜索路径**（未指定 `--config` 时）：
+**配置文件搜索路径**（未指定 `--config` 时，`NewLoader` 依次 `AddConfigPath`）：
 
 | 平台 | 搜索路径 |
 |------|---------|
-| 全部 | `./config.yaml` (当前目录) |
-| 全部 | `~/.config/wukong/config.yaml` |
-| Linux/macOS | `/etc/wukong/config.yaml` |
+| 全部 | `.`（当前目录） |
+| 全部 | `~/.config/wukong/` |
+| Linux/macOS | `/etc/wukong/`（Windows 上此路径被跳过） |
+
+> `--config` 参数既可指向文件也可指向目录：若为目录则在其下搜索 `config.yaml`。
 
 ---
 
 ## 2. 环境变量展开
 
-支持 `${ENV_VAR}` 和 `${VAR:-default}` 两种语法，运行时自动展开。
+支持 `${ENV_VAR}` 和 `${VAR:-default}` 两种语法，运行时由 `expandSecrets()`（`config.go:383`）自动展开。展开逻辑基于 `os.Expand`，支持 bash 风格的 `:-` 默认值回退。
 
 ### 2.1 语法
 
@@ -78,71 +107,65 @@
 # 直接引用环境变量
 api_key: ${OPENAI_API_KEY}
 
-# 带默认值的引用
+# 带默认值的引用（VAR 为空或未设时使用默认值）
 base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
 ```
 
-### 2.2 支持展开的字段 (15 类)
+### 2.2 支持展开的字段（20+ 类）
 
-| 类别 | 字段 |
-|------|------|
-| **Providers** | `api_key`, `base_url`, `model` |
-| **A2A Remotes** | `api_key`, `jwt_secret`, `oauth_client_secret` |
-| **Gateway Feishu** | `app_secret`, `encrypt_key`, `verification_token` |
-| **CortexDB** | `embedding_api_key`, `embedding_base_url`, `embedding_model` |
-| **MemoryFlow** | `planner_model`, `extractor_model` |
-| **GraphFlow** | `extractor_model` |
-| **Dify** | `api_secret` |
-| **Observability (Langfuse)** | `public_key`, `secret_key` |
-| **Artifact (COS)** | `cos_secret_id`, `cos_secret_key` |
-| **ACP Server** | `api_key` |
-| **Session** | `redis_url` |
-| **Browser Search (SearXNG)** | `url`, `api_key` |
-| **Browser Search (Tavily)** | `api_key` |
-| **Browser Search (Google)** | `api_key`, `cse_id` |
-| **Browser Search (Bing)** | `api_key` |
+未解析的 `${VAR}`（无 `:-default` 且 `VAR` 未设）会被 `expandEnvTracked()` 记录到 `unresolvedEnvVars`，并通过 `Warnings()` 输出，便于发现拼写错误（如 `${OEPNAI_API_KEY}`）。
+
+| 类别 | 字段 | 源码位置 |
+|------|------|---------|
+| **Providers** | `api_key`, `base_url`, `model` | `config.go:387-395` |
+| **A2A Remotes** | `api_key`, `jwt_secret`, `oauth_client_secret` | `config.go:398-406` |
+| **Gateway Feishu** | `app_secret`, `encrypt_key`, `verification_token` | `config.go:409-415` |
+| **Observability (Langfuse)** | `langfuse_public_key`, `langfuse_secret_key` | `config.go:418-423` |
+| **Artifact (COS)** | `cos_secret_id`, `cos_secret_key` | `config.go:426-429` |
+| **ACP Server** | `security.auth.api_key` | `config.go:432-434` |
+| **Cortex Embedding** | `embedding_api_key`, `embedding_base_url`, `embedding_model` | `config.go:437-442` |
+| **Cortex Reranker** | `reranker_api_key`, `reranker_base_url`, `reranker_model` | `config.go:445-450` |
+| **Cortex Vertical Routing** | `github_api_key` | `config.go:453-457` |
+| **MemoryFlow** | `planner_model`, `extractor_model` | `config.go:460-463` |
+| **GraphFlow** | `extractor_model` | `config.go:466-467` |
+| **Dify** | `api_secret` | `config.go:470-471` |
+| **Session** | `redis_url` | `config.go:474-475` |
+| **Browser Search (SearXNG)** | `url`, `api_key` | `config.go:478-483` |
+| **Browser Search (Tavily)** | `api_key` | `config.go:484-486` |
+| **Browser Search (Google)** | `api_key`, `cse_id` | `config.go:487-492` |
+| **Browser Search (Bing)** | `api_key` | `config.go:493-495` |
 
 ---
 
 ## 3. 配置验证
 
-配置加载后自动执行验证，分为**致命错误**和**非致命警告**两类。
+配置加载后自动执行验证（`validate.go`），分为**致命错误**（`Validate()` 返回 error）和**非致命警告**（`Warnings()` 返回 `[]string`）。
 
-### 3.1 致命错误 (Validate)
+### 3.1 致命错误（Validate，阻止启动）
 
-触发以下任一错误将导致程序启动失败：
+| 检查项 | 有效值/范围 | 源码位置 |
+|--------|------------|---------|
+| `default_provider` 存在性 | 设置后必须在 `providers[]` 中存在 | `validate.go:54-62` |
+| `providers[].type` 有效性 | `openai`/`anthropic`/`google`/`deepseek`/`ollama`/`lmstudio`/`vllm`/`acp` | `validate.go:87-102` |
+| `browser.backend` | `chromedp` / `rod` | `validate.go:104-114` |
+| `workflow.mode` | 10 种有效模式（见 AI 节） | `validate.go:116-130` |
+| `agent.temperature` | [0.0, 2.0] | `validate.go:64-70` |
+| `security.permission_mode` | `auto`/`smart`/`manual`/`chat_only` | `validate.go:72-85` |
+| `agent.max_tokens` | >= 0 | `validate.go:132-138` |
+| `evolution.min_confidence` | [0.0, 1.0]（启用时） | `validate.go:140-149` |
+| `telemetry.sample_rate` | [0.0, 1.0]（启用时） | `validate.go:151-160` |
+| `anp.port` | [0, 65535]（启用时） | `validate.go:162-169` |
+| `anp.meta_protocol_enabled` + `port<=0` | 不允许 | `validate.go:170-175` |
+| `session.backend` | `sqlite`/`memory`/`redis` | `validate.go:178-187` |
+| `memory.backend` | `sqlite`/`redis` | `validate.go:189-198` |
+| `recall.search_mode` | `fts5`/`hybrid` | `validate.go`（续） |
+| `todo.backend` | `sqlite`/`memory` | `validate.go`（续） |
+| `artifact.backend` | `inmemory`/`cos` | `validate.go`（续） |
+| `revision.trim_ratio` | [0.0, 1.0] | `validate.go`（续） |
+| `memory.cleanup_*_threshold` | [0.0, 1.0]，且 target < trigger | `validate.go`（续） |
+| `apps.clone.workers` / `apps.pack.workers` | >= 1 | `validate.go`（续） |
 
-| 检查项 | 有效值/范围 |
-|--------|------------|
-| `default_provider` 存在性 | 必须在 `providers` 列表中存在 |
-| `providers[].type` 有效性 | `openai` / `anthropic` / `google` / `deepseek` / `ollama` / `lmstudio` / `acp` |
-| `agent.temperature` 范围 | [0.0, 2.0] |
-| `agent.max_tokens` | >= 0 |
-| `agent.max_llm_calls` | >= 0 |
-| `agent.max_tool_iterations` | >= 0 |
-| `security.permission_mode` | `auto` / `smart` / `manual` / `chat_only` |
-| `memory.cleanup_trigger_threshold` | [0.0, 1.0] |
-| `memory.cleanup_target_threshold` | [0.0, 1.0] |
-| `memory.cleanup_target_threshold` < `cleanup_trigger_threshold` | 必须满足 |
-| `memory.scoring_weights.*` | [0.0, 1.0] |
-| `memory.extract_timeout` | 有效持续时间 |
-| `todo.backend` | `sqlite` / `memory` / 空 |
-| `evolution.min_confidence` | [0.0, 1.0] |
-| `apps.clone.workers` | >= 1 |
-| `apps.pack.workers` | >= 1 |
-| `revision.trim_ratio` | [0.0, 1.0] |
-| `orchestration.workflow.mode` | 10 种有效模式 |
-| `telemetry.sample_rate` | [0.0, 1.0] |
-| `anp.port` | [0, 65535] |
-| `anp.meta_protocol_enabled` 但 `port <= 0` | 不允许 |
-| `session.backend` | `sqlite` / `memory` / `redis` / 空 |
-| `memory.backend` | `sqlite` / `redis` / 空 |
-| `recall.search_mode` | `fts5` / `hybrid` / 空 |
-| `artifact.backend` | `inmemory` / `cos` / 空 |
-
-### 3.2 非致命警告 (Warnings)
-
-以下问题仅记录警告，不阻止启动：
+### 3.2 非致命警告（Warnings，不阻止启动）
 
 | 警告项 | 说明 |
 |--------|------|
@@ -152,867 +175,1125 @@ base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
 | `okf.enabled` 但 `bundle_dir` 为空 | OKF 注入无效 |
 | `anp.enabled` 但 `did_domain` 为空 | DID 身份无法生成 |
 | `gateway.enabled` 但无 channel 激活 | 消息网关无可用通道 |
+| 未解析的环境变量 `${VAR}` | 拼写错误或环境缺失（`unresolvedEnvVars`） |
 
 ---
 
-## 4. 全局配置 (A 组)
+## 4. 路径约定
 
-### 4.1 顶层字段
+| 路径模式 | 用途 | 示例 |
+|---------|------|------|
+| `.wukong/` | 运行时数据（应用、缓存、技能、可视化、OKF、评测） | `.wukong/apps/`、`.wukong/cache/`、`.wukong/skills/` |
+| `~/.config/` | 用户级配置与项目数据 | `~/.config/wukong/config.yaml`、`~/.config/wukong/prompts/` |
+| `wukong.db` | 单一 SQLite WAL 文件，被所有存储子系统共享 | Session、Memory、Todo、Recall、Cortex 默认均指向此文件 |
+
+> **共享 SQLite 约定**：`DatabasePool`（`internal/util`）管理单一 `*sql.DB` 连接，避免多连接对同一文件产生事务冲突。所有 `db_path` 默认为 `wukong.db`，由 `ResolvePath()`（`config.go:77`）解析为绝对路径。路径解析在 `NewStore()`/`NewSessionService()` 等构造函数中统一完成。
+
+---
+
+## A. 全局配置
+
+**源码**: `config.go:97-115`（`WukongConfig` 顶层字段） | 默认值: `defaults.go:31-34`
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `default_provider` | string | - | 默认 LLM Provider 名称，必须匹配 `providers[].name` |
-| `log_level` | string | `info` | 日志级别: `debug` / `info` / `warn` / `error` |
-| `lightweight_provider` | string | - | 后台任务轻量 Provider，为空时使用 default_provider |
-| `lightweight_model` | string | - | 后台任务轻量模型，为空时使用各子系统默认 |
+| `log_level` | string | `info` | 日志级别: `debug`/`info`/`warn`/`error`。被 `--debug`/`--quiet` CLI 参数覆盖 |
+| `default_provider` | string | - | 默认 LLM Provider 名称，必须匹配 `providers[].name`。`Validate()` 校验存在性 |
+| `lightweight_provider` | string | - | 后台任务（记忆提取、摘要、图谱构建）所用 Provider。为空时回退到 `default_provider`（`EffectiveLightweightProvider()`） |
+| `lightweight_model` | string | - | 后台任务轻量模型名。为空时各子系统使用各自默认 |
 | `project_dir` | string | `~/.config/wukong/` | 项目数据目录 |
 
-### 4.2 轻量模型自动应用
+### 轻量模型自动继承
 
-当设置 `lightweight_model` 时，以下字段如未显式配置将自动继承：
+当设置 `lightweight_model` 时，以下字段如未显式配置将自动继承该值：
 - `memory.extractor_model`
-- `memoryflow.planner_model`
-- `memoryflow.extractor_model`
+- `memoryflow.planner_model` / `memoryflow.extractor_model`
 - `graphflow.extractor_model`
 - `revision.revision_model`
 
+> `EffectiveLightweightModel()`（`config.go:622`）在 `lightweight_model` 为空时回退到默认 Provider 的 model。
+
 ---
 
-## 5. Providers 配置 (B 组)
+## B. Providers 配置
 
-### 5.1 Provider 类型
+**源码**: `types_provider.go:26-41`（`ProviderConfig`） | 类型常量: `types_provider.go:12-21`
 
-| 类型 | 常量 | 说明 |
-|------|------|------|
-| `openai` | `ProviderOpenAI` | OpenAI 兼容 API |
-| `anthropic` | `ProviderAnthropic` | Anthropic Claude |
-| `google` | `ProviderGoogle` | Google Gemini |
-| `deepseek` | `ProviderDeepSeek` | DeepSeek |
-| `ollama` | `ProviderOllama` | 本地 Ollama |
-| `lmstudio` | `ProviderLMStudio` | LM Studio |
-| `acp` | `ProviderACP` | Agent Client Protocol |
+### Provider 类型（8 种）
 
-### 5.2 ProviderConfig 字段
+| 类型 | 常量 | 说明 | 默认 Base URL |
+|------|------|------|--------------|
+| `openai` | `ProviderOpenAI` | OpenAI 兼容 API（含硅基流动/OpenRouter/Groq/Moonshot/智谱等） | `https://api.openai.com/v1` |
+| `anthropic` | `ProviderAnthropic` | Anthropic Claude | `https://api.anthropic.com/v1` |
+| `google` | `ProviderGoogle` | Google Gemini（OpenAI 兼容端点） | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| `deepseek` | `ProviderDeepSeek` | DeepSeek | `https://api.deepseek.com/v1` |
+| `ollama` | `ProviderOllama` | 本地 Ollama | `http://localhost:11434/v1` |
+| `lmstudio` | `ProviderLMStudio` | LM Studio | `http://localhost:1234/v1` |
+| `vllm` | `ProviderVLLM` | vLLM 本地推理（无需 api_key） | `http://localhost:8000/v1` |
+| `acp` | `ProviderACP` | Agent Client Protocol | - |
+
+> **关键**: `openai`/`anthropic`/`google`/`deepseek`/`ollama`/`lmstudio`/`vllm` 七类在 Factory 中全部走 `createOpenAI`（OpenAI 兼容客户端）；仅 `acp` 走 `createACP`。见 `factory.go:63-73`。
+
+### ProviderConfig 字段
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `name` | string | Provider 名称 (唯一标识) |
+| `name` | string | Provider 名称（唯一标识，被 `default_provider` 引用） |
 | `type` | string | Provider 类型，见上表 |
-| `base_url` | string | API 基础 URL |
-| `api_key` | string | API 密钥 (支持 env 展开) |
-| `model` | string | 默认模型名称 |
-| `agent_url` | string | ACP Agent URL |
-| `mcp_port` | string | ACP MCP 端口 |
+| `base_url` | string | API 基础 URL（支持 `${ENV}` 展开）。留空时按 type 填充默认值（`fillDefaultBaseURL`） |
+| `api_key` | string | API 密钥（支持 `${ENV}` 展开）。`vllm` 等本地服务可留空 |
+| `model` | string | 默认模型名称（支持 `${ENV}` 展开） |
+| `agent_url` | string | ACP Agent URL（仅 `acp` 类型使用） |
+| `mcp_port` | string | ACP MCP 端口（仅 `acp` 类型） |
+| `context_window` | int | 模型实际上下文窗口大小（如 32768、128000）。未设置时 `EffectiveContextWindow()` 按 type 取保守默认（`config.go:563-589`） |
 
-### 5.3 配置示例
+### ContextWindow 保守默认值
 
-```yaml
-providers:
-  - name: openai-main
-    type: openai
-    base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
-    api_key: ${OPENAI_API_KEY}
-    model: gpt-4o
+| Type | 默认窗口 | 说明 |
+|------|---------|------|
+| `openai` | 16000 | gpt-4o 为 128K，取保守 16K |
+| `anthropic` | 100000 | claude-sonnet-4 为 200K，取保守 100K |
+| `google` | 32000 | gemini-2.0-flash 为 1M，取保守 32K |
+| `deepseek` | 64000 | deepseek-chat 为 64K |
+| `ollama`/`lmstudio`/`vllm` | 8000 | 本地模型差异大，取地板值 |
+| `acp` | 32000 | ACP Agent 差异大 |
 
-  - name: local-ollama
-    type: ollama
-    base_url: http://localhost:11434
-    model: qwen2.5:7b
-```
+> **作用**: `ContextRevisionEngine` 取 `min(revision.max_context_tokens, EffectiveContextWindow())` 作为真实截断阈值，防止超过模型 `n_ctx` 触发 HTTP 400。设置 `context_window` 后还会启用 `openai.WithContextWindow` + `openai.WithEnableTokenTailoring(true)`。
 
 ---
 
-## 6. Agent 配置 (C 组)
+## C. Agent 配置
 
-### 6.1 核心行为
+**源码**: `types_agent.go:11-50`（`AgentConfig`） | 默认值: `defaults.go:37-86`
+
+### 核心行为
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `max_llm_calls` | int | 50 | 单次 Run 最大 LLM 调用次数 |
+| `max_llm_calls` | int | 50 | 单次 Run 最大 LLM 调用次数。0 = 无限 |
 | `max_tool_iterations` | int | 30 | 单次 Run 最大工具迭代次数 |
-| `max_run_duration` | duration | 900s | 单次 Run 最大执行时长 |
-| `parallel_tools` | bool | true | 是否并行执行工具调用 |
-| `streaming` | bool | true | 是否启用流式输出 |
+| `max_run_duration` | duration | `900s` | 单次 Run 墙钟时间上限 |
+| `tool_call_timeout` | duration | `120s` | 单次工具调用截止时间，防止慢工具耗尽 Run 预算。0 = 不限 |
+| `parallel_tools` | bool | true | 是否并行执行独立工具调用 |
+| `streaming` | bool | true | 是否启用 TUI 实时 token 流式输出 |
 
-### 6.2 生成参数
+### 生成参数
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `temperature` | float | 0.7 | 采样温度 [0.0, 2.0] |
-| `max_tokens` | int | 4096 | 最大生成 token 数 |
-| `reasoning_effort` | string | - | 推理努力程度 (Claude) |
-| `thinking_enabled` | *bool | - | 是否启用思考模式 |
+| `temperature` | float64 | 0.7 | 采样温度 [0.0, 2.0] |
+| `max_tokens` | int | 4096 | 最大生成 token 数（>= 0） |
+| `reasoning_effort` | string | - | 推理努力程度: `low`/`medium`/`high`（builtin planner） |
+| `thinking_enabled` | *bool | - | 是否启用思考模式（指针类型，区分未设与 false） |
 | `thinking_tokens` | *int | - | 思考 token 预算 |
 
-### 6.3 工具重试
+### 工具重试
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `tool_retry_enabled` | bool | true | 是否启用工具重试 |
 | `tool_retry_max_attempts` | int | 3 | 最大重试次数 |
-| `tool_retry_initial_wait` | duration | 1s | 初始等待时间 |
-| `tool_retry_backoff_factor` | float | 2.0 | 退避因子 |
+| `tool_retry_initial_wait` | duration | `1s` | 初始等待时间 |
+| `tool_retry_backoff_factor` | float64 | 2.0 | 指数退避因子 |
+| `enable_post_tool_prompt` | bool | true | 工具执行后是否追加推理提示 |
 
-### 6.4 规划器与工具搜索
+### 规划器与工具搜索
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `planner` | string | 空 | 规划器类型: `builtin` / `react` |
-| `tool_search_enabled` | bool | false | 是否启用工具自动过滤 |
-| `tool_search_max_tools` | int | 20 | TopK 工具数量 |
+| `planner` | string | `""` | 规划器: `""`（禁用）/ `builtin` / `react` |
+| `tool_search_enabled` | bool | false | 是否启用工具自动过滤（TopK 筛选） |
+| `tool_search_max_tools` | int | 20 | TopK 工具数量上限 |
 
-### 6.5 上下文压缩
+### 上下文压缩
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `context_compaction` | bool | false | 是否启用上下文压缩 |
-| `context_compaction_tool_result_max_tokens` | int | 1024 | 工具结果最大 token |
-| `context_compaction_oversized_max_tokens` | int | 0 | 超限消息最大 token |
-| `context_compaction_keep_recent` | int | 1 | 保留最近 N 轮 |
-| `context_compaction_force_clean_tools` | []string | - | 强制清理结果的工具 |
-| `context_compaction_keep_tools` | []string | - | 保留结果的工具 |
+| `context_compaction_tool_result_max_tokens` | int | 1024 | 工具结果截断后的最大 token |
+| `context_compaction_oversized_max_tokens` | int | 0 | 超大消息截断阈值（0 = 不截断） |
+| `context_compaction_keep_recent` | int | 1 | 压缩时保留最近 N 轮完整对话 |
+| `context_compaction_force_clean_tools` | []string | - | 强制清理结果的工具名列表 |
+| `context_compaction_keep_tools` | []string | - | 保留结果的工具名列表 |
 
-### 6.6 其他
+### 会话召回与其他
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `session_recall_enabled` | bool | false | 是否启用会话召回 |
+| `session_recall_enabled` | bool | false | 是否启用跨会话历史召回 |
 | `session_recall_limit` | int | 5 | 召回历史会话数 |
 | `json_repair_enabled` | bool | false | 是否启用 JSON 修复 |
-| `agent_tools_enabled` | bool | true | 是否启用 Agent 工具 |
-| `agent_tools_stream` | bool | false | Agent 工具是否流式 |
-| `enable_post_tool_prompt` | bool | true | 工具后是否追加提示 |
+| `agent_tools_enabled` | bool | true | 是否启用 Agent 工具（子 Agent 委派工具） |
+| `agent_tools_stream` | bool | false | Agent 工具是否流式输出 |
 | `system_prompt_dir` | string | `~/.config/wukong/prompts/` | 系统提示词目录 |
-| `recipe_dir` | string | `.wukong/recipes/` | Recipe 目录 |
-| `recipe_enabled` | bool | true | 是否启用 Recipe |
-| `inline_recipes` | []map | - | 内联 Recipe 定义 |
+| `recipe_dir` | string | `.wukong/recipes/` | Recipe YAML 定义目录 |
+| `recipe_enabled` | bool | true | 是否启用 Recipe 系统 |
+| `inline_recipes` | []map[string]any | - | config.yaml 内联 Recipe 定义 |
 
 ---
 
-## 7. Security 配置 (D 组)
+## D. Security 配置
 
-### 7.1 权限模式
+**源码**: `types_agent.go:66-80`（`SecurityConfig`） | 默认值: `defaults.go:89-102`
+
+### 权限模式（PermissionMode）
+
+定义于 `types_agent.go:57-64`：
 
 | 模式 | 常量 | 说明 |
 |------|------|------|
 | `auto` | `PermissionAuto` | 自动批准所有工具调用 |
-| `smart` | `PermissionSmart` | 高风险操作需用户批准 (默认) |
+| `smart` | `PermissionSmart` | 高风险操作需用户批准（默认） |
 | `manual` | `PermissionManual` | 所有工具调用需用户批准 |
 | `chat_only` | `PermissionChatOnly` | 禁止所有工具调用 |
 
-### 7.2 安全配置字段
+> `NeedsApproval()` 分支逻辑（`guard.go`）：`Auto`→始终 false；`Manual`→始终 true；`ChatOnly`→始终 true（且 `CheckToolPermission` 拒绝所有工具）；`Smart`→仅高风险返回 true。
+
+### 字段
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `permission_mode` | string | `smart` | 权限模式，见上表 |
-| `malware_scan_enabled` | bool | true | 是否启用恶意软件扫描 |
-| `default_timeout` | duration | 30s | 工具执行默认超时 |
-| `max_timeout` | duration | 300s | 工具执行最大超时 |
-| `block_dangerous_commands` | bool | true | 是否拦截危险命令 |
+| `permission_mode` | PermissionMode | `smart` | 权限模式，见上表 |
+| `require_approval` | bool | false | 遗留字段，推荐使用 `permission_mode` |
+| `malware_scan_enabled` | bool | true | 是否启用外部扩展恶意软件扫描 |
+| `block_dangerous_commands` | bool | true | 是否拦截危险命令（token 级分析） |
 | `blocked_commands` | []string | 见下 | 危险命令列表 |
-| `require_approval` | bool | false | 是否要求审批 |
+| `default_timeout` | duration | `30s` | 工具执行默认超时 |
+| `max_timeout` | duration | `300s` | 工具执行最大超时 |
 | `allowlist` | []string | - | 工具白名单 |
 | `denylist` | []string | - | 工具黑名单 |
 | `guardrail_enabled` | bool | false | 是否启用 Prompt 注入检测 |
-| `ignore_file_enabled` | bool | true | 是否启用 .wukongignore |
+| `ignore_file_enabled` | bool | true | 是否启用 `.wukongignore` 文件屏蔽 |
 | `ignore_file` | string | `.wukongignore` | 忽略文件名 |
 
-### 7.3 默认拦截的危险命令
+### 默认拦截的危险命令
 
+```yaml
+blocked_commands:
+  - "rm -rf /"
+  - "dd if=/dev/zero"
+  - "mkfs."
+  - "> /dev/sda"
+  - "fork bomb"
 ```
-rm -rf /
-dd if=/dev/zero
-mkfs.
-> /dev/sda
-fork bomb
-```
+
+> 危险命令检测走 `command_tokens.go` 的 `dangerousRule` 表（token 级分析），覆盖 `rm`/`sudo`/`chmod`/`chown`/`dd`/`mkfs`/`format`/`git push --force`/`docker`/`curl|wget 管道到 shell` 等。
 
 ---
 
-## 8. Storage 配置 (E 组)
+## E. Session 配置
 
-### 8.1 Session 配置
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `session.backend` | string | `sqlite` | 存储后端: `sqlite` / `memory` / `redis` |
-| `session.db_path` | string | - | 数据库文件路径 |
-| `session.event_limit` | int | - | 每会话事件数限制 |
-| `session.ttl` | duration | - | 会话过期时间 |
-| `session.enable_summary` | bool | - | 是否启用会话摘要 |
-| `session.summary_trigger` | int | - | 摘要触发阈值 |
-| `session.redis_url` | string | - | Redis URL (支持 env 展开) |
-
-### 8.2 Memory 配置
+**源码**: `types_storage.go:11-19`（`SessionConfig`） | 默认值: `defaults.go:108-113`
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `memory.backend` | string | `sqlite` | 存储后端: `sqlite` / `redis` |
-| `memory.db_path` | string | - | 数据库文件路径 |
-| `memory.max_memories` | int | - | 最大记忆条数 |
-| `memory.auto_extract` | bool | - | 是否自动提取记忆 |
-| `memory.extract_timeout` | duration | - | 提取超时时间 |
-| `memory.extractor_provider` | string | - | 提取用 Provider |
-| `memory.extractor_model` | string | - | 提取用模型 |
-| `memory.extractor_prompt` | string | - | 提取提示词 |
+| `backend` | string | `sqlite` | 存储后端: `sqlite`/`memory`/`redis` |
+| `db_path` | string | `wukong.db` | SQLite 数据库文件路径 |
+| `event_limit` | int | 500 | 每会话事件数限制 |
+| `ttl` | duration | `0h` | 会话过期时间（0 = 永不过期） |
+| `enable_summary` | bool | true | 是否启用会话摘要 |
+| `summary_trigger` | int | 50 | 摘要触发事件数阈值 |
+| `redis_url` | string | - | Redis 连接 URL（支持 `${ENV}` 展开），仅 `redis` 后端 |
 
-#### 记忆评分权重
+> 三种后端（`session/store.go:33-47`）：`sqlite`→`sessionsqlite.NewService`；`memory`→`sessioninmemory`；`redis`→本仓库 `newRedisService`。`SessionService` 嵌入 tRPC 框架 `session.Service` 接口，无自定义接口。
+
+---
+
+## F. Memory 配置
+
+**源码**: `types_storage.go:22-40`（`MemoryConfig`） | 默认值: `defaults.go:116-135`
+
+### 基本字段
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `backend` | string | `sqlite` | 存储后端: `sqlite`/`redis` |
+| `db_path` | string | `wukong.db` | 数据库文件路径 |
+| `max_memories` | int | 100 | 最大记忆条数 |
+| `auto_extract` | bool | true | 是否自动从对话提取记忆 |
+| `extract_timeout` | duration | `300s` | 提取超时时间 |
+| `extractor_provider` | string | - | 提取用 Provider（空 = 默认） |
+| `extractor_model` | string | - | 提取用模型（空 = `lightweight_model`） |
+| `extractor_prompt` | string | - | 自定义提取提示词 |
+
+### 评分权重（SmartCleanup 评分模型）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `recency_weight` | float64 | 0.4 | 新鲜度权重 |
+| `reference_weight` | float64 | 0.3 | 引用频率权重 |
+| `importance_weight` | float64 | 0.2 | 重要性权重 |
+| `length_weight` | float64 | 0.1 | 长度权重 |
+
+> 评分公式: `40% recency + 30% reference + 20% importance + 10% length`。权重值范围 [0.0, 1.0]。
+
+### 智能清理与 TTL
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `dynamic_ttl` | bool | true | 是否启用动态 TTL |
+| `enable_smart_cleanup` | bool | true | 是否启用智能清理 |
+| `cleanup_trigger_threshold` | float64 | 0.8 | 触发清理的容量阈值 [0.0, 1.0] |
+| `cleanup_target_threshold` | float64 | 0.6 | 清理目标容量阈值 [0.0, 1.0] |
+| `memory_ttl` | duration | `720h` | 记忆过期时间（30 天） |
+
+> **约束**: `cleanup_target_threshold` 必须小于 `cleanup_trigger_threshold`（验证）。当容量超过 80% 触发淘汰，直到降到 60%。
+
+---
+
+## G. Todo 配置
+
+**源码**: `types_storage.go:43-48`（`TodoConfig`） | 默认值: `defaults.go:138-141`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `backend` | string | `sqlite` | 存储后端: `sqlite`/`memory` |
+| `db_path` | string | `wukong.db` | 数据库文件路径 |
+| `enable_native_todo` | bool | true | 是否启用原生 Todo 工具 |
+| `enable_enforcer` | bool | true | 是否启用 Todo 强制执行器 |
+
+---
+
+## H. Recall 配置
+
+**源码**: `types_storage.go:51-62`（`RecallConfig`） | 默认值: `defaults.go:144-149`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | true | 是否启用跨会话召回 |
+| `backend` | string | `sqlite` | 存储后端 |
+| `db_path` | string | `wukong.db` | 数据库文件路径 |
+| `max_results` | int | 10 | 最大召回结果数 |
+| `max_messages_per_session` | int | 200 | 每会话最大存储消息数 |
+| `search_mode` | string | `fts5` | 搜索模式: `fts5`/`hybrid` |
+| `embedding_model` | string | - | 向量嵌入模型（hybrid 模式） |
+| `search_strategy` | *SearchStrategyConfig | - | 搜索策略覆盖（nil 时使用 `search_mode`） |
+
+> 全文检索基于 SQLite **FTS5（BM25）**，FTS5 不可用时降级为 `LIKE`。
+
+---
+
+## I. Cortex 配置
+
+**源码**: `types_cortex.go:11-36`（`CortexConfig`） | 默认值: `defaults.go:156-160`
+
+### 主配置
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | false | 是否启用 CortexDB |
+| `db_path` | string | `wukong.db` | 数据库路径 |
+| `max_results` | int | 10 | 最大搜索结果数 |
+| `max_messages_per_session` | int | 200 | 每会话最大消息数 |
+| `embedding_base_url` | string | - | Embedding API URL（支持 `${ENV}`） |
+| `embedding_api_key` | string | - | Embedding API Key（支持 `${ENV}`） |
+| `embedding_model` | string | `text-embedding-3-small` | Embedding 模型（支持 `${ENV}`） |
+| `reranker_base_url` | string | - | Cross-Encoder Reranker URL（支持 `${ENV}`，空时复用 embedding 值） |
+| `reranker_api_key` | string | - | Reranker API Key（支持 `${ENV}`，空时复用 embedding 值） |
+| `reranker_model` | string | - | Reranker 模型（支持 `${ENV}`，空 = 禁用 reranker） |
+| `search_strategy` | *SearchStrategyConfig | - | 检索参数空间（nil 时默认 hybrid 70/30） |
+| `vertical_routing` | *VerticalRoutingConfig | - | 垂直域搜索路由（可选） |
+| `chunking` | *ChunkingConfig | - | 语义分块配置（nil 时默认启用） |
+
+### SearchStrategyConfig（`types_cortex.go:63-76`）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `recall_mode` | string | `hybrid` | 召回模式: `lexical`/`vector`/`hybrid` |
+| `dense_weight` | float64 | 0.7 | 向量检索权重 [0, 1] |
+| `text_weight` | float64 | 0.3 | 词法检索权重 [0, 1] |
+| `fts5_pool_size` | int | 50 | FTS5 候选池大小（rerank 前） |
+| `max_retrieved_num` | int | 10 | 最终 Top-K |
+| `fusion_method` | string | `rrf` | 融合方法: `weighted`/`rrf`（推荐 RRF） |
+| `rrf_k` | float64 | 60 | RRF 平滑常数 |
+| `reranker_enabled` | bool | false | 是否启用 Cross-Encoder reranker |
+| `reranker_top_n` | int | 20 | 送入 reranker 的候选数 |
+| `mmr_enabled` | bool | false | 是否在 Top-K 中启用 MMR 多样性 |
+| `mmr_lambda` | float64 | 0.7 | MMR 权衡 [0, 1]：1=相关性，0=多样性 |
+
+> **Hybrid 五阶段流水线**: FTS5 + HNSW 双路检索 → RRF/加权融合 → Cross-Encoder reranker → MMR 去重 → TopK。
+
+### VerticalRoutingConfig（`types_cortex.go:50-59`）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | false | 是否启用查询意图路由 |
+| `top_n` | int | 5 | 每个后端最大结果数 |
+| `timeout` | duration | `10s` | 每后端截止时间 |
+| `merge_mode` | string | `prepend` | 合并模式: `prepend`/`append`/`replace` |
+| `github_api_key` | string | - | GitHub API Key（支持 `${ENV}`） |
+
+> 支持的后端: arXiv、GitHub、Wikipedia、Reddit。根据检测到的意图路由到专门后端。
+
+### ChunkingConfig（`types_cortex.go:39-47`）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | true | 是否启用语义分块 |
+| `max_size` | int | 1200 | 每块最大 rune 数 |
+| `overlap` | int | 200 | 相邻块重叠 rune 数 |
+| `min_size` | int | 100 | 最小块大小（更小的块合并） |
+
+---
+
+## J. MemoryFlow 配置
+
+**源码**: `types_cortex.go:81-88`（`MemoryFlowConfig`） | 默认值: `defaults.go:164-167`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | false | 是否启用 MemoryFlow |
+| `db_path` | string | `wukong.db` | 数据库路径 |
+| `namespace` | string | `assistant` | 命名空间 |
+| `embedding_dimensions` | int | 0 | 向量维度（0 = 自动） |
+| `planner_model` | string | - | 规划器模型（支持 `${ENV}`） |
+| `extractor_model` | string | - | 提取器模型（支持 `${ENV}`） |
+
+> MemoryFlow 提供对话转录记录、唤醒上下文生成（`[Context from past conversations]`）与事实提升（`PromoteFacts` → tRPC Memory）。
+
+---
+
+## K. GraphFlow 配置
+
+**源码**: `types_cortex.go:92-98`（`GraphFlowConfig`） | 默认值: `defaults.go:170-173`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | false | 是否启用 GraphFlow |
+| `db_path` | string | `wukong.db` | 数据库路径 |
+| `extractor_model` | string | - | 提取器模型（支持 `${ENV}`） |
+| `max_chars_per_doc` | int | 8000 | 每文档最大字符数 |
+| `auto_extract` | bool | false | 是否在每轮对话后自动抽取实体/关系 |
+
+> GraphFlow 执行 SPARQL 查询与知识图谱构建。`AutoExtract` 启用时在每轮对话后异步执行 `ExtractFromTranscript` + `BuildGraph`。
+
+---
+
+## L. ImportFlow 配置
+
+**源码**: `types_cortex.go:102-105`（`ImportFlowConfig`） | 默认值: `defaults.go:176-177`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | false | 是否启用 ImportFlow |
+| `db_path` | string | `wukong.db` | 数据库路径 |
+
+> ImportFlow 支持结构化数据导入（DDL→KG 映射、CSV→RAG+KG）。
+
+---
+
+## M. Revision 配置
+
+**源码**: `types_cortex.go:111-124`（`RevisionConfig`） | 默认值: `defaults.go:181-191`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | true | 是否启用上下文优化 |
+| `revision_provider` | string | - | 摘要用 Provider |
+| `revision_model` | string | - | 摘要用模型 |
+| `enable_llm_summarize` | bool | false | 是否启用 LLM 摘要 |
+| `summary_cooldown` | duration | `120s` | 摘要冷却时间 |
+| `summary_timeout` | duration | `30s` | 摘要超时时间 |
+| `max_command_output` | int | 8000 | 命令输出最大长度 |
+| `enable_semantic_search` | bool | false | 是否启用语义搜索 |
+| `search_strategy` | string | `include_all` | 搜索策略 |
+| `max_context_tokens` | int | 64000 | 上下文 token 软上限 |
+| `trim_ratio` | float64 | 0.3 | 裁剪比例 [0.0, 1.0] |
+
+> **ContextRevisionEngine** 实际取 `min(max_context_tokens, EffectiveContextWindowForDefault())` 作为真实截断阈值。触发条件（满足任一）：`estimatedTokens > maxTokens × (1 - trim_ratio)`、`messageCount > 100`、距上次摘要超 5min。`CreateRevisionModel` 解析顺序：`revision_provider/revision_model` → `lightweight_provider/model` → `default_provider`。
+
+---
+
+## N. Browser 配置
+
+**源码**: `types_browser.go:18-36`（`BrowserConfig`） | 默认值: `defaults.go:197-218`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | true | 是否启用浏览器自动化 |
+| `browser_type` | string | `chromium` | 浏览器类型 |
+| `backend` | BrowserBackendType | `rod` | 自动化后端: `chromedp`/`rod`（rod 失败时降级到 chromedp） |
+| `headless` | bool | true | 是否无头模式 |
+| `browser_path` | string | - | 浏览器可执行文件路径 |
+| `stealth` | bool | false | 是否启用隐身模式 |
+| `cache_dir` | string | `.wukong/cache` | 缓存目录 |
+| `max_download_size` | int64 | 104857600 | 最大下载大小（100MB） |
+| `timeout` | duration | `60s` | 操作超时 |
+| `viewport_width` | int | 1280 | 视口宽度 |
+| `viewport_height` | int | 720 | 视口高度 |
+| `scroll` | bool | false | 是否自动滚动 |
+| `control_url` | string | - | 远程调试控制 URL |
+| `workers` | int | - | Worker 数量 |
+| `profile_dir` | string | - | 浏览器配置文件目录 |
+| `proxy` | ProxyConfig | - | 代理配置 |
+| `search` | SearchConfig | - | 搜索引擎配置 |
+
+### ProxyConfig（`types_browser.go:39-44`）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | false | 是否启用代理 |
+| `pool` | []string | - | 代理池 URL 列表 |
+| `rotate_every` | int | 10 | 每 N 次请求轮换代理 |
+
+### SearchConfig（`types_browser.go:49-55`）
+
+每个后端通过各自 `enabled` 字段独立激活：
+
+| 后端 | 字段前缀 | 支持展开的字段 |
+|------|---------|---------------|
+| DuckDuckGo | `browser.search.duckduckgo` | `url` |
+| SearXNG | `browser.search.searxng` | `url`, `api_key` |
+| Tavily | `browser.search.tavily` | `api_key` |
+| Google | `browser.search.google` | `api_key`, `cse_id` |
+| Bing | `browser.search.bing` | `api_key` |
+
+---
+
+## O. Visualiser 配置
+
+**源码**: `types_features.go:10-15`（`VisualiserConfig`） | 默认值: `defaults.go:221-224`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | true | 是否启用自动可视化 |
+| `output_dir` | string | `.wukong/visuals` | 图表输出目录 |
+| `max_width` | int | 1200 | 最大宽度（px） |
+| `max_height` | int | 800 | 最大高度（px） |
+
+---
+
+## P. Tutorial 配置
+
+**源码**: `types_features.go:18-21`（`TutorialConfig`） | 默认值: `defaults.go:227-228`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | true | 是否启用教程引导 |
+| `language` | string | `zh` | 教程语言 |
+
+---
+
+## Q. TopOfMind 配置
+
+**源码**: `types_features.go:24-28`（`TopOfMindConfig`） | 默认值: `defaults.go:231-234`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | true | 是否启用置顶指令 |
+| `instruction_file` | string | `.wukong/instructions.md` | 指令文件路径 |
+| `max_length` | int | 2000 | 指令最大长度 |
+
+> 非空时注入系统提示词的 `TopOfMindInstructions` 字段。
+
+---
+
+## R. CodeMode 配置
+
+**源码**: `types_features.go:31-34`（`CodeModeConfig`） | 默认值: `defaults.go:237-239`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | true | 是否启用 JS 代码沙箱 |
+| `timeout` | duration | `10s` | JS 执行超时 |
+| `max_memory_mb` | int | 128 | 内存限制（MB） |
+
+---
+
+## S. Apps 配置
+
+**源码**: `types_apps.go:8-13`（`AppsConfig`） | 默认值: `defaults.go:243-290`
+
+### 通用
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | true | 是否启用应用系统 |
+| `app_dir` | string | `.wukong/apps` | 应用存储目录 |
+
+### Clone 克隆默认值（`types_apps.go:29-71`，35+ 字段）
+
+| 字段 | 类型 | 默认值 | 单位/说明 |
+|------|------|--------|----------|
+| `max_pages` | int | 0 | 最大页面数（0 = 无限） |
+| `max_depth` | int | 0 | 最大爬取深度（0 = 无限） |
+| `traversal` | string | `bfs` | 遍历策略: `bfs`/`dfs` |
+| `subdomains` | bool | false | 是否包含子域名 |
+| `scope_prefix` | string | - | 作用域 URL 前缀 |
+| `workers` | int | 4 | 爬取 Worker 数（>= 1） |
+| `asset_workers` | int | 8 | 资源下载 Worker 数 |
+| `browser_pages` | int | 4 | 浏览器标签池大小 |
+| `timeout` | int | 300 | 页面导航超时（**秒**） |
+| `render_timeout` | int | 120 | 单次渲染等待（**秒**） |
+| `settle` | int | 1500 | 网络空闲等待（**毫秒**） |
+| `scroll` | bool | false | 是否自动滚动 |
+| `respect_robots` | bool | true | 是否遵守 robots.txt |
+| `crawl_delay` | int | 0 | 请求间延迟（**毫秒**） |
+| `no_sitemap` | bool | false | 是否忽略 sitemap |
+| `dedup_content` | bool | true | 是否内容去重 |
+| `mobile_readable` | bool | true | 是否移动端可读 |
+| `enable_resume` | bool | true | 是否启用断点续抓 |
+| `persist` | bool | true | 是否持久化状态 |
+| `incremental` | bool | false | 是否增量爬取 |
+| `cache_max_age` | int | 86400 | 缓存 TTL（**秒**） |
+| `headless` | bool | true | 是否无头模式 |
+| `stealth` | bool | true | 是否启用隐身 |
+| `chrome_profile` | string | `.wukong/chrome/profile` | Chrome 配置文件目录 |
+| `chrome_path` | string | - | Chrome 可执行文件路径 |
+| `antibot_enabled` | bool | true | 是否启用反反爬 |
+| `antibot_auto_escalate` | bool | true | 是否自动升级反爬等级 |
+| `asset_same_domain` | bool | true | 是否只下载同域资源 |
+| `max_asset_bytes` | int64 | 52428800 | 资源最大字节数（50MB） |
+| `cookie_file` | string | - | Cookie 文件路径 |
+| `user_agent` | string | - | User-Agent |
+| `browser_backend` | BrowserBackendType | `rod` | 浏览器后端: `rod`/`chromedp` |
+| `proxy_enabled` | bool | false | 是否启用代理 |
+| `proxy_pool` | []string | - | 代理池 URL 列表 |
+| `proxy_rotate_every` | int | 10 | 每 N 次轮换代理 |
+| `insecure_tls` | bool | false | 是否跳过 TLS 证书校验（仅内网/.mil/.gov） |
+| `tls_ca_cert_path` | string | - | PEM 格式 CA 证书包路径（严格校验下信任特定根） |
+
+> **单位注意**: `timeout`/`render_timeout`/`cache_max_age` 为秒；`settle`/`crawl_delay` 为毫秒。转换因子见 `internal/apps/manager.go:applyConfigDefaults`。
+
+### Pack 打包默认值（`types_apps.go:74-80`）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `compress` | bool | true | 是否压缩 |
+| `incremental` | bool | false | 是否增量打包 |
+| `language` | string | `eng` | 语言代码 |
+| `creator` | string | `Wukong` | 创建者 |
+| `format` | string | `html` | 打包格式: `html`/`zim`/`binary`/`app` |
+
+---
+
+## T. Extensions 配置
+
+**源码**: `types_provider.go:44-61`（`ExtensionConfig`）
+
+Extensions 为 MCP 外部服务器数组。每个扩展实现 tRPC-agent-go 的 `tool.ToolSet` 接口（`Tools(ctx) []tool.Tool` + `Close() error`），**没有自定义 Extension 接口**。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `memory.recency_weight` | float | 新鲜度权重 |
-| `memory.reference_weight` | float | 引用频率权重 |
-| `memory.importance_weight` | float | 重要性权重 |
-| `memory.length_weight` | float | 长度权重 |
-
-#### 智能清理
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `memory.dynamic_ttl` | bool | - | 是否动态 TTL |
-| `memory.enable_smart_cleanup` | bool | - | 是否启用智能清理 |
-| `memory.cleanup_trigger_threshold` | float | 0.8 | 触发清理阈值 [0.0, 1.0] |
-| `memory.cleanup_target_threshold` | float | 0.6 | 清理目标阈值 [0.0, 1.0] |
-| `memory.memory_ttl` | duration | - | 记忆过期时间 |
-
-> **注意**: `cleanup_target_threshold` 必须小于 `cleanup_trigger_threshold`
-
-### 8.3 Todo 配置
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `todo.backend` | string | `sqlite` | 存储后端: `sqlite` / `memory` |
-| `todo.db_path` | string | - | 数据库文件路径 |
-| `todo.enable_native_todo` | bool | - | 是否启用原生 Todo |
-| `todo.enable_enforcer` | bool | - | 是否启用 Todo 强制执行 |
-
-### 8.4 Recall 配置
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `recall.enabled` | bool | - | 是否启用跨会话召回 |
-| `recall.backend` | string | `sqlite` | 存储后端 |
-| `recall.db_path` | string | - | 数据库文件路径 |
-| `recall.max_results` | int | - | 最大召回结果数 |
-| `recall.max_messages_per_session` | int | - | 每会话最大消息数 |
-| `recall.search_mode` | string | `fts5` | 搜索模式: `fts5` / `hybrid` |
-| `recall.embedding_model` | string | - | 向量嵌入模型 |
-
----
-
-## 9. CortexDB 配置 (F 组)
-
-### 9.1 Cortex 主配置
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `cortex.enabled` | bool | false | 是否启用 CortexDB |
-| `cortex.db_path` | string | - | 数据库路径 |
-| `cortex.max_results` | int | - | 最大搜索结果数 |
-| `cortex.max_messages_per_session` | int | - | 每会话最大消息数 |
-| `cortex.embedding_base_url` | string | - | Embedding API URL (支持 env 展开) |
-| `cortex.embedding_api_key` | string | - | Embedding API Key (支持 env 展开) |
-| `cortex.embedding_model` | string | - | Embedding 模型 (支持 env 展开) |
-
-### 9.2 MemoryFlow 配置
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `memoryflow.enabled` | bool | false | 是否启用 MemoryFlow |
-| `memoryflow.db_path` | string | - | 数据库路径 |
-| `memoryflow.namespace` | string | - | 命名空间 |
-| `memoryflow.embedding_dimensions` | int | - | 向量维度 |
-| `memoryflow.planner_model` | string | - | 规划器模型 (支持 env 展开) |
-| `memoryflow.extractor_model` | string | - | 提取器模型 (支持 env 展开) |
-
-### 9.3 GraphFlow 配置
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `graphflow.enabled` | bool | false | 是否启用 GraphFlow |
-| `graphflow.db_path` | string | - | 数据库路径 |
-| `graphflow.extractor_model` | string | - | 提取器模型 (支持 env 展开) |
-| `graphflow.max_chars_per_doc` | int | - | 每文档最大字符数 |
-| `graphflow.auto_extract` | bool | false | 是否自动抽取实体/关系 |
-
-### 9.4 ImportFlow 配置
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `importflow.enabled` | bool | false | 是否启用 ImportFlow |
-| `importflow.db_path` | string | - | 数据库路径 |
-
----
-
-## 10. Context 配置 (G 组)
-
-### 10.1 Revision 上下文管理
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `revision.enabled` | bool | false | 是否启用上下文优化 |
-| `revision.revision_provider` | string | - | 摘要用 Provider |
-| `revision.revision_model` | string | - | 摘要用模型 |
-| `revision.enable_llm_summarize` | bool | false | 是否启用 LLM 摘要 |
-| `revision.max_command_output` | int | - | 命令输出最大长度 |
-| `revision.enable_semantic_search` | bool | false | 是否启用语义搜索 |
-| `revision.search_strategy` | string | - | 搜索策略 |
-| `revision.max_context_tokens` | int | - | 上下文 token 上限 |
-| `revision.trim_ratio` | float | - | 裁剪比例 [0.0, 1.0] |
-| `revision.summary_cooldown` | duration | - | 摘要冷却时间 |
-| `revision.summary_timeout` | duration | - | 摘要超时时间 |
-
----
-
-## 11. Feature Tools 配置 (H 组)
-
-### 11.1 Visualiser 可视化
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `visualiser.enabled` | bool | - | 是否启用自动可视化 |
-| `visualiser.output_dir` | string | - | 图表输出目录 |
-| `visualiser.max_width` | int | - | 最大宽度 (px) |
-| `visualiser.max_height` | int | - | 最大高度 (px) |
-
-### 11.2 Tutorial 教程
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `tutorial.enabled` | bool | - | 是否启用教程引导 |
-| `tutorial.language` | string | - | 教程语言 |
-
-### 11.3 TopOfMind 置顶指令
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `topofmind.enabled` | bool | - | 是否启用置顶指令 |
-| `topofmind.instruction_file` | string | - | 指令文件路径 |
-| `topofmind.max_length` | int | - | 指令最大长度 |
-
-### 11.4 Code Mode 代码沙箱
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `codemode.enabled` | bool | - | 是否启用 Code Mode |
-| `codemode.timeout` | duration | - | JS 执行超时 |
-| `codemode.max_memory_mb` | int | - | 内存限制 (MB) |
-
----
-
-## 12. Extensions 配置 (I 组)
-
-### 12.1 ExtensionConfig 字段
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `name` | string | 扩展名称 |
-| `type` | string | 扩展类型: `builtin` / `external` / `mcp_broker` |
-| `transport` | string | 传输方式: `stdio` / `sse` / `http` |
-| `command` | string | 启动命令 (stdio) |
+| `name` | string | 扩展名称（唯一标识） |
+| `type` | string | 扩展类型: `builtin`/`external`/`mcp_broker` |
+| `transport` | string | 传输方式: `stdio`/`sse`/`http` |
+| `command` | string | 启动命令（stdio） |
 | `args` | []string | 命令参数 |
-| `url` | string | 服务 URL (sse/http) |
+| `url` | string | 服务 URL（sse/http） |
 | `env` | map[string]string | 环境变量 |
 | `enabled` | bool | 是否启用 |
 | `timeout` | duration | 超时时间 |
 | `deeplink` | string | 深度链接模板 |
 | `permissions` | []ToolPermission | 工具权限 |
-| `mcp_broker` | bool | 是否作为 MCP Broker |
+| `mcp_broker` | bool | 是否作为 MCP Broker（聚合为 4 个工具） |
 | `mcp_tool_filter` | []string | MCP 工具白名单 |
 | `mcp_tool_exclude` | []string | MCP 工具排除列表 |
 | `mcp_session_reconnect` | bool | 会话重连 |
 | `mcp_session_reconnect_attempts` | int | 重连尝试次数 |
 
-### 12.2 ToolPermission 结构
+### ToolPermission（`types_provider.go:64-67`）
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `tool` | string | 工具名称 |
 | `allowed` | bool | 是否允许 |
 
-### 12.3 13 个内置扩展
+### 12 个内置扩展（`RegisterBuiltins`）
 
-| 扩展 | 说明 |
-|------|------|
-| `developer` | 开发工具集 (文件/命令/搜索) |
-| `memory` | 记忆管理工具 |
-| `browser` | 浏览器工具 |
-| `apps` | 应用管理工具 |
-| `ard` | ARD 发现工具 |
-| `cortex` | CortexDB 工具 |
-| `codemode` | Code Mode 执行器 |
-| `aggregate_search` | 聚合搜索 |
-| `google` / `bing` / `searxng` / `tavily` | 搜索引擎集成 |
-| `topofmind` | 置顶指令 |
-| `tutorial` | 教程引导 |
-| `auto_visualiser` | 自动可视化 |
-
----
-
-## 13. Service Endpoints 配置 (J 组)
-
-### 13.1 服务端口一览
-
-| 服务 | 默认端口 | 配置路径 |
-|------|---------|---------|
-| A2A Server | 9090 | `a2a_server.address` |
-| ACP Server | 9091 | `acp_server.address` |
-| ANP Server | 9092 | `anp.port` |
-| Gateway | 9093 | `gateway.*` |
-| AG-UI SSE | 8080 | `agui.address` |
-| ACP MCP | 3400 | `acp_mcp.address` |
-
-### 13.2 A2A Server
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `a2a_server.enabled` | bool | - | 是否启用 |
-| `a2a_server.address` | string | `:9090` | 监听地址 |
-| `a2a_server.agent_name` | string | - | Agent 名称 |
-| `a2a_server.agent_description` | string | - | Agent 描述 |
-
-### 13.3 AG-UI SSE
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `agui.enabled` | bool | - | 是否启用 |
-| `agui.address` | string | `:8080` | 监听地址 |
-| `agui.path` | string | - | SSE 路径 |
-
-### 13.4 ACP Server
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `acp_server.enabled` | bool | - | 是否启用 |
-| `acp_server.address` | string | `:9091` | 监听地址 |
-| `acp_server.path` | string | - | API 路径 |
-| `acp_server.enable_streaming` | bool | - | 是否启用流式 |
-| `acp_server.auth_type` | string | - | 认证类型 |
-| `acp_server.api_key` | string | - | API Key (支持 env 展开) |
-
-### 13.5 ACP MCP Bridge
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `acp_mcp.enabled` | bool | - | 是否启用 |
-| `acp_mcp.address` | string | `:3400` | 监听地址 |
-| `acp_mcp.path` | string | - | MCP 路径 |
+| 序号 | 名称 | 默认启用条件 |
+|----|------|------------|
+| 1 | `developer` | 始终启用 |
+| 2 | `computer_controller` | `cfg.Browser.Enabled` |
+| 3 | `memory` | 始终启用 |
+| 4 | `auto_visualiser` | `cfg.Visualiser.Enabled` |
+| 5 | `tutorial` | `cfg.Tutorial.Enabled` |
+| 6 | `top_of_mind` | `cfg.TopOfMind.Enabled` |
+| 7 | `code_mode` | `cfg.CodeMode.Enabled` |
+| 8 | `apps` | `cfg.Apps.Enabled` |
+| 9 | `web` | 始终启用（含 duckduckgo/searxng/tavily/google/bing 子工具） |
+| 10 | `agent_tools` | 始终启用 |
+| 11 | `ard` | `cfg.ARD.Enabled` |
+| 12 | `cortex` | `cfg.Cortex.Enabled` |
 
 ---
 
-## 14. Agent Communication 配置 (K 组)
+## U. A2A Server 配置
 
-### 14.1 ARD 双向发现
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `ard.enabled` | bool | false | 是否启用 ARD |
-| `ard.registry_url` | string | - | 注册中心 URL |
-| `ard.catalog_path` | string | - | 本地 Catalog 路径 |
-| `ard.publish_port` | int | - | 发布端口 |
-| `ard.publish_enabled` | bool | false | 是否发布到注册中心 |
-
-### 14.2 Summon 子 Agent 委派
-
-> **字段命名说明**：`summon.delegates_dir` 与 [15.2 节](#152-skill-技能管理) 的 `skill.skills_dir` 语义不同，分属独立子系统：
->
-> | 字段 | 子系统 | 消费者 | 加载内容 |
-> |------|--------|--------|----------|
-> | `summon.delegates_dir` | 子 Agent 委派 | `internal/summon/delegate.go` | 委派代理行为定义（.md 文件，每个实例化为一个 `Delegate`） |
-> | `skill.skills_dir` | 技能仓库 + 自演化 | `internal/skill/manager.go`、`internal/evolution/engine.go` | 可演化技能包（带版本控制） |
->
-> 两者默认均为 `.wukong/skills`，但可分别指向不同目录。
+**源码**: `types_server.go:22-27`（`A2AServerConfig`） | 默认值: `defaults.go:362-366`
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `summon.enabled` | bool | false | 是否启用 Summon |
-| `summon.delegates_dir` | string | - | 子 Agent 委派定义目录（.md 文件） |
-| `summon.max_concurrent` | int | - | 最大并发子 Agent |
-| `summon.a2a_remotes` | []A2ARemoteConfig | - | 远程 A2A Agent 列表 |
+| `enabled` | bool | false | 是否启用 A2A 协议服务器 |
+| `address` | string | `:9090` | 监听地址 |
+| `agent_name` | string | `wukong` | Agent 名称 |
+| `agent_description` | string | `Wukong AI Agent - A2A service endpoint` | Agent 描述 |
 
-#### A2ARemoteConfig 字段
+---
+
+## V. AGUI 配置
+
+**源码**: `types_server.go:30-35`（`AGUIConfig`） | 默认值: `defaults.go:369-371`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | false | 是否启用 AG-UI SSE 服务器 |
+| `address` | string | `:8080` | 监听地址 |
+| `path` | string | `/agui` | SSE 路径 |
+| `security` | ServerSecurityConfig | - | 安全配置 |
+
+---
+
+## W. ACP Server 配置
+
+**源码**: `types_server.go:38-44`（`ACPServerConfig`） | 默认值: `defaults.go:374-384`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | false | 是否启用 ACP 服务器 |
+| `address` | string | `:9091` | 监听地址 |
+| `path` | string | `/acp` | API 路径 |
+| `enable_streaming` | bool | true | 是否启用流式 |
+| `security.auth.type` | string | `""` | 认证类型: `""`/`api_key`/`jwt` |
+| `security.auth.api_key` | string | - | API Key（支持 `${ENV}`） |
+| `security.auth.jwt_secret` | string | - | JWT 密钥（支持 `${ENV}`） |
+
+> **关键**: 认证必须嵌套在 `security.auth.*` 下。顶层 `auth_type`/`api_key` 因无 mapstructure tag 会被 Viper 静默丢弃，导致认证失效。
+
+### ServerSecurityConfig / ServerAuthConfig（`internal/server/security.go`）
+
+```go
+type ServerAuthConfig struct {
+    Type      string `mapstructure:"type"`       // "" | "api_key" | "jwt"
+    APIKey    string `mapstructure:"api_key"`
+    JWTSecret string `mapstructure:"jwt_secret"`
+}
+type ServerSecurityConfig struct {
+    TLS       ServerTLSConfig       `mapstructure:"tls"`
+    Auth      ServerAuthConfig      `mapstructure:"auth"`
+    RateLimit ServerRateLimitConfig `mapstructure:"rate_limit"`
+}
+```
+
+---
+
+## X. ACP-MCP 配置
+
+**源码**: `types_server.go:47-51`（`ACPMCPConfig`） | 默认值: `defaults.go:387-389`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | true | 是否启用 ACP MCP 桥接 |
+| `address` | string | `:3400` | 监听地址 |
+| `path` | string | `/mcp` | MCP 路径 |
+
+> ACP-MCP 桥接将扩展暴露为 MCP Server，供 ACP Agent 调用。
+
+---
+
+## Y. MCP Server 配置
+
+**源码**: `types_server.go:54-59`（`MCPServerConfig`） | 默认值: `defaults.go:392-396`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | false | 是否启用独立 MCP 服务器 |
+| `address` | string | `:3401` | 监听地址 |
+| `security.auth.type` | string | `""` | 认证类型: `""`/`api_key`/`jwt` |
+| `security.auth.api_key` | string | - | API Key（支持 `${ENV}`） |
+
+> **安全警告**: 暴露在非回环地址时**必须**设置 `security.auth.type`，否则工具调用无鉴权。
+
+---
+
+## Z. Gateway 配置
+
+**源码**: `internal/gateway/config.go:21-49`（`GatewayConfig`） | 默认值: `gateway/config.go:106-122`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | false | 是否启用消息网关 |
+| `default_timeout` | duration | `900s` | Agent Run 最大时长 |
+| `max_concurrent_sessions` | int | 100 | 跨通道最大并发会话数 |
+| `message_dedup_ttl` | duration | `5m` | 消息去重窗口 |
+| `rate_limit_per_user` | int | 20 | 每用户在窗口内最大 Run 次数 |
+| `rate_limit_window` | duration | `60s` | 滑动窗口时长 |
+| `feishu` | FeishuChannelConfig | - | 飞书通道配置 |
+
+### Feishu 通道（`gateway/config.go:54-102`）
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | false | 是否启用飞书通道 |
+| `app_id` | string | - | 飞书应用 ID（`cli_xxx`） |
+| `app_secret` | string | - | 应用密钥（支持 `${ENV}`），用于 WebSocket 长连接与 token 获取 |
+| `api_base` | string | `https://open.feishu.cn/open-apis` | API 基础 URL（Lark 国际版用 `https://open.larksuite.com/open-apis`） |
+| `encrypt_key` | string | - | 事件加密密钥（支持 `${ENV}`） |
+| `verification_token` | string | - | 遗留验证 token（支持 `${ENV}`，长连接模式下已废弃） |
+| `stream_card_enabled` | bool | true | 是否启用流式卡片回复 |
+| `stream_card_update_interval` | duration | `500ms` | 流式卡片更新间隔 |
+| `max_message_length` | int | 4096 | 单条消息最大字符数（超出截断） |
+| `enable_file_receive` | bool | false | 是否接收用户文件消息 |
+
+> 飞书通道通过 WebSocket 长连接接收消息（无需公网回调 URL），通过 Lark Open API 回复。
+
+---
+
+## AA. Summon 配置
+
+**源码**: `types_orchestration.go:19-24`（`SummonConfig`） | 默认值: `defaults.go:304-306`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | true | 是否启用子 Agent 委派 |
+| `delegates_dir` | string | `.wukong/skills` | 委派定义目录（.md 文件，每个成为一个 `Delegate`） |
+| `max_concurrent` | int | 5 | 最大并行子 Agent 执行数（>= 0） |
+| `a2a_remotes` | []A2ARemoteConfig | - | 远程 A2A Agent 列表（OAuth2 类型自动刷新 token） |
+
+> **字段区分**: `summon.delegates_dir` 服务于子 Agent 委派（`internal/summon/delegate.go`，加载 .md 委派定义）；`skill.skills_dir` 服务于技能仓库与自演化（`internal/skill/`、`internal/evolution/`，加载可演化技能包）。两者默认均为 `.wukong/skills`，但可分别配置。
+
+### A2ARemoteConfig（`types_orchestration.go:27-40`）
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `name` | string | 远程 Agent 名称 |
 | `description` | string | 描述 |
-| `server_url` | string | 服务器 URL |
-| `auth_type` | string | 认证类型: `apikey` / `jwt` / `oauth` |
-| `api_key` | string | API Key (支持 env 展开) |
-| `api_key_header` | string | API Key 头名称 |
-| `jwt_secret` | string | JWT 密钥 (支持 env 展开) |
+| `server_url` | string | A2A 服务器 URL |
+| `auth_type` | string | 认证类型: `apikey`/`jwt`/`oauth` |
+| `api_key` | string | API Key（支持 `${ENV}`） |
+| `api_key_header` | string | API Key 请求头名称 |
+| `jwt_secret` | string | JWT 密钥（支持 `${ENV}`） |
 | `jwt_audience` | string | JWT 受众 |
 | `jwt_issuer` | string | JWT 签发者 |
 | `oauth_token_url` | string | OAuth Token URL |
 | `oauth_client_id` | string | OAuth 客户端 ID |
-| `oauth_client_secret` | string | OAuth 客户端密钥 (支持 env 展开) |
-
-### 14.3 ANP Agent 互通协议
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `anp.enabled` | bool | false | 是否启用 ANP |
-| `anp.did_domain` | string | - | DID 域名 |
-| `anp.did_path` | string | - | DID 路径 |
-| `anp.port` | int | 9092 | 监听端口 [0, 65535] |
-| `anp.discovery_enabled` | bool | false | 是否启用发现 |
-| `anp.meta_protocol_enabled` | bool | false | 是否启用能力协商 |
-| `anp.e2ee_enabled` | bool | false | 是否启用端到端加密 |
-| `anp.a2a_enabled` | bool | false | 是否启用 A2A 桥接 |
-| `anp.agui_enabled` | bool | false | 是否启用 AG-UI |
-| `anp.http_sign_enabled` | bool | false | 是否启用 HTTP 签名 |
-| `anp.mcp_enabled` | bool | false | 是否启用 MCP |
-
-> **注意**: 启用 `meta_protocol_enabled` 时必须设置有效的 `port` (> 0)
+| `oauth_client_secret` | string | OAuth 客户端密钥（支持 `${ENV}`） |
 
 ---
 
-## 15. Knowledge & Skill 配置 (L 组)
+## AB. ANP 配置
 
-### 15.1 Knowledge RAG
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `knowledge.enabled` | bool | false | 是否启用知识库 |
-| `knowledge.embedder_provider` | string | - | 嵌入用 Provider |
-| `knowledge.embedder_model` | string | - | 嵌入用模型 |
-| `knowledge.sources` | []string | - | 知识源目录列表 |
-| `knowledge.source_urls` | []string | - | 知识源 URL 列表 |
-| `knowledge.vector_store` | string | - | 向量存储后端 |
-| `knowledge.max_results` | int | - | 最大检索结果数 |
-| `knowledge.enable_source_sync` | bool | false | 是否启用源同步 |
-| `knowledge.reranker_enabled` | bool | false | 是否启用重排序 |
-| `knowledge.search_tool_name` | string | - | 搜索工具名称 |
-
-### 15.2 Skill 技能管理
-
-> **字段命名说明**：`skill.skills_dir` 与 [14.2 节](#142-summon-子-agent-委派) 的 `summon.delegates_dir` 语义不同。本字段服务于技能仓库与自演化引擎（加载可演化技能包），前者服务于子 Agent 委派（加载委派代理定义）。详见 14.2 节的对照表。
+**源码**: `types_orchestration.go:43-55`（`ANPConfig`） | 默认值: `defaults.go:313-321`
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `skill.enabled` | bool | false | 是否启用技能系统 |
-| `skill.skills_dir` | string | - | 可演化技能包目录 |
-| `skill.auto_load` | bool | false | 是否自动加载 |
-| `skill.max_skills` | int | - | 最大技能数 |
+| `enabled` | bool | false | 是否启用 ANP |
+| `did_domain` | string | - | DID 域名（W3C DID 身份） |
+| `did_path` | string | - | DID 路径 |
+| `port` | int | 9092 | 监听端口 [0, 65535] |
+| `discovery_enabled` | bool | true | 是否启用发现 |
+| `meta_protocol_enabled` | bool | true | 是否启用能力协商（驱动 `summon.NewMetaProtocol`） |
+| `http_sign_enabled` | bool | true | 是否启用 RFC 9421 HTTP 签名 |
+| `e2ee_enabled` | bool | true | 是否启用端到端加密（驱动 `summon.NewE2EEMessenger`） |
+| `a2a_enabled` | bool | true | 是否启用 A2A 桥接 |
+| `agui_enabled` | bool | true | 是否启用 AG-UI |
+| `mcp_enabled` | bool | true | 是否启用 MCP |
 
-### 15.3 OKF 知识格式
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `okf.enabled` | bool | false | 是否启用 OKF |
-| `okf.bundle_dir` | string | - | OKF Bundle 目录 |
-| `okf.injector_enabled` | bool | false | 是否启用知识注入 |
-| `okf.enrichment_enabled` | bool | false | 是否启用知识丰富 |
-| `okf.enrichment_output_dir` | string | - | 丰富输出目录 |
+> **约束**: `meta_protocol_enabled` 启用时 `port` 必须 > 0。
 
 ---
 
-## 16. Orchestration 配置 (M 组)
+## AC. ARD 配置
 
-### 16.1 Evolution 技能进化
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `evolution.enabled` | bool | false | 是否启用进化引擎 |
-| `evolution.auto_patch` | bool | false | 是否自动应用补丁 |
-| `evolution.analysis_provider` | string | - | 分析用 Provider |
-| `evolution.analysis_model` | string | - | 分析用模型 |
-| `evolution.min_confidence` | float | - | 最小置信度 [0.0, 1.0] |
-| `evolution.cooldown_period` | duration | - | 冷却周期 |
-| `evolution.max_patches_per_day` | int | - | 每日最大补丁数 |
-| `evolution.max_versions_kept` | int | - | 保留版本数 |
-| `evolution.max_patch_size` | int | - | 最大补丁大小 |
-| `evolution.analysis_timeout` | duration | - | 分析超时时间 |
-| `evolution.export_json` | bool | false | 是否导出 JSON 日志 |
-
-### 16.2 Workflow 编排模式
+**源码**: `types_orchestration.go:10-16`（`ARDConfig`） | 默认值: `defaults.go:297-301`
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `orchestration.workflow.mode` | string | `single` | 编排模式 (10 种) |
+| `enabled` | bool | false | 是否启用 ARD |
+| `registry_url` | string | - | 注册中心 URL |
+| `catalog_path` | string | `.wukong/ard/catalog.json` | 本地 Catalog 路径 |
+| `publish_enabled` | bool | false | 是否发布到注册中心 |
+| `publish_port` | int | 0 | 发布端口 |
 
-#### 10 种编排模式
+---
+
+## AD. Dify 配置
+
+**源码**: `types_orchestration.go:103-110`（`DifyConfig`） | 默认值: `defaults.go:352-356`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | false | 是否启用 Dify 集成 |
+| `base_url` | string | - | Dify 平台 URL |
+| `api_secret` | string | - | API 密钥（支持 `${ENV}`） |
+| `agent_name` | string | `dify` | Agent 名称 |
+| `enable_streaming` | bool | false | 是否启用流式 |
+| `timeout` | duration | `120s` | 超时时间 |
+
+---
+
+## AE. Knowledge 配置
+
+**源码**: `types_orchestration.go:79-89`（`KnowledgeConfig`） | 默认值: `defaults.go:337-344`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | false | 是否启用知识库 RAG |
+| `embedder_provider` | string | - | 嵌入用 Provider（空 → 回退 cortex.embedding_*，再回退 default_provider） |
+| `embedder_model` | string | `text-embedding-3-small` | 嵌入用模型 |
+| `sources` | []string | - | 知识源目录列表 |
+| `source_urls` | []string | - | 知识源 URL 列表 |
+| `vector_store` | string | `inmemory` | 向量存储后端 |
+| `max_results` | int | 5 | 最大检索结果数 |
+| `enable_source_sync` | bool | false | 是否启用源同步 |
+| `search_tool_name` | string | `knowledge_search` | 搜索工具名称 |
+
+---
+
+## AF. OKF 配置
+
+**源码**: `types_orchestration.go:92-100`（`OKFConfig`） | 默认值: `defaults.go:434-441`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | false | 是否启用 OKF |
+| `bundle_dir` | string | `.wukong/okf` | OKF Bundle 目录 |
+| `injector_enabled` | bool | false | 是否启用知识注入 |
+| `enrichment_enabled` | bool | false | 是否启用知识丰富 |
+| `enrichment_output_dir` | string | - | 丰富输出目录 |
+| `auto_export` | bool | false | 是否自动导出 |
+| `register_in_ard` | bool | false | 是否注册到 ARD |
+
+---
+
+## AG. Skill 配置
+
+**源码**: `types_orchestration.go:58-61`（`SkillConfig`） | 默认值: `defaults.go:309-310`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | true | 是否启用技能系统 |
+| `skills_dir` | string | `.wukong/skills` | 可演化技能包目录 |
+
+> 服务于技能仓库（`internal/skill/manager.go`）与自演化引擎（`internal/evolution/engine.go`），加载带版本控制的可演化技能包。
+
+---
+
+## AH. Evolution 配置
+
+**源码**: `types_orchestration.go:64-76`（`EvolutionConfig`） | 默认值: `defaults.go:324-334`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | false | 是否启用进化引擎 |
+| `auto_patch` | bool | false | 是否自动应用补丁 |
+| `analysis_provider` | string | - | 分析用 Provider |
+| `analysis_model` | string | - | 分析用模型 |
+| `min_confidence` | float64 | 0.7 | 最小置信度 [0.0, 1.0] |
+| `cooldown_period` | duration | `30m` | 冷却周期 |
+| `max_patches_per_day` | int | 10 | 每日最大补丁数 |
+| `max_versions_kept` | int | 10 | 保留版本数 |
+| `max_patch_size` | int | 8192 | 最大补丁大小 |
+| `analysis_timeout` | duration | `60s` | 分析超时 |
+| `export_json` | bool | false | 是否导出 JSON 日志 |
+
+---
+
+## AI. Workflow 配置
+
+**源码**: `types_orchestration.go:129-137`（`WorkflowConfig`） | 默认值: `defaults.go:347-349`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `mode` | string | `single` | 编排模式（10 种，见下） |
+| `max_iterations` | int | 10 | 最大迭代次数 |
+| `cycle_mode` | string | `default` | 循环模式子类型 |
+| `sub_agents` | []SubAgentConfig | - | 自定义子 Agent 配置 |
+| `team_members` | []TeamMemberConfig | - | 团队成员配置 |
+| `claude_code_bin` | string | - | Claude Code 二进制路径 |
+| `codex_bin` | string | - | Codex 二进制路径 |
+
+### 10 种编排模式（WorkflowMode，`workflow.go:29-40`）
 
 | 模式 | 说明 |
 |------|------|
-| `single` | 单体 Agent |
+| `single` | 单体 Agent（默认） |
 | `chain` | 链式: planner → executor → reviewer |
 | `parallel` | 并行: 多视角并发 |
 | `cycle` | 循环: planner ↔ executor 迭代 |
 | `graph` | 图: 条件 DAG |
-| `team_coordinator` | 团队: Leader 委派 |
-| `team_swarm` | 蜂群: 自动 transfer |
-| `claude_code` | Claude Code 子进程 |
-| `codex` | Codex 子进程 |
-| `dify` | Dify 平台集成 |
+| `team_coordinator` | 团队: Leader 通过 AgentTool 委派给成员 |
+| `team_swarm` | 蜂群: 代理间直接转移控制，无中央协调者 |
+| `claude_code` | Claude Code 子进程集成 |
+| `codex` | Codex 子进程集成 |
+| `dify` | Dify 平台 HTTP 集成（`/chat-messages`） |
 
 ---
 
-## 17. Observability 配置 (N 组)
+## AJ. Telemetry 配置
 
-### 17.1 Telemetry 遥测
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `telemetry.enabled` | bool | false | 是否启用遥测 |
-| `telemetry.sample_rate` | float | - | 采样率 [0.0, 1.0] |
-
-### 17.2 Langfuse 可观测性
+**源码**: `types_observability.go:8-16`（`TelemetryConfig`） | 默认值: `defaults.go:416-422`
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `observability.langfuse_enabled` | bool | false | 是否启用 Langfuse |
-| `observability.langfuse_public_key` | string | - | Public Key (支持 env 展开) |
-| `observability.langfuse_secret_key` | string | - | Secret Key (支持 env 展开) |
-| `observability.langfuse_host` | string | - | Langfuse 服务地址 |
+| `enabled` | bool | false | 是否启用 OpenTelemetry 遥测 |
+| `exporter_type` | string | `console` | 导出器类型: `console`/`grpc`/`http` |
+| `endpoint` | string | `localhost:4317` | 导出端点 |
+| `service_name` | string | `wukong` | 服务名 |
+| `service_version` | string | `1.0.0` | 服务版本 |
+| `environment` | string | `development` | 环境标识 |
+| `sample_rate` | float64 | 1.0 | 采样率 [0.0, 1.0] |
 
 ---
 
-## 18. Apps 配置 (O 组)
+## AK. Observability 配置
 
-### 18.1 Apps 通用
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `apps.enabled` | bool | false | 是否启用应用系统 |
-| `apps.app_dir` | string | - | 应用存储目录 |
-
-### 18.2 Clone 克隆默认值
+**源码**: `types_observability.go:19-24`（`ObservabilityConfig`） | 默认值: `defaults.go:413`
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `apps.clone.max_pages` | int | - | 最大页面数 |
-| `apps.clone.max_depth` | int | - | 最大爬取深度 |
-| `apps.clone.traversal` | string | - | 遍历策略: `bfs` / `dfs` |
-| `apps.clone.subdomains` | bool | false | 是否包含子域名 |
-| `apps.clone.scope_prefix` | string | - | 作用域前缀 |
-| `apps.clone.workers` | int | - | 爬取 Worker 数 (>=1) |
-| `apps.clone.asset_workers` | int | - | 资源下载 Worker 数 |
-| `apps.clone.browser_pages` | int | - | 浏览器标签池大小 |
-| `apps.clone.timeout` | int | - | 页面超时 (秒) |
-| `apps.clone.render_timeout` | int | - | 渲染超时 (秒) |
-| `apps.clone.settle` | int | - | 网络空闲等待 (毫秒) |
-| `apps.clone.scroll` | bool | false | 是否自动滚动 |
-| `apps.clone.respect_robots` | bool | true | 是否遵守 robots.txt |
-| `apps.clone.crawl_delay` | int | - | 爬取延迟 (毫秒) |
-| `apps.clone.no_sitemap` | bool | false | 是否忽略 sitemap |
-| `apps.clone.dedup_content` | bool | false | 是否内容去重 |
-| `apps.clone.mobile_readable` | bool | false | 是否移动端可读 |
-| `apps.clone.enable_resume` | bool | false | 是否启用断点续抓 |
-| `apps.clone.persist` | bool | false | 是否持久化状态 |
-| `apps.clone.incremental` | bool | false | 是否增量爬取 |
-| `apps.clone.cache_max_age` | int | - | 缓存最大年龄 (秒) |
-| `apps.clone.headless` | bool | true | 是否无头模式 |
-| `apps.clone.stealth` | bool | false | 是否启用隐身 |
-| `apps.clone.chrome_profile` | string | - | Chrome 配置文件 |
-| `apps.clone.chrome_path` | string | - | Chrome 路径 |
-| `apps.clone.antibot_enabled` | bool | false | 是否启用反反爬 |
-| `apps.clone.antibot_auto_escalate` | bool | false | 是否自动升级反爬等级 |
-| `apps.clone.asset_same_domain` | bool | false | 是否只下载同域资源 |
-| `apps.clone.max_asset_bytes` | int64 | - | 资源最大字节数 |
-| `apps.clone.cookie_file` | string | - | Cookie 文件路径 |
-| `apps.clone.user_agent` | string | - | User-Agent |
-| `apps.clone.browser_backend` | string | `rod` | 浏览器后端: `rod` / `chromedp` |
-| `apps.clone.proxy_enabled` | bool | false | 是否启用代理 |
-| `apps.clone.proxy_pool` | []string | - | 代理池 URL 列表 |
-| `apps.clone.proxy_rotate_every` | int | - | 每 N 次轮换代理 |
-
-### 18.3 Pack 打包默认值
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `apps.pack.compress` | bool | - | 是否压缩 |
-| `apps.pack.incremental` | bool | - | 是否增量打包 |
-| `apps.pack.language` | string | - | 语言代码 |
-| `apps.pack.creator` | string | - | 创建者 |
-| `apps.pack.format` | string | - | 打包格式: `zim` / `zip` |
+| `langfuse_enabled` | bool | false | 是否启用 Langfuse |
+| `langfuse_host` | string | - | Langfuse 服务地址 |
+| `langfuse_public_key` | string | - | Public Key（支持 `${ENV}`） |
+| `langfuse_secret_key` | string | - | Secret Key（支持 `${ENV}`） |
 
 ---
 
-## 19. 完整配置示例
+## AL. Eval 配置
+
+**源码**: `types_observability.go:27-38`（`EvalConfig`） | 默认值: `defaults.go:404-407`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | false | 是否启用评测/回归测试 |
+| `evalset_path` | string | `.wukong/evals/default.evalset.json` | 评测集路径 |
+| `results_path` | string | `.wukong/evals/results.json` | 结果输出路径 |
+| `metrics` | []EvalMetricConfig | - | 评测指标 |
+
+---
+
+## AM. Artifact 配置
+
+**源码**: `types_observability.go:41-46`（`ArtifactConfig`） | 默认值: `defaults.go:410`
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `backend` | string | `inmemory` | 存储后端: `inmemory`/`cos` |
+| `cos_bucket_url` | string | - | COS 桶 URL（仅 `cos` 后端） |
+| `cos_secret_id` | string | - | COS Secret ID（支持 `${ENV}`） |
+| `cos_secret_key` | string | - | COS Secret Key（支持 `${ENV}`） |
+
+---
+
+## 完整配置示例
+
+以下为最小化生产配置示例，完整模板见项目根目录 `config.yaml`。
 
 ```yaml
 # ===== 全局设置 =====
-default_provider: openai-main
 log_level: info
-lightweight_provider: openai-main
-lightweight_model: gpt-4o-mini
-project_dir: ~/.config/wukong/
+default_provider: vllm
+lightweight_provider: vllm
+lightweight_model: deepseek-v4-flash-0731
 
 # ===== Providers =====
 providers:
-  - name: openai-main
+  - name: vllm
+    type: vllm
+    api_key: ""
+    base_url: "http://localhost:8888/v1"
+    model: "deepseek-v4-flash-0731"
+    context_window: 131072
+  - name: openai
     type: openai
-    base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
     api_key: ${OPENAI_API_KEY}
+    base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
     model: gpt-4o
-
-  - name: local-ollama
-    type: ollama
-    base_url: http://localhost:11434
-    model: qwen2.5:7b
 
 # ===== Agent =====
 agent:
-  temperature: 0.7
-  max_tokens: 4096
   max_llm_calls: 50
-  max_tool_iterations: 30
+  max_tool_iterations: 50
+  max_run_duration: "3600s"
+  tool_call_timeout: "120s"
   parallel_tools: true
   streaming: true
+  temperature: 0.7
+  max_tokens: 4096
   tool_retry_enabled: true
-  tool_retry_max_attempts: 3
-  context_compaction: false
+  context_compaction: true
+  context_compaction_keep_recent: 1
+  planner: ""
   recipe_enabled: true
-  recipe_dir: .wukong/recipes/
+  recipe_dir: ".wukong/recipes/"
 
 # ===== Security =====
 security:
   permission_mode: smart
   block_dangerous_commands: true
-  guardrail_enabled: false
   ignore_file_enabled: true
   ignore_file: .wukongignore
 
 # ===== Storage =====
 session:
   backend: sqlite
-  db_path: ~/.config/wukong/wukong.db
+  db_path: wukong.db
+  event_limit: 500
+  enable_summary: true
 
 memory:
   backend: sqlite
+  db_path: wukong.db
   auto_extract: true
   enable_smart_cleanup: true
   cleanup_trigger_threshold: 0.8
   cleanup_target_threshold: 0.6
-  recency_weight: 0.7
-  length_weight: 0.3
-
-todo:
-  backend: sqlite
-  enable_enforcer: true
+  recency_weight: 0.4
+  reference_weight: 0.3
+  importance_weight: 0.2
+  length_weight: 0.1
 
 recall:
   enabled: true
   search_mode: fts5
-  max_results: 5
+  max_results: 10
 
 # ===== CortexDB =====
 cortex:
-  enabled: false
-  embedding_model: text-embedding-3-small
-  embedding_base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
-  embedding_api_key: ${OPENAI_API_KEY}
-
-memoryflow:
-  enabled: false
-  extractor_model: gpt-4o-mini
-
-graphflow:
-  enabled: false
-  auto_extract: false
-
-# ===== Browser =====
-browser:
   enabled: true
-  backend: rod
-  headless: true
-  stealth: true
-  workers: 3
-  viewport_width: 1920
-  viewport_height: 1080
-  search:
-    backends: [duckduckgo]
+  db_path: wukong.db
+  embedding_base_url: ${EMBEDDING_BASE_URL:-http://localhost:8082/v1}
+  embedding_api_key: ${EMBEDDING_API_KEY:-vllm}
+  embedding_model: ${EMBEDDING_MODEL:-bge-m3-Q8_0}
+  search_strategy:
+    recall_mode: hybrid
+    dense_weight: 0.7
+    text_weight: 0.3
+    fusion_method: rrf
 
-# ===== Extensions =====
-extensions:
-  - name: developer
-    type: builtin
-    enabled: true
-  - name: memory
-    type: builtin
-    enabled: true
-  - name: browser
-    type: builtin
-    enabled: true
+# ===== Revision =====
+revision:
+  enabled: true
+  enable_llm_summarize: true
+  max_context_tokens: 24000
+  trim_ratio: 0.3
 
 # ===== Service Endpoints =====
 a2a_server:
-  enabled: false
+  enabled: true
   address: ":9090"
-  agent_name: "Wukong Agent"
-
 agui:
-  enabled: false
+  enabled: true
   address: ":8080"
-
 acp_server:
-  enabled: false
+  enabled: true
   address: ":9091"
-
-# ===== Communication =====
-ard:
-  enabled: false
-  publish_enabled: false
-
-summon:
-  enabled: false
-  max_concurrent: 3
-
-anp:
-  enabled: false
-  port: 9092
-  discovery_enabled: true
-  meta_protocol_enabled: true
-
-# ===== Knowledge & Skill =====
-knowledge:
-  enabled: false
-  max_results: 5
-
-skill:
-  enabled: false
-  auto_load: true
-
-okf:
-  enabled: false
-  injector_enabled: true
-
-# ===== Orchestration =====
-evolution:
-  enabled: false
-  auto_patch: false
-  min_confidence: 0.8
-
-orchestration:
-  workflow:
-    mode: single
-
-# ===== Observability =====
-telemetry:
-  enabled: false
-  sample_rate: 0.1
+acp_mcp:
+  enabled: true
+  address: ":3400"
 
 # ===== Apps =====
 apps:
   enabled: true
-  app_dir: .wukong/apps/
+  app_dir: ".wukong/apps"
   clone:
-    max_pages: 100
-    max_depth: 3
-    workers: 3
+    workers: 4
     traversal: bfs
     headless: true
     stealth: true
     antibot_enabled: true
-    antibot_auto_escalate: true
-    enable_resume: true
-    dedup_content: true
   pack:
-    compress: true
-    format: zim
-    language: zh
-    creator: Wukong
+    format: html
 ```
 
 ---
@@ -1024,5 +1305,10 @@ apps:
 | 文档 | 说明 |
 |------|------|
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | 系统架构详解 |
+| [API_REFERENCE.md](./API_REFERENCE.md) | 内部 API/接口参考 |
 | [CLI_TUI.md](./CLI_TUI.md) | CLI & TUI 架构 |
 | [README.md](../README.md) | 项目主页 |
+
+---
+
+> **最后更新**: 2026-08-11

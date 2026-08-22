@@ -121,10 +121,16 @@ func (s *RedisSessionService) CreateSession(
 	}
 
 	// Index this session for the user.
-	_ = s.client.SAdd(ctx, userSessionsKey(session.UserKey{
+	if err := s.client.SAdd(ctx, userSessionsKey(session.UserKey{
 		AppName: key.AppName,
 		UserID:  key.UserID,
-	}), key.SessionID).Err()
+	}), key.SessionID).Err(); err != nil {
+		slog.Warn("redis: index session failed",
+			"app", key.AppName,
+			"user", key.UserID,
+			"session", key.SessionID,
+			"error", err.Error())
+	}
 
 	return sess, nil
 }

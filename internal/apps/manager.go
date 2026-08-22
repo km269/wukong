@@ -412,6 +412,12 @@ func applyConfigDefaults(eco *clone.EnhancedClonerOptions, dc config.CloneDefaul
 	if dc.ArchiveFallback {
 		eco.ArchiveFallback = dc.ArchiveFallback
 	}
+	if dc.InsecureTLS {
+		eco.InsecureTLS = dc.InsecureTLS
+	}
+	if dc.TLSCACertPath != "" {
+		eco.TLSCACertPath = dc.TLSCACertPath
+	}
 }
 
 // applyCLIOptions applies CLI options to EnhancedClonerOptions.
@@ -623,6 +629,10 @@ func (m *Manager) DownloadFiles(ctx context.Context, seedURL string, opts Downlo
 	if opts.FileExts != nil {
 		dlOpts.FileExts = opts.FileExts
 	}
+
+	// Propagate the clone module's TLS policy to the file downloader.
+	dlOpts.InsecureTLS = m.cfg.Clone.InsecureTLS
+	dlOpts.TLSCACertPath = m.cfg.Clone.TLSCACertPath
 
 	// Create downloader
 	downloader := clone.NewDownloader(dlOpts)

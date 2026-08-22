@@ -1,6 +1,7 @@
 package ard
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strings"
@@ -81,6 +82,15 @@ func (tb *TokenBucket) Cleanup() {
 }
 
 func RateLimitMiddleware(config RateLimiterConfig) func(http.Handler) http.Handler {
+	return RateLimitMiddlewareCtx(config, context.Background())
+}
+
+// RateLimitMiddlewareCtx is like RateLimitMiddleware but binds the
+// cleanup goroutine to the supplied context so callers (e.g. a
+// long-running server) can stop it during shutdown. The original
+// RateLimitMiddleware uses context.Background() to preserve prior
+// behaviour for short-lived handlers.
+func RateLimitMiddlewareCtx(config RateLimiterConfig, ctx context.Context) func(http.Handler) http.Handler {
 	if !config.Enabled {
 		return func(next http.Handler) http.Handler {
 			return next
@@ -92,8 +102,13 @@ func RateLimitMiddleware(config RateLimiterConfig) func(http.Handler) http.Handl
 	go func() {
 		ticker := time.NewTicker(config.Window)
 		defer ticker.Stop()
-		for range ticker.C {
-			bucket.Cleanup()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				bucket.Cleanup()
+			}
 		}
 	}()
 

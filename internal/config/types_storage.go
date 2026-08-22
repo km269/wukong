@@ -16,6 +16,13 @@ type SessionConfig struct {
 	EnableSummary  bool          `mapstructure:"enable_summary"`
 	SummaryTrigger int           `mapstructure:"summary_trigger"`
 	RedisURL       string        `mapstructure:"redis_url"`
+	// EnableModelEventLog turns on the Wukong-level model-visible
+	// event log (wukong_model_events table). This is distinct from
+	// the framework session service's own event log: it records the
+	// messages the model actually sees AFTER context enrichment
+	// (wakeup/recall/persistent memory injection), enforcing the
+	// "model-visible means logged" invariant. Default true.
+	EnableModelEventLog bool `mapstructure:"enable_model_event_log"`
 }
 
 // MemoryConfig defines long-term knowledge persistence settings.

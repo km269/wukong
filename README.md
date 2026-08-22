@@ -2,8 +2,8 @@
 
 > 本地优先、框架组装、可深度扩展的开源 AI Agent 平台
 >
-> Go 1.26 | 30+ 内部包 | 2 公共包 | 34 配置结构体
-> CLI: 27 顶层命令 + 55+ 子命令 | 依赖: 29 direct + 105 indirect
+> Go 1.26 | 30+ 内部包 | 3 公共包 | 34 配置结构体
+> CLI: 30 顶层命令 + 60+ 子命令 | 依赖: 29 direct + 105 indirect
 
 ---
 
@@ -82,10 +82,10 @@ Wukong 的设计围绕七大核心哲学展开，每一项都指导了具体的�
 
 | 维度 | 方案 |
 |------|------|
-| **内置扩展** | 13 个: developer / memory / browser / apps / ard / cortex / codemode / aggregate_search / google / bing / searxng / tavily / topofmind / tutorial / auto_visualiser |
-| **MCP 扩展** | MCP Broker + ACP MCP Bridge |
-| **多协议端点** | 6 个: A2A (:9090) / ACP (:9091) / AG-UI SSE (:8080) / ACP MCP (:3400) / ANP (:9092) / Gateway (:9093) |
-| **消息网关** | Gateway 插件式 Channel 架构: 飞书/企微 |
+| **内置扩展** | 17 个: developer / computer_controller / memory / auto_visualiser / tutorial / top_of_mind / code_mode / apps / web / aggregate_search / agent_tools / ard / cortex / bing / google / searxng / tavily |
+| **MCP 扩展** | MCP Broker + 独立 MCP Server (:3401) + ACP-MCP Bridge (:3400) |
+| **多协议端点** | 7 个: A2A (:9090) / ACP (:9091) / AG-UI SSE (:8080) / ACP-MCP (:3400) / MCP Server (:3401) / ANP (:9092) / Gateway (飞书 WS) |
+| **消息网关** | Gateway 插件式 Channel 架构: 飞书/企微 (内部 goroutine，无独立 HTTP 端口) |
 | **Agent 互通** | ANP 协议栈: DID 身份 + 能力协商 + E2EE 加密 + HTTP 签名 |
 | **双向发现** | ARD: 联邦搜索 + 本地 Catalog + RegistryServer 发布 |
 
@@ -93,7 +93,7 @@ Wukong 的设计围绕七大核心哲学展开，每一项都指导了具体的�
 
 | 维度 | 方案 |
 |------|------|
-| **配置系统** | 34 结构体 · 7级加载优先级 · 配置验证 · env var 展开 (15 类敏感字段) |
+| **配置系统** | 35+ 配置段 · 7级加载优先级 · 配置验证 · env var 展开 (20+ 类敏感字段) |
 | **存储** | 单文件 `wukong.db` (SQLite WAL 模式) |
 | **可选后端** | Redis (会话/记忆) / COS (制品) |
 
@@ -212,7 +212,7 @@ wukong server --a2a --gateway --agui
 | Linux 沙箱 | Landlock | - | Linux 内核安全模块 |
 | macOS 沙箱 | Seatbelt | - | macOS 沙箱框架 |
 | Windows 沙箱 | Low Integrity Level | - | Windows 低完整性级别 |
-| 密码学 | x/crypto | v0.48.0 | Ed25519 / X25519 / ChaCha20 |
+| 密码学 | x/crypto | v0.51.0 | Ed25519 / X25519 / ChaCha20 |
 | HTTP 签名 | RFC 9421 | - | HTTP 消息签名标准 |
 
 ### 可观测性
@@ -298,8 +298,9 @@ wukong server --a2a --gateway --agui
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**智能清理策略**:
-- 评分: 70% 新鲜度 + 30% 长度
+**智能清理策略 (SmartCleanup 四维评分)**:
+- 评分: 近度 40% + 引用 30% + 重要度 20% + 长度 10%
+- 动态 TTL: 引用频次 ≥5 → TTL×2；≥2 → TTL×1.5；==0 → TTL×0.5
 - 触发: 80% 容量阈值
 - 目标: 清理到 60% 容量
 
@@ -358,15 +359,21 @@ GatewayServer (transport-agnostic)
 |------|------|------|
 | [系统架构](docs/ARCHITECTURE.md) | 20 章架构详解 · 24 ADR · 模块依赖 · 数据流 | ~1500 行 |
 | [配置手册](docs/CONFIG.md) | 15 组配置 · 全字段说明 · 完整示例 | ~1000 行 |
-| [CLI & TUI 架构](docs/CLI_TUI.md) | 命令树 · TUI 架构 · 启动序列 · 事件管道 | ~600 行 |
+| [CLI & TUI 架构](docs/CLI_TUI.md) | 命令树 · TUI 架构 · 启动序列 · 事件管道 | ~800 行 |
+| [技术实现详解](docs/TECHNICAL_IMPLEMENTATION.md) | 核心模块实现 · 数据流 · 关键算法 | ~1200 行 |
+| [API 参考](docs/API_REFERENCE.md) | CoreLoop · Provider · Extension · Security 接口 | ~800 行 |
+| [开发者指南](docs/DEVELOPER_GUIDE.md) | 环境搭建 · 项目结构 · 常见开发任务 · 调试 | ~600 行 |
+| [部署运维](docs/DEPLOYMENT.md) | Docker · 二进制 · 配置 · 健康检查 · 故障排查 | ~800 行 |
 
 ### 专题指南
 
 | 文档 | 说明 |
 |------|------|
 | [网站克隆技术指南](docs/CLONE_GUIDE.md) | 克隆引擎架构 · 分页处理 · 资源下载策略 |
+| [Web 操作深度分析](docs/WEB_OPERATIONS_ANALYSIS.md) | 浏览器/克隆/反爬/检索/HTTP 全链路剖析与优化 |
 | [反反爬技术详解](docs/ANTIBOT_GUIDE.md) | 10 层反爬体系 · 5 级升级策略 · 探测技术 |
 | [记忆系统架构](docs/MEMORY_ARCHITECTURE.md) | 三层记忆 · CortexDB 技术 · 智能清理算法 |
+| [OKF 知识格式](docs/OKF_GUIDE.md) | OKF v0.1 规范 · Bundle 结构 · 6 大集成 |
 
 ---
 

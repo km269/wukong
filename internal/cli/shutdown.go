@@ -19,7 +19,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
+	"time"
 
 	"github.com/km269/wukong/internal/agent"
 	"github.com/km269/wukong/internal/util"
@@ -49,6 +51,21 @@ func shutdownBootstrap(
 	if state == nil {
 		return nil
 	}
+
+	// Hard watchdog: some .Close() / .Stop() calls in runShutdown
+	// ignore the context deadline (e.g. knowledge manager's gse
+	// dictionary, MCP subprocess drain, telemetry flush).  If any of
+	// them blocks, the process would hang forever.  Start a goroutine
+	// that force-exits after a hard deadline; it is a no-op when
+	// shutdown completes normally because os.Exit kills it.
+	go func() {
+		wdCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		<-wdCtx.Done()
+		util.Logger.Warn("shutdown watchdog: forcing exit")
+		os.Exit(0)
+	}()
+
 	// shutdownState is embedded in BootstrapState; its do() method is
 	// promoted, so state.do runs the teardown exactly once.
 	state.do(ctx, loop, state)
@@ -141,6 +158,18 @@ func runShutdown(
 	if state.CredentialRotator != nil {
 		state.CredentialRotator.Stop()
 		fmt.Println("  Credential rotator stopped")
+	}
+
+	// Extension manager — closes external MCP stdio subprocesses.
+	// Must run BEFORE CoreLoop close so tool calls in flight don't
+	// hit a closed transport.
+	if state.ExtMgr != nil {
+		if err := state.ExtMgr.Close(); err != nil {
+			util.Logger.Warn("extension manager close error",
+				slog.String("error", err.Error()))
+			errs = append(errs, err)
+		}
+		fmt.Println("  Extension manager stopped")
 	}
 
 	// 3. Knowledge manager.

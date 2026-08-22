@@ -304,9 +304,20 @@ func (t *Tuner) runEvaluation(ctx context.Context, run *TuneRun) {
 
 	checkpointTicker := time.NewTicker(5 * time.Second)
 	defer checkpointTicker.Stop()
+	// Bind checkpoint goroutine to the function's lifetime. Without
+	// this, the goroutine leaks on every Run() call: ticker.Stop()
+	// only stops ticker sends, it does not close ticker.C, so the
+	// for-range stays blocked forever.
+	checkpointDone := make(chan struct{})
+	defer close(checkpointDone)
 	go func() {
-		for range checkpointTicker.C {
-			saveCheckpoint()
+		for {
+			select {
+			case <-checkpointDone:
+				return
+			case <-checkpointTicker.C:
+				saveCheckpoint()
+			}
 		}
 	}()
 

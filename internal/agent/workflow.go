@@ -424,7 +424,7 @@ func (b *WorkflowBuilder) buildGraphAgent(
 	// Build a default graph using StateGraph builder
 	schema := graph.NewStateSchema().
 		AddField("last_response", graph.StateField{
-			Type:    reflect.TypeOf(""),
+			Type: reflect.TypeOf(""),
 			Reducer: graph.StateReducer(func(existing, update any) any {
 				return update
 			}),
@@ -591,8 +591,6 @@ func containsKeyword(s, keyword string) bool {
 	}
 	return false
 }
-
-
 
 // buildTeamAgent creates a Team-based agent (coordinator, swarm, or
 // Claude Code mode). Uses the TeamBuilder for construction.

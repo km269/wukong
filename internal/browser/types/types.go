@@ -77,5 +77,9 @@ type BrowserBackend interface {
 	// DownloadAsset downloads an asset using the browser's network stack.
 	// This is useful when the HTTP client cannot access (e.g., DNS issues) but the browser can.
 	DownloadAsset(ctx context.Context, assetURL string, referer string) (*AssetDownloadResult, error)
+	// Screenshot navigates to url and captures a real pixel screenshot as PNG
+	// written to outputPath. On success it returns the absolute image path;
+	// on failure it returns an error (non-nil error means no image was written).
+	Screenshot(ctx context.Context, url string, outputPath string) (string, error)
 	Close()
 }

@@ -19,6 +19,7 @@ import (
 	"compress/zlib"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -244,6 +245,18 @@ type EnhancedClonerOptions struct {
 	// from the live site (404, DNS failure, connection timeout).
 	// Default is true.
 	ArchiveFallback bool
+
+	// InsecureTLS disables TLS certificate verification for this clone.
+	// Strict verification is the default (false). Only enable this for
+	// intranet/.mil/.gov-style hosts whose certificates are not chainable
+	// to a public root CA — prefer TLSCACertPath whenever a CA bundle is
+	// obtainable so verification stays on.
+	InsecureTLS bool
+
+	// TLSCACertPath points to a PEM-encoded CA bundle (e.g. the DoD Root CA
+	// package) used to verify .mil/.gov certificates while keeping strict
+	// TLS validation enabled.
+	TLSCACertPath string
 }
 
 // DefaultSkipAssetExts returns the default set of file extensions that should
@@ -344,6 +357,14 @@ type EnhancedCloner struct {
 	// Rate limiter for polite crawling.
 	rateLimiter *RateLimiter
 
+	// Per-host rate limiters for asset downloads. Assets from different
+	// hosts can run in parallel (no cross-host throttling), while requests
+	// to the same host are smoothed to an interval matching CrawlDelay
+	// (or a conservative default). Replaces the previous uniform random
+	// delay that slowed every asset regardless of host.
+	assetRateLimiters map[string]*RateLimiter
+	assetRateMu       sync.Mutex
+
 	// Anti-bot detection and auto-escalation engine.
 	antibot *antibot.Engine
 
@@ -354,10 +375,8 @@ type EnhancedCloner struct {
 	discoveredAPIs  []types.DiscoveredAPI
 	discoveredAPIMu sync.Mutex
 
-	// preflightTurnstile is set true when the seed URL returns a Cloudflare
-	// Turnstile challenge page — a JS-interactive challenge that headless
-	// Chrome cannot pass. When true, the retry loop is skipped.
-	preflightTurnstile bool
+	// preflightDone guards preflightCloudflareCheck from running twice.
+	preflightDone bool
 
 	// cfClearance is the Cloudflare bypass token extracted from Chrome
 	// after a successful page render. When present, all subsequent
@@ -429,7 +448,7 @@ func NewEnhancedCloner(opts EnhancedClonerOptions) *EnhancedCloner {
 			"Chrome/124.0.0.0 Safari/537.36"
 	}
 
-	dl := DefaultAssetDownloader()
+	dl := NewAssetDownloader(opts.InsecureTLS, opts.TLSCACertPath)
 	dl.UserAgent = opts.UserAgent
 	if opts.MaxAssetBytes > 0 {
 		dl.MaxBytes = opts.MaxAssetBytes
@@ -452,6 +471,36 @@ func NewEnhancedCloner(opts EnhancedClonerOptions) *EnhancedCloner {
 		pageStack:        make([]pageJob, 0),
 		archiveFallback:  NewArchiveFallback(opts.ArchiveFallback),
 	}
+}
+
+// tlsConfigForClone builds the *tls.Config used by the cloner's HTTP paths.
+// TLS verification is ON by default. Set InsecureTLS to disable verification
+// (opt-out for intranet/.mil certs), or set TLSCACertPath to a PEM CA bundle
+// (e.g. the DoD Root CA package) so .mil/.gov certificates verify against it
+// while checks stay enabled.
+func (ec *EnhancedCloner) tlsConfigForClone() *tls.Config {
+	cfg := &tls.Config{
+		InsecureSkipVerify: ec.opts.InsecureTLS, //nolint:gosec // opt-in
+	}
+	if ec.opts.TLSCACertPath != "" && !ec.opts.InsecureTLS {
+		pemBytes, err := os.ReadFile(ec.opts.TLSCACertPath)
+		if err != nil {
+			logutil.Warn("failed to read TLS CA bundle",
+				slog.String("path", ec.opts.TLSCACertPath), slog.Any("error", err))
+			return cfg
+		}
+		pool, poolErr := x509.SystemCertPool()
+		if poolErr != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if pool.AppendCertsFromPEM(pemBytes) {
+			cfg.RootCAs = pool
+		} else {
+			logutil.Warn("no valid CA certs in bundle",
+				slog.String("path", ec.opts.TLSCACertPath))
+		}
+	}
+	return cfg
 }
 
 // Clone performs the website cloning operation.
@@ -581,9 +630,7 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 		ec.httpClient = &http.Client{
 			Timeout: 60 * time.Second,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: true,
-				},
+				TLSClientConfig:   ec.tlsConfigForClone(),
 				ForceAttemptHTTP2: true,
 				DialContext: (&net.Dialer{
 					Timeout:   30 * time.Second,
@@ -617,6 +664,9 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	} else {
 		ec.rateLimiter = NewRateLimiter(500 * time.Millisecond)
 	}
+
+	// Per-host asset rate limiters are created lazily on first use.
+	ec.assetRateLimiters = make(map[string]*RateLimiter)
 
 	// Resume from previous state.
 	if ec.opts.EnableResume && !ec.opts.Refresh {
@@ -652,6 +702,7 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 		ProfileDir:       ec.opts.ChromeProfile,
 		DisableDownloads: ec.opts.DisableDownloads,
 		Proxy:            proxy,
+		InsecureTLS:      ec.opts.InsecureTLS,
 	})
 	if err != nil {
 		logutil.Warn("failed to initialize browser backend", slog.String("error", err.Error()))
@@ -1303,13 +1354,10 @@ func (ec *EnhancedCloner) fetchPageViaHTTP(ctx context.Context, pageURL string, 
 		})
 	}
 
-	// Use a custom transport that allows insecure TLS connections,
-	// as some .mil sites use certificates not in the standard trust store.
+	// Strict TLS verification is the default, with optional DoD root CA
+	// support (TLSCACertPath) or explicit opt-out (InsecureTLS).
 	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			// Don't verify certs — some .mil sites use DoD certificates
-			InsecureSkipVerify: true,
-		},
+		TLSClientConfig:   ec.tlsConfigForClone(),
 		ForceAttemptHTTP2: true,
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
@@ -1609,6 +1657,48 @@ func (ec *EnhancedCloner) saveCollectedAsset(ctx context.Context, asset *types.C
 	return true
 }
 
+// waitAssetRateLimit enforces a per-host token-bucket limiter for asset
+// downloads. The bucket interval is derived from CrawlDelay (or robots.txt
+// crawl-delay) when available, otherwise a conservative default is used.
+// Different hosts get independent buckets so cross-host assets download in
+// parallel.
+func (ec *EnhancedCloner) waitAssetRateLimit(ctx context.Context, assetURL string) error {
+	u, err := url.Parse(assetURL)
+	host := ""
+	if err == nil && u.Host != "" {
+		host = u.Host
+	}
+	if host == "" {
+		// Unparseable URL: fall back to the old behaviour of a short
+		// random pause so we never fire requests in a tight loop.
+		delay := time.Duration(300+rand.Intn(700)) * time.Millisecond
+		select {
+		case <-time.After(delay):
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	ec.assetRateMu.Lock()
+	rl, ok := ec.assetRateLimiters[host]
+	if !ok {
+		var interval time.Duration
+		if ec.opts.CrawlDelay > 0 {
+			interval = ec.opts.CrawlDelay
+		} else if ec.robots != nil && ec.robots.CrawlDelayDuration() > 0 {
+			interval = ec.robots.CrawlDelayDuration()
+		} else {
+			interval = 100 * time.Millisecond // 10 assets/second per host.
+		}
+		rl = NewRateLimiter(interval)
+		ec.assetRateLimiters[host] = rl
+	}
+	ec.assetRateMu.Unlock()
+
+	return rl.Wait(ctx)
+}
+
 // processAsset downloads and saves a single asset, rewriting CSS references.
 // Uses HTTP client first, falls back to browser network stack on network errors.
 func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) error {
@@ -1621,14 +1711,11 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 	}
 	ec.assetMu.RUnlock()
 
-	// Add a small random delay before each asset download to reduce
-	// the chance of triggering rate limiting. Assume all domains
-	// may have anti-bot protection.
-	delay := time.Duration(300+rand.Intn(700)) * time.Millisecond
-	select {
-	case <-time.After(delay):
-	case <-ctx.Done():
-		return ctx.Err()
+	// Rate-limit per host instead of applying a uniform random delay to every
+	// asset. Assets on different hosts proceed in parallel; requests to the
+	// same host are smoothed to avoid tripping rate limiting / WAFs.
+	if err := ec.waitAssetRateLimit(ctx, assetURL); err != nil {
+		return err
 	}
 
 	if util.DebugEnabled {
@@ -1739,6 +1826,25 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 				}
 			}
 		}
+
+		// If both HTTP and browser fallback failed, try the Wayback Machine
+		// as a last resort. This is particularly effective for 404/PageNotFound
+		// assets and dead links that used to be live.
+		if ec.archiveFallback != nil && ec.archiveFallback.Enabled() {
+			archBody, archCT, archErr := ec.archiveFallback.FetchArchivedAsset(ctx, assetURL)
+			if archErr == nil && len(archBody) > 0 {
+				logutil.Info("asset Wayback fallback succeeded",
+					slog.String("url", assetURL), slog.Int("bytes", len(archBody)))
+				body = archBody
+				contentType = archCT
+				isCSS = isCSSContentType(contentType) ||
+					strings.HasSuffix(strings.ToLower(assetURL), ".css")
+			} else if util.DebugEnabled {
+				logutil.Debug("asset Wayback fallback failed",
+					slog.String("url", assetURL), slog.Any("error", archErr))
+			}
+		}
+
 		logutil.Warn("asset download failed", slog.String("url", assetURL), slog.Any("error", httpErr))
 		ec.front.markVisited(key)
 		return httpErr
@@ -2742,8 +2848,13 @@ func (ec *EnhancedCloner) shouldCrawlMore(depth int) bool {
 //
 // Uses its own HTTP client because ec.httpClient may not be initialised yet.
 func (ec *EnhancedCloner) preflightCloudflareCheck() {
-	if !ec.opts.AntibotEnabled || ec.opts.Stealth {
-		return // Already enabled or disabled.
+	if ec.preflightDone {
+		return
+	}
+	ec.preflightDone = true
+
+	if !ec.opts.AntibotEnabled {
+		return
 	}
 
 	client := httpclient.New(httpclient.Options{Timeout: 10 * time.Second})
@@ -2771,28 +2882,24 @@ func (ec *EnhancedCloner) preflightCloudflareCheck() {
 	}
 	defer resp.Body.Close()
 
-	if !antibot.HasCloudflareHeaders(resp.Header) {
-		return
-	}
-
-	// Cloudflare detected BEFORE Chrome starts — enable Stealth.
-	ec.opts.Stealth = true
-
-	// Read response body to check for Turnstile markers.
+	// Read response body to check for Turnstile markers. This check is
+	// performed regardless of the current Stealth flag: even when Stealth
+	// is already enabled (the default), a Turnstile challenge tells us the
+	// site needs interactive JS that headless Chrome cannot solve, so we
+	// disable wasted auto-escalation before the first page load.
 	body, rErr := io.ReadAll(io.LimitReader(resp.Body, 8192))
-	if rErr != nil || len(body) == 0 {
-		logutil.Warn("Cloudflare detected — stealth enabled pre-emptively", slog.String("host", ec.host))
-		return
-	}
-
-	if antibot.HasTurnstileMarkers(string(body)) {
+	if rErr == nil && len(body) > 0 && antibot.HasTurnstileMarkers(string(body)) {
 		ec.opts.AntibotAutoEscalate = false
-		ec.preflightTurnstile = true
-		logutil.Warn("Cloudflare Turnstile detected — headless Chrome cannot solve interactive challenges, stealth enabled, auto-retry disabled", slog.String("host", ec.host))
+		logutil.Warn("Cloudflare Turnstile detected — headless Chrome cannot solve interactive challenges, auto-retry disabled", slog.String("host", ec.host))
 		return
 	}
 
-	logutil.Warn("Cloudflare detected — stealth enabled pre-emptively", slog.String("host", ec.host))
+	// If Stealth is not yet enabled and Cloudflare headers are present,
+	// enable it pre-emptively so the first page load is stealth-protected.
+	if !ec.opts.Stealth && antibot.HasCloudflareHeaders(resp.Header) {
+		ec.opts.Stealth = true
+		logutil.Warn("Cloudflare detected — stealth enabled pre-emptively", slog.String("host", ec.host))
+	}
 }
 
 // runAntibotProbe performs multi-dimensional anti-bot probing and adjusts

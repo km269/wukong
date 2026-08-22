@@ -1,6 +1,7 @@
 package ard
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"sync"
@@ -14,8 +15,8 @@ type ResponseCache struct {
 }
 
 type cacheItem struct {
-	data      []byte
-	expireAt  time.Time
+	data     []byte
+	expireAt time.Time
 }
 
 func NewResponseCache(ttl time.Duration) *ResponseCache {
@@ -69,11 +70,28 @@ func (c *ResponseCache) Cleanup() {
 }
 
 func (c *ResponseCache) StartCleanup(interval time.Duration) {
+	c.StartCleanupCtx(context.Background(), interval)
+}
+
+// StartCleanupCtx is like StartCleanup but stops the cleanup
+// goroutine when ctx is cancelled, preventing goroutine leaks in
+// long-running servers. Returns a stop function for explicit
+// shutdown when the caller does not have a ctx to cancel.
+func (c *ResponseCache) StartCleanupCtx(ctx context.Context, interval time.Duration) (stop func()) {
+	stopCh := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		for range ticker.C {
-			c.Cleanup()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stopCh:
+				return
+			case <-ticker.C:
+				c.Cleanup()
+			}
 		}
 	}()
+	return func() { close(stopCh) }
 }

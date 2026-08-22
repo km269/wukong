@@ -19,6 +19,7 @@ import (
 	"github.com/km269/wukong/internal/provider"
 	"github.com/km269/wukong/internal/recall"
 	"github.com/km269/wukong/internal/security"
+	wksession "github.com/km269/wukong/internal/session"
 	"github.com/km269/wukong/internal/util"
 
 	"go.opentelemetry.io/otel"
@@ -63,7 +64,14 @@ type CoreLoop struct {
 	cortexStore    *cortex.CortexStore // optional: HNSW vector sync
 	memoryFlow     *cortex.MemoryFlowService
 	graphFlow      *cortex.GraphFlowService // optional: KG auto-extract
-	closeFn        func() error
+	// modelEventLog records the messages the model actually sees
+	// after enrichment, enforcing "model-visible means logged".
+	modelEventLog *wksession.ModelEventLog
+	// hooks is the waterfall registry for pre-step and
+	// pre-tool-execute interception (dsh-style agent/pre-step
+	// and tools/pre-execute extension points).
+	hooks   *HookRegistry
+	closeFn func() error
 
 	mu     sync.RWMutex
 	closed bool
@@ -87,7 +95,7 @@ type CoreLoopConfig struct {
 	// CortexStore is an optional CortexDB-backed store for
 	// HNSW vector indexing alongside FTS5 recall storage.
 	CortexStore   *cortex.CortexStore
-	RevisionModel RevisionModel
+	RevisionModel provider.RevisionModel
 	// MemoryFlowService provides CortexDB transcript recording
 	// and wake-up context generation.
 	MemoryFlowService *cortex.MemoryFlowService
@@ -115,6 +123,15 @@ type CoreLoopConfig struct {
 	// down their workers. This ensures all pending writes are flushed
 	// and WAL is checkpointed before the process exits.
 	DBPoolClose func() error
+	// ModelEventLog records model-visible events (the messages the
+	// model actually sees after enrichment). When nil, the
+	// "model-visible means logged" invariant is not enforced.
+	ModelEventLog *wksession.ModelEventLog
+	// Hooks is the waterfall registry for pre-step and
+	// pre-tool-execute interception. When nil, an empty registry is
+	// created and the loop runs without external pre-step/pre-tool
+	// hooks (built-in enrichment still runs).
+	Hooks *HookRegistry
 	// WorkingDir is the current working directory (for templates).
 	WorkingDir string
 	// SessionID and UserID are for template variable substitution.
@@ -124,6 +141,17 @@ type CoreLoopConfig struct {
 
 // NewCoreLoop creates a new agent core loop.
 func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
+	// Initialize the waterfall hook registry early so it can be
+	// threaded into createSingleAgent (for tool-callback wiring)
+	// and attached to the loop. When the caller provides a
+	// pre-populated registry (e.g. with external pre-step hooks),
+	// it is reused as-is.
+	hooks := cfg.Hooks
+	if hooks == nil {
+		hooks = NewHookRegistry()
+	}
+	cfg.Hooks = hooks
+
 	// Collect all tools
 	var allTools []tool.Tool
 	allTools = append(allTools, cfg.FunctionTools...)
@@ -147,6 +175,26 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 		todoTool := todotool.New()
 		allTools = append(allTools, todoTool)
 		util.Logger.Info("todo_write tool enabled (tRPC-native, session-persisted)")
+	}
+
+	// Apply a per-tool-call deadline so a single slow or hung tool
+	// (e.g. a web fetch to a heavy site) cannot consume the entire
+	// run budget and trigger a gateway-level context deadline. The
+	// newTimeoutTool wrapper (defined in recipe_advance.go) is a
+	// no-op when ToolCallTimeout <= 0.
+	if cfg.Config.Agent.ToolCallTimeout > 0 {
+		wrapped := 0
+		for i, t := range allTools {
+			if ct, ok := t.(tool.CallableTool); ok {
+				allTools[i] = newTimeoutTool(ct, cfg.Config.Agent.ToolCallTimeout)
+				wrapped++
+			}
+		}
+		if wrapped > 0 {
+			util.Logger.Info("agent: per-tool call timeout applied",
+				slog.Int("tools", wrapped),
+				slog.Duration("timeout", cfg.Config.Agent.ToolCallTimeout))
+		}
 	}
 
 	// Create the agent based on workflow mode
@@ -301,6 +349,8 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 		cortexStore:    cfg.CortexStore,
 		memoryFlow:     cfg.MemoryFlowService,
 		graphFlow:      cfg.GraphFlowService,
+		modelEventLog:  cfg.ModelEventLog,
+		hooks:          hooks,
 		closeFn: func() error {
 			var errs []error
 			// 1. Close runner first — stops active runs and
@@ -375,6 +425,90 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 	return loop, nil
 }
 
+// Hooks returns the waterfall hook registry. Callers use this to
+// register PreStepHook / PreToolExecuteHook extensions at runtime
+// (e.g. from MCP servers, plugins, or product embedding layers),
+// mirroring dsh's agent/pre-step and tools/pre-execute seams.
+func (l *CoreLoop) Hooks() *HookRegistry {
+	if l == nil {
+		return nil
+	}
+	return l.hooks
+}
+
+// ModelEventLog returns the model-visible event log, or nil when
+// disabled. Callers can replay a session's model-visible messages
+// via ReplayMessages / ReplayModelMessage.
+func (l *CoreLoop) ModelEventLog() *wksession.ModelEventLog {
+	if l == nil {
+		return nil
+	}
+	return l.modelEventLog
+}
+
+// preStepRejectTag is the event.Tag value that marks a pre-step
+// rejection in the event stream. Consumers (TUI/gateway) inspect
+// this to distinguish a policy rejection from a normal (possibly
+// empty) completion, and read the rejecting hook name from
+// Extensions["reject"].
+const preStepRejectTag = "pre_step_reject"
+
+// newPreStepRejectStream returns an event stream carrying a single
+// rejection marker and then closes. The marker event has
+// Tag=preStepRejectTag and the rejecting hook name in Extensions,
+// with no Response content and no Error — so it flows through
+// RunStream without triggering the error path or emitting model
+// content. This implements dsh's "a rejected claim closes a durable
+// turn that spent no step" semantic: the turn is normally closed
+// (nil error) but carries a visible rejection marker.
+func newPreStepRejectStream(reason string) <-chan *event.Event {
+	ch := make(chan *event.Event, 1)
+	reasonJSON, _ := json.Marshal(
+		map[string]string{"reason": reason},
+	)
+	ch <- &event.Event{
+		Author:    "system",
+		Tag:       preStepRejectTag,
+		Timestamp: time.Now(),
+		Extensions: map[string]json.RawMessage{
+			"reject": reasonJSON,
+		},
+	}
+	close(ch)
+	return ch
+}
+
+// IsPreStepReject reports whether an event is a pre-step rejection
+// marker emitted by newPreStepRejectStream. Consumers use this to
+// surface "blocked by policy" to the user instead of treating the
+// empty stream as a silent no-op.
+func IsPreStepReject(evt *event.Event) bool {
+	return evt != nil && evt.Tag == preStepRejectTag
+}
+
+// PreStepRejectReason extracts the rejecting hook name from a
+// pre-step rejection marker event. Returns "" if the event is not a
+// rejection marker or carries no reason.
+func PreStepRejectReason(evt *event.Event) string {
+	if evt == nil || evt.Tag != preStepRejectTag {
+		return ""
+	}
+	if evt.Extensions == nil {
+		return ""
+	}
+	raw, ok := evt.Extensions["reject"]
+	if !ok {
+		return ""
+	}
+	var m struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return ""
+	}
+	return m.Reason
+}
+
 // Run executes a single user message and returns the event stream.
 // The returned channel emits events including tool calls, streaming
 // content, and final completion.
@@ -408,6 +542,24 @@ func (l *CoreLoop) Run(
 		SessionID: sessionID,
 	})
 
+	// Record the turn boundary and the ORIGINAL user message before
+	// any enrichment. This enforces the "model-visible means logged"
+	// invariant at the turn start: the raw input is durable. Logging
+	// is best-effort — a log failure must never block the model.
+	if l.modelEventLog != nil {
+		origContent := extractMessageContent(message)
+		if err := l.modelEventLog.Append(ctx, sessionID, userID,
+			wksession.EventTurnStart, "", origContent); err != nil {
+			util.Logger.Warn("model event log: turn_start failed",
+				slog.String("error", err.Error()))
+		}
+		if err := l.modelEventLog.Append(ctx, sessionID, userID,
+			wksession.EventUserMessage, "", origContent); err != nil {
+			util.Logger.Warn("model event log: user_message failed",
+				slog.String("error", err.Error()))
+		}
+	}
+
 	// Store user message for recall.
 	if l.recallStore != nil {
 		content := extractMessageContent(message)
@@ -418,7 +570,7 @@ func (l *CoreLoop) Run(
 			Content:   content,
 		}
 		if l.cortexStore != nil {
-			if err := l.cortexStore.StoreMessage(msg); err != nil {
+			if err := l.cortexStore.StoreMessage(ctx, msg); err != nil {
 				util.Logger.Warn("cortex: store user message failed",
 					slog.String("error", err.Error()))
 			}
@@ -474,6 +626,15 @@ func (l *CoreLoop) Run(
 				"sess", sessionID[:min(8, len(sessionID))],
 				"chars", len(wakeCtx),
 				"preview", preview)
+			// Record the wake-up context that will be injected into
+			// the model-visible message (context_inject event).
+			if l.modelEventLog != nil {
+				if err := l.modelEventLog.Append(ctx, sessionID, userID,
+					wksession.EventContextInject, "wakeup", wakeCtx); err != nil {
+					util.Logger.Warn("model event log: context_inject wakeup failed",
+						slog.String("error", err.Error()))
+				}
+			}
 			if message.Role == model.RoleUser {
 				message = model.Message{
 					Role: "user",
@@ -498,7 +659,7 @@ func (l *CoreLoop) Run(
 		var searchErr error
 
 		if l.cortexStore != nil {
-			searchResults, searchErr = l.cortexStore.Search(content, userID, 5)
+			searchResults, searchErr = l.cortexStore.Search(ctx, content, userID, 5)
 		} else {
 			searchResults, searchErr = l.recallStore.Search(content, userID, 5)
 		}
@@ -517,6 +678,17 @@ func (l *CoreLoop) Run(
 			for i, result := range searchResults {
 				if result.Preview != "" {
 					fmt.Fprintf(&recallCtx, "%d. %s\n", i+1, result.Preview)
+				}
+			}
+
+			// Record the recall context that will be injected
+			// (context_inject event).
+			if l.modelEventLog != nil {
+				if err := l.modelEventLog.Append(ctx, sessionID, userID,
+					wksession.EventContextInject, "recall",
+					recallCtx.String()); err != nil {
+					util.Logger.Warn("model event log: context_inject recall failed",
+						slog.String("error", err.Error()))
 				}
 			}
 
@@ -629,6 +801,16 @@ func (l *CoreLoop) Run(
 					"total", len(memories),
 					"deduped", deduped,
 					"memctx_chars", memCtx.Len())
+				// Record the persistent-memory context that will be
+				// injected (context_inject event).
+				if l.modelEventLog != nil {
+					if err := l.modelEventLog.Append(ctx, sessionID, userID,
+						wksession.EventContextInject, "persistent",
+						memCtx.String()); err != nil {
+						util.Logger.Warn("model event log: context_inject persistent failed",
+							slog.String("error", err.Error()))
+					}
+				}
 				// Prepend persistent memories to the user message.
 				if message.Role == model.RoleUser {
 					origContent := extractMessageContent(message)
@@ -689,12 +871,70 @@ func (l *CoreLoop) Run(
 		"context_types", contextTags,
 		"total_chars", len(finalContent))
 
+	// Pre-step hooks: extensible waterfall over the enriched message.
+	// Runs AFTER built-in enrichment (wakeup/recall/persistent) and
+	// BEFORE runner.Run. A hook may rewrite the message the model is
+	// about to see, or reject the turn. A rejected turn closes with
+	// no step (no model request), matching dsh's "a rejected claim
+	// closes a durable turn that spent no step" — we still record a
+	// turn_end so the attempt is durable.
+	if l.hooks != nil && l.hooks.HasPreStepHooks() {
+		rewritten, reject, reason, herr := l.hooks.RunPreStep(
+			ctx, sessionID, userID, message,
+		)
+		if herr != nil {
+			span.SetStatus(codes.Error, herr.Error())
+			span.RecordError(herr)
+			return nil, fmt.Errorf("pre-step hooks: %w", herr)
+		}
+		if reject {
+			if l.modelEventLog != nil {
+				_ = l.modelEventLog.Append(ctx, sessionID, userID,
+					wksession.EventTurnEnd,
+					"pre_step_reject:"+reason, "")
+			}
+			// dsh semantics: a rejected claim closes a durable
+			// turn that spent no step. Return a reject-marked
+			// EMPTY event stream (one synthetic marker event,
+			// then closed) with nil error — so callers can
+			// distinguish "blocked by policy" from "runner
+			// failed". The marker carries Tag=pre_step_reject
+			// and the rejecting hook name in Extensions; consumers
+			// (TUI/gateway) inspect evt.Tag to surface it. Run
+			// already recorded turn_end above, so RunStream skips
+			// its own turn_end when it sees the marker.
+			span.SetAttributes(attribute.String(
+				"pre_step_reject", reason))
+			return newPreStepRejectStream(reason), nil
+		}
+		message = rewritten
+	}
+
+	// Record the FINAL model-visible message — the authoritative
+	// witness for "model-visible means logged". This is exactly
+	// what the model is about to see (post-enrichment, post-hooks).
+	if l.modelEventLog != nil {
+		finalVisible := extractMessageContent(message)
+		if err := l.modelEventLog.Append(ctx, sessionID, userID,
+			wksession.EventModelMessage, "", finalVisible); err != nil {
+			util.Logger.Warn("model event log: model_message failed",
+				slog.String("error", err.Error()))
+		}
+	}
+
 	runOpts := []agent.RunOption{}
 	if l.cfg.Agent.JSONRepairEnabled {
 		runOpts = append(runOpts,
 			agent.WithToolCallArgumentsJSONRepairEnabled(true),
 		)
 	}
+
+	// Inject session/user identity into the ctx so the framework's
+	// BeforeTool callback can attribute approval requests to this
+	// turn. The async Approval gate reads this via
+	// security.ApprovalContextFrom.
+	ctx = security.WithApprovalContext(ctx, sessionID, userID)
+
 	events, err := l.runner.Run(ctx, userID, sessionID, message, runOpts...)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
@@ -742,6 +982,11 @@ func (l *CoreLoop) RunStream(
 
 	var responseText string
 	var textBuilder strings.Builder
+	// rejected tracks whether this turn was blocked by a pre-step
+	// hook before any model step ran. Run already recorded turn_end
+	// for such turns (source=pre_step_reject), so RunStream must
+	// skip its own turn_end recording to avoid a duplicate.
+	rejected := false
 	var allEvents []event.Event
 	toolCallCount := 0
 	var eventCount int
@@ -749,6 +994,25 @@ func (l *CoreLoop) RunStream(
 	for evt := range events {
 		eventCount++
 		allEvents = append(allEvents, *evt)
+
+		// Detect a pre-step rejection marker early and short-circuit:
+		// the marker is a synthetic control event with no embedded
+		// *model.Response, so the normal evt.Error / evt.Response
+		// processing below would dereference a nil pointer. We still
+		// deliver it to onEvent (so TUI/gateway can surface the
+		// rejection) and flag the turn so the normal turn_end
+		// recording is skipped (Run already recorded it).
+		if IsPreStepReject(evt) {
+			rejected = true
+			if onEvent != nil {
+				if err := onEvent(evt); err != nil {
+					span.SetStatus(codes.Error, err.Error())
+					span.RecordError(err)
+					return textBuilder.String(), err
+				}
+			}
+			continue
+		}
 
 		// Notify callback
 		if onEvent != nil {
@@ -823,7 +1087,7 @@ func (l *CoreLoop) RunStream(
 			Content:   responseText,
 		}
 		if l.cortexStore != nil {
-			if err := l.cortexStore.StoreMessage(msg); err != nil {
+			if err := l.cortexStore.StoreMessage(ctx, msg); err != nil {
 				util.Logger.Warn("cortex: store assistant message failed",
 					slog.String("error", err.Error()))
 			}
@@ -859,7 +1123,7 @@ func (l *CoreLoop) RunStream(
 					Content:   toolContent,
 				}
 				if l.cortexStore != nil {
-					if err := l.cortexStore.StoreMessage(toolMsg); err != nil {
+					if err := l.cortexStore.StoreMessage(ctx, toolMsg); err != nil {
 						util.Logger.Debug(
 							"cortex: store tool call failed",
 							slog.String("error", err.Error()))
@@ -882,7 +1146,7 @@ func (l *CoreLoop) RunStream(
 					Content:   choice.Message.Content,
 				}
 				if l.cortexStore != nil {
-					if err := l.cortexStore.StoreMessage(toolResp); err != nil {
+					if err := l.cortexStore.StoreMessage(ctx, toolResp); err != nil {
 						util.Logger.Debug(
 							"cortex: store tool response failed",
 							slog.String("error", err.Error()))
@@ -899,13 +1163,17 @@ func (l *CoreLoop) RunStream(
 	}
 
 	// [Fix 2] Record assistant response in MemoryFlow transcript.
+	// Use a bounded timeout so a slow embedder/indexer (e.g. first-time
+	// gse dictionary load) doesn't block RunStream's return for too long.
 	if l.memoryFlow != nil && responseText != "" {
+		ingestCtx, ingestCancel := context.WithTimeout(ctx, 15*time.Second)
 		if err := l.memoryFlow.IngestTurn(
-			ctx, sessionID, userID, "assistant", responseText,
+			ingestCtx, sessionID, userID, "assistant", responseText,
 		); err != nil {
 			util.Logger.Warn("memoryflow: ingest assistant turn failed",
 				slog.String("error", err.Error()))
 		}
+		ingestCancel()
 	}
 
 	// [Fix 3] Bridge MemoryFlow → tRPC Memory: promote extracted
@@ -1036,6 +1304,19 @@ func (l *CoreLoop) RunStream(
 	// Trigger context optimization after run with real events
 	l.contextMgr.AfterRun(ctx, responseText, allEvents)
 
+	// Record the turn_end event — the assistant response the model
+	// produced. This closes the durable turn in the model-visible
+	// event log. Best-effort: a logging failure is not fatal.
+	// Skipped for pre-step rejections: Run already recorded turn_end
+	// (source=pre_step_reject) when it emitted the marker stream.
+	if l.modelEventLog != nil && !rejected {
+		if err := l.modelEventLog.Append(ctx, sessionID, userID,
+			wksession.EventTurnEnd, "assistant", responseText); err != nil {
+			util.Logger.Warn("model event log: turn_end failed",
+				slog.String("error", err.Error()))
+		}
+	}
+
 	return responseText, nil
 }
 
@@ -1050,6 +1331,24 @@ func (l *CoreLoop) RunUserMessage(
 ) (string, error) {
 	msg := model.NewUserMessage(content)
 	return l.RunStream(ctx, userID, sessionID, msg, nil)
+}
+
+// waitWithTimeout waits for a WaitGroup up to the given timeout.
+// If the timeout fires, it logs a warning and returns, allowing the
+// caller to proceed with shutdown instead of hanging forever.
+func waitWithTimeout(wg *sync.WaitGroup, timeout time.Duration, name string) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		util.Logger.Warn("shutdown wait timed out, proceeding anyway",
+			slog.String("wait_group", name),
+			slog.Duration("timeout", timeout))
+	}
 }
 
 // Close shuts down the agent loop and releases resources.
@@ -1069,15 +1368,15 @@ func (l *CoreLoop) Close() error {
 	// Without this wait, those writes could hit a closed DB pool inside
 	// closeFn (step 6), causing "database is closed" errors or lost data.
 	//
-	// Note: this runs while holding l.mu (write-locked). A concurrent
-	// RunStream does not take l.mu — it only Add/Done's runWg — so there
-	// is no deadlock; the defer in RunStream will decrement runWg.
-	l.runWg.Wait()
+	// A timeout is necessary because an in-flight RunStream may be
+	// blocked on an unresponsive LLM HTTP call that ignores context
+	// cancellation. Without a deadline, /exit would hang indefinitely.
+	waitWithTimeout(&l.runWg, 5*time.Second, "runWg")
 
 	// Wait for background goroutines (e.g. PromoteFacts) to finish
 	// before proceeding with shutdown. This prevents database
 	// access after connection close.
-	l.bgWg.Wait()
+	waitWithTimeout(&l.bgWg, 5*time.Second, "bgWg")
 
 	// Create a span to track the shutdown process with a timeout
 	// to avoid hanging on telemetry export issues.
@@ -1327,7 +1626,7 @@ func createSingleAgent(
 			llmagent.WithAgentCallbacks(agentCallbacks),
 		)
 	}
-	toolCallbacks := buildToolCallbacks(cfg.SecurityGuard)
+	toolCallbacks := buildToolCallbacks(cfg.SecurityGuard, cfg.Hooks)
 	if toolCallbacks != nil {
 		agentOpts = append(agentOpts,
 			llmagent.WithToolCallbacks(toolCallbacks),
@@ -1517,7 +1816,13 @@ func buildAgentCallbacks(cfg *config.WukongConfig) *agent.Callbacks {
 // buildToolCallbacks creates tool-level callbacks for security and
 // observability. The security guard checks are performed here
 // as a framework-level concern rather than in business logic.
-func buildToolCallbacks(guard *security.Guard) *tool.Callbacks {
+// The hooks registry adds an extensible pre-tool-execute layer
+// (observe/reject) on top of the built-in security gate; security
+// runs first as a hard gate, then registered hooks run in order and
+// the first to reject blocks the call.
+func buildToolCallbacks(
+	guard *security.Guard, hooks *HookRegistry,
+) *tool.Callbacks {
 	callbacks := tool.NewCallbacks()
 
 	// BeforeTool: security validation before tool execution
@@ -1525,52 +1830,97 @@ func buildToolCallbacks(guard *security.Guard) *tool.Callbacks {
 		func(ctx context.Context, args *tool.BeforeToolArgs) (
 			*tool.BeforeToolResult, error,
 		) {
-			if guard == nil {
-				return nil, nil
-			}
+			if guard != nil {
+				// Check tool permission (denylist, allowlist, permission mode)
+				if err := guard.CheckToolPermission(
+					args.ToolName, nil,
+				); err != nil {
+					return nil, fmt.Errorf(
+						"tool %q blocked by security: %w",
+						args.ToolName, err,
+					)
+				}
 
-			// Check tool permission (denylist, allowlist, permission mode)
-			if err := guard.CheckToolPermission(
-				args.ToolName, nil,
-			); err != nil {
-				return nil, fmt.Errorf(
-					"tool %q blocked by security: %w",
-					args.ToolName, err,
-				)
-			}
-
-			// Check if this operation needs user approval
-			if guard.NeedsApproval(args.ToolName, args.Arguments) {
-				return nil, fmt.Errorf(
-					"tool %q requires user approval in %s mode",
-					args.ToolName, guard.GetPermissionMode(),
-				)
-			}
-
-			// For command-execution tools, validate the command
-			if isCommandTool(args.ToolName) && len(args.Arguments) > 0 {
-				cmd := extractCommandFromArgs(args.Arguments)
-				if cmd != "" {
-					if err := guard.ValidateCommand(cmd); err != nil {
+				// Check if this operation needs user approval. When an
+				// approval broker is wired on the guard, route through
+				// the async human-in-the-loop Approval protocol; when no
+				// broker is set, RequestApproval returns an immediate
+				// denied response (legacy synchronous-deny behavior, so
+				// safety never regresses when the feature is off).
+				if guard.NeedsApproval(args.ToolName, args.Arguments) {
+					sessionID, userID := security.ApprovalContextFrom(ctx)
+					resp, aerr := guard.RequestApproval(
+						ctx, sessionID, userID,
+						args.ToolName, args.Arguments,
+					)
+					if aerr != nil {
 						return nil, fmt.Errorf(
-							"command blocked by security: %w", err,
+							"approval for %q failed: %w",
+							args.ToolName, aerr,
 						)
+					}
+					if resp == nil || !resp.Decision.IsAllowed() {
+						decision := security.ApprovalDenied
+						reason := "no approval broker configured"
+						if resp != nil {
+							decision = resp.Decision
+							reason = resp.Reason
+						}
+						return nil, fmt.Errorf(
+							"tool %q blocked by approval: %s (%s)",
+							args.ToolName, decision, reason,
+						)
+					}
+					// approved → fall through to command/file checks.
+				}
+
+				// For command-execution tools, validate the command
+				if isCommandTool(args.ToolName) && len(args.Arguments) > 0 {
+					cmd := extractCommandFromArgs(args.Arguments)
+					if cmd != "" {
+						if err := guard.ValidateCommand(cmd); err != nil {
+							return nil, fmt.Errorf(
+								"command blocked by security: %w", err,
+							)
+						}
+					}
+				}
+
+				// For file-access tools, check against .wukongignore
+				if security.IsFileAccessTool(args.ToolName) &&
+					len(args.Arguments) > 0 {
+					paths := security.ExtractFilePathFromArgs(
+						args.Arguments)
+					for _, p := range paths {
+						if err := guard.CheckFilePath(p); err != nil {
+							return nil, fmt.Errorf(
+								"file access blocked by "+
+									".wukongignore: %w", err,
+							)
+						}
 					}
 				}
 			}
 
-			// For file-access tools, check against .wukongignore
-			if security.IsFileAccessTool(args.ToolName) &&
-				len(args.Arguments) > 0 {
-				paths := security.ExtractFilePathFromArgs(
-					args.Arguments)
-				for _, p := range paths {
-					if err := guard.CheckFilePath(p); err != nil {
-						return nil, fmt.Errorf(
-							"file access blocked by "+
-								".wukongignore: %w", err,
-						)
-					}
+			// Pre-tool-execute hooks: extensible observe/reject
+			// layer. Runs after the security hard gate. The first
+			// hook to return reject=true blocks the call with its
+			// reason. This mirrors dsh's tools/pre-execute seam.
+			if hooks != nil && hooks.HasPreToolHooks() {
+				reject, reason, err := hooks.RunPreToolExecute(
+					ctx, args.ToolName, args.Arguments,
+				)
+				if err != nil {
+					return nil, fmt.Errorf(
+						"pre-tool hook error for %q: %w",
+						args.ToolName, err,
+					)
+				}
+				if reject {
+					return nil, fmt.Errorf(
+						"tool %q blocked by pre-tool hook: %s",
+						args.ToolName, reason,
+					)
 				}
 			}
 

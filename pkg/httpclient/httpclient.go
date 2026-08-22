@@ -3,15 +3,18 @@ package httpclient
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/km269/wukong/pkg/logutil"
+	utls "github.com/refraction-networking/utls"
 )
 
 // Public DNS servers used as fallback when the system resolver fails.
@@ -81,6 +84,14 @@ type Options struct {
 	RateLimitPerSecond  float64
 	RateLimitBurst      int
 	InsecureSkipVerify  bool // Skip TLS certificate verification (for .mil/.gov sites)
+	// RootCAsPath points to a PEM-encoded CA bundle (e.g. a DoD root CA
+	// package) used instead of the system roots. Enables strict verification
+	// against .mil/.gov certificates without disabling checks entirely.
+	RootCAsPath string
+	// TLSFingerprint emulates a real Chrome TLS ClientHello using utls.
+	// This is useful for sites that fingerprint TLS (e.g. Cloudflare) to
+	// block non-browser HTTP clients.
+	TLSFingerprint bool
 }
 
 func DefaultOptions() Options {
@@ -128,10 +139,30 @@ func New(opts Options) *Client {
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 
-	if opts.InsecureSkipVerify {
-		transport.TLSClientConfig = &tls.Config{
-			InsecureSkipVerify: true,
+	if opts.InsecureSkipVerify || opts.RootCAsPath != "" {
+		tlsCfg := &tls.Config{}
+		if opts.InsecureSkipVerify {
+			tlsCfg.InsecureSkipVerify = true //nolint:gosec // opt-in via Options.InsecureSkipVerify
 		}
+		if opts.RootCAsPath != "" {
+			pemBytes, rerr := os.ReadFile(opts.RootCAsPath)
+			if rerr != nil {
+				logutil.Warn("[httpclient] failed to read root CA bundle",
+					slog.String("path", opts.RootCAsPath), slog.Any("error", rerr))
+			} else {
+				pool, perr := x509.SystemCertPool()
+				if perr != nil || pool == nil {
+					pool = x509.NewCertPool()
+				}
+				if pool.AppendCertsFromPEM(pemBytes) {
+					tlsCfg.RootCAs = pool
+				} else {
+					logutil.Warn("[httpclient] no valid CA certs in bundle",
+						slog.String("path", opts.RootCAsPath))
+				}
+			}
+		}
+		transport.TLSClientConfig = tlsCfg
 	}
 
 	// buildDialer constructs a net.Dialer with standard settings.
@@ -231,6 +262,38 @@ func New(opts Options) *Client {
 		transport.DialContext = dnsCache.WrapDialContext(dialWithDNSFallback)
 	} else {
 		transport.DialContext = dialWithDNSFallback
+	}
+
+	// TLS fingerprinting (utls): emulate a real Chrome ClientHello so that
+	// TLS-fingerprinting WAFs (e.g. Cloudflare) accept us as a browser.
+	// Only applied on the direct (non-proxy) path — proxied HTTP already
+	// has its own utls handling in internal/browser/proxy_pool.go, and
+	// mutually setting DialTLSContext + Proxy risks breaking CONNECT.
+	if opts.TLSFingerprint && opts.ProxyURL == "" && len(opts.ProxyPool) == 0 {
+		transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, err := dialWithDNSFallback(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+
+			host, _, splitErr := net.SplitHostPort(addr)
+			if splitErr != nil {
+				host = addr
+			}
+
+			// Insecure mode is opt-in via Options.InsecureSkipVerify.
+			uconn := utls.UClient(conn, &utls.Config{
+				ServerName:         host,
+				InsecureSkipVerify: opts.InsecureSkipVerify, //nolint:gosec
+			}, utls.HelloChrome_Auto)
+			if err := uconn.HandshakeContext(ctx); err != nil {
+				conn.Close()
+				return nil, err
+			}
+			return uconn, nil
+		}
+		// DialTLSContext takes over TLS setup, so drop the standard config.
+		transport.TLSClientConfig = nil
 	}
 
 	var limiter *RateLimiter

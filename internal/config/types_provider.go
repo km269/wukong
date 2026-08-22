@@ -31,6 +31,13 @@ type ProviderConfig struct {
 	Model    string `mapstructure:"model"`
 	AgentURL string `mapstructure:"agent_url"`
 	MCPPort  string `mapstructure:"mcp_port"`
+	// ContextWindow is the model's maximum context token count
+	// (e.g. 32768 for qwen3-27b, 128000 for gpt-4o). When set,
+	// EffectiveContextWindow() returns this value; otherwise it
+	// falls back to a per-type default. Used by ContextRevisionEngine
+	// to clamp prompts before sending — prevents 400 Bad Request
+	// when revision.max_context_tokens exceeds the actual model limit.
+	ContextWindow int `mapstructure:"context_window"`
 }
 
 // ExtensionConfig defines an MCP extension (built-in or external).

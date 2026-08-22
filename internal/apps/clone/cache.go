@@ -228,7 +228,9 @@ func (c *CloneCache) GetManifest() *CacheManifest {
 
 // GetChangedURLs returns URLs that have changed since last sync.
 // Uses concurrent HEAD requests for better performance with large URL lists.
-func (c *CloneCache) GetChangedURLs(urls []string) ([]string, error) {
+// The ctx is propagated to the rate limiter so graceful shutdown can
+// interrupt pending waits.
+func (c *CloneCache) GetChangedURLs(ctx context.Context, urls []string) ([]string, error) {
 	results := make(chan string, len(urls))
 	errs := make(chan error, len(urls))
 	var wg sync.WaitGroup
@@ -243,7 +245,7 @@ func (c *CloneCache) GetChangedURLs(urls []string) ([]string, error) {
 			defer func() { <-sem }()
 
 			if c.rateLimiter != nil {
-				if err := c.rateLimiter.Wait(context.Background()); err != nil {
+				if err := c.rateLimiter.Wait(ctx); err != nil {
 					errs <- err
 					return
 				}

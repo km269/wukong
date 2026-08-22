@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -115,7 +116,9 @@ func apiKeyMiddleware(expectedKey string) func(http.Handler) http.Handler {
 			if apiKey == "" {
 				apiKey = r.URL.Query().Get("api_key")
 			}
-			if apiKey != expectedKey {
+			// Constant-time comparison prevents timing side-channel
+			// attacks that could leak the expected key byte-by-byte.
+			if subtle.ConstantTimeCompare([]byte(apiKey), []byte(expectedKey)) != 1 {
 				http.Error(w, `{"error":"unauthorized","message":"invalid API key"}`, http.StatusUnauthorized)
 				return
 			}
@@ -259,6 +262,15 @@ func ApplySecurity(h http.Handler, secCfg ServerSecurityConfig) (http.Handler, *
 	h = AuthMiddleware(secCfg.Auth)(h)
 
 	return h, tlsCfg
+}
+
+// ApplySecurity is a method form of the package-level ApplySecurity
+// function, allowing ServerSecurityConfig to satisfy the
+// extension.securityApplier interface without creating a cyclic
+// import. The second return is tls config as interface{} to match
+// the opaque signature expected by extension.NewMCPServerWithSecurity.
+func (s ServerSecurityConfig) ApplySecurity(h http.Handler) (http.Handler, interface{}) {
+	return ApplySecurity(h, s)
 }
 
 func BuildHTTPServer(addr string, handler http.Handler, secCfg ServerSecurityConfig) (*http.Server, error) {

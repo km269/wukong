@@ -27,7 +27,7 @@ import (
 type MessageHandler func(ctx context.Context, msg *GatewayMessage)
 
 // Channel is the standard interface for all messaging platform
-// adapters. Each platform (Feishu, Slack, etc.) registers its own
+// adapters. Each platform (Feishu, etc.) registers its own
 // implementation with the GatewayServer.
 //
 // Unlike the previous HTTP-webhook design, this interface is

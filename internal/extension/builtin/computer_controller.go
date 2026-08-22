@@ -15,6 +15,7 @@ import (
 	"github.com/km269/wukong/internal/apps/clone"
 	"github.com/km269/wukong/internal/browser"
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/security"
 
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
@@ -195,12 +196,32 @@ type WebFetchRsp struct {
 func (ts *ComputerControllerToolSet) webFetch(
 	ctx context.Context, req WebFetchReq,
 ) (WebFetchRsp, error) {
+	// SSRF protection: reject URLs that resolve to loopback,
+	// link-local (incl. cloud metadata 169.254.169.254), or private
+	// addresses. Prevents a prompt-injected agent from reading cloud
+	// IAM credentials or scanning the internal network.
+	if err := security.CheckURL(req.URL); err != nil {
+		return WebFetchRsp{
+			Success: false,
+			Error:   err.Error(),
+		}, nil
+	}
+
 	timeout := 30 * time.Second
 	if req.Timeout > 0 {
 		timeout = time.Duration(req.Timeout) * time.Second
 	}
 
-	client := &http.Client{Timeout: timeout}
+	// Disable redirects so an attacker cannot bypass CheckURL by
+	// redirecting to an internal address. The user-agent already
+	// records the first response; redirects are rare for the
+	// scraping use case.
+	client := &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	httpReq, err := http.NewRequestWithContext(
 		ctx, http.MethodGet, req.URL, nil,
 	)
@@ -575,7 +596,7 @@ func (ts *ComputerControllerToolSet) browserExtract(
 // BrowserScreenshotReq is the input for capturing a screenshot.
 type BrowserScreenshotReq struct {
 	URL        string `json:"url" jsonschema:"description=URL to capture screenshot of"`
-	OutputPath string `json:"output_path,omitempty" jsonschema:"description=Optional output file path for the screenshot HTML"`
+	OutputPath string `json:"output_path,omitempty" jsonschema:"description=Optional output file path for the screenshot PNG"`
 }
 
 // BrowserScreenshotRsp is the output for capturing a screenshot.
@@ -607,7 +628,7 @@ func (ts *ComputerControllerToolSet) browserScreenshot(
 		}
 		outputPath = filepath.Join(
 			cacheDir,
-			fmt.Sprintf("screenshot_%s_%d.html",
+			fmt.Sprintf("screenshot_%s_%d.png",
 				safeName, time.Now().Unix()),
 		)
 	}

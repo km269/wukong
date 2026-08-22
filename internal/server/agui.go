@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/km269/wukong/internal/cors"
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/runner"
@@ -132,7 +133,7 @@ func (s *AGUIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 // handleChat processes an incoming chat request and streams events via SSE.
 func (s *AGUIServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
-		s.corsHeaders(w)
+		s.corsHeaders(w, r)
 		return
 	}
 
@@ -171,7 +172,7 @@ func (s *AGUIServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	s.corsHeaders(w)
+	s.corsHeaders(w, r)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -270,10 +271,7 @@ func (s *AGUIServer) writeSSE(
 	flusher.Flush()
 }
 
-// corsHeaders sets CORS headers for browser access.
-func (s *AGUIServer) corsHeaders(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers",
-		"Content-Type, Authorization")
+// corsHeaders sets CORS headers that only allow localhost origins.
+func (s *AGUIServer) corsHeaders(w http.ResponseWriter, r *http.Request) {
+	cors.SetLocalhostOnly(w, r)
 }

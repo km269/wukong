@@ -38,6 +38,10 @@ type Options struct {
 	ProfileDir       string
 	DisableDownloads bool
 	Proxy            string // Proxy URL (http://user:pass@host:port or socks5://...)
+	// InsecureTLS disables Chrome's certificate verification. Strict
+	// verification is the default; enable only for intranet/.mil hosts
+	// whose certs chain to a non-public root CA.
+	InsecureTLS bool
 }
 
 type Pool struct {
@@ -115,8 +119,6 @@ func New(opts Options) *Pool {
 		chromedp.Flag("safebrowsing-disable-auto-update", true),
 		chromedp.Flag("safebrowsing-disable-download-protection", true),
 		chromedp.Flag("safebrowsing-disable-extension-blacklist", true),
-		// Ignore certificate errors — many .mil/.gov sites use
-		// DoD certificates not in the standard trust store.
 		chromedp.Flag("ignore-certificate-errors", true),
 		chromedp.Flag("allow-insecure-localhost", true),
 		chromedp.Flag("ignore-ssl-errors", true),
@@ -128,6 +130,16 @@ func New(opts Options) *Pool {
 		chromedp.Flag("allow-running-insecure-content", true),
 		chromedp.Flag("reduce-security-for-testing", false),
 	)
+
+	// Ignore certificate errors only when InsecureTLS is enabled — .mil/.gov
+	// sites use DoD certificates not in the standard trust store. Otherwise
+	// Chrome performs strict (default) certificate verification.
+	if opts.InsecureTLS {
+		allocOpts = append(allocOpts,
+			chromedp.Flag("ignore-certificate-errors", true),
+			chromedp.Flag("ignore-ssl-errors", true),
+		)
+	}
 
 	// Use new headless mode (Chrome 112+) which behaves much closer
 	// to a real browser and is less likely to trigger detection.
@@ -211,6 +223,90 @@ func (p *Pool) RotateUA() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.currentUA = p.escalator.RotateUserAgent()
+}
+
+// Screenshot navigates to url in a fresh tab and captures a real pixel
+// screenshot as PNG, written to outputPath. It injects the same headers,
+// stealth and settle-wait as Render so the captured page matches what a
+// real browsing session would present.
+func (p *Pool) Screenshot(
+	ctx context.Context, url string, outputPath string,
+) (string, error) {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return "", fmt.Errorf("pool closed")
+	}
+	p.mu.Unlock()
+
+	tabCtx, tabCancel := chromedp.NewContext(p.allocCtx)
+	defer tabCancel()
+
+	tabCtx, timeoutCancel := context.WithTimeout(tabCtx, p.opts.RenderTimeout)
+	defer timeoutCancel()
+
+	// Propagate cancellation from the caller's context.
+	go func() {
+		select {
+		case <-ctx.Done():
+			timeoutCancel()
+			tabCancel()
+		case <-tabCtx.Done():
+		}
+	}()
+
+	// Inject stealth once per fresh tab.
+	if p.opts.Stealth {
+		_ = stealth.Inject(tabCtx)
+	}
+
+	ua := p.getCurrentUA()
+
+	// Capture the real pixel viewport as PNG via Page.captureScreenshot.
+	var png []byte
+	err := chromedp.Run(tabCtx,
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			headers := network.Headers{
+				"Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+				"Accept-Language":           "en-US,en;q=0.9",
+				"Sec-Ch-Ua":                 ua.SecChUa,
+				"Sec-Ch-Ua-Mobile":          ua.SecChUaMobile,
+				"Sec-Ch-Ua-Platform":        ua.SecChUaPlatform,
+				"Upgrade-Insecure-Requests": "1",
+				"User-Agent":                ua.UserAgent,
+			}
+			return network.SetExtraHTTPHeaders(headers).Do(ctx)
+		}),
+		chromedp.Navigate(url),
+		chromedp.WaitReady("body", chromedp.ByQuery),
+	)
+	if err != nil {
+		return "", fmt.Errorf("screenshot navigate: %w", err)
+	}
+
+	// Let the page reach network-idle before capturing.
+	_ = settle.Wait(tabCtx, p.opts.Settle)
+
+	if err := chromedp.Run(tabCtx,
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			var cerr error
+			png, cerr = page.CaptureScreenshot().
+				WithFormat(page.CaptureScreenshotFormatPng).Do(ctx)
+			return cerr
+		}),
+	); err != nil {
+		return "", fmt.Errorf("screenshot capture: %w", err)
+	}
+
+	if len(png) == 0 {
+		return "", fmt.Errorf("screenshot capture: empty image data")
+	}
+
+	if err := os.WriteFile(outputPath, png, 0o644); err != nil {
+		return "", fmt.Errorf("screenshot write: %w", err)
+	}
+
+	return outputPath, nil
 }
 
 func (p *Pool) workerLoop(w *worker) {

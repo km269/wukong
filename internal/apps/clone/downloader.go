@@ -56,6 +56,13 @@ type DownloaderOptions struct {
 	UserAgent   string
 	MaxFileSize int64
 	Concurrency int
+
+	// InsecureTLS disables TLS certificate verification (opt-out for
+	// intranet/.mil certificates). Strict verification is the default.
+	InsecureTLS bool
+	// TLSCACertPath supplies a PEM CA bundle (e.g. DoD Root CA package) so
+	// .mil/.gov certificates verify while strict validation stays enabled.
+	TLSCACertPath string
 }
 
 // DefaultDownloaderOptions returns sensible defaults for the downloader.
@@ -172,7 +179,8 @@ func NewDownloader(opts DownloaderOptions) *Downloader {
 		opts: opts,
 		httpClient: httpclient.New(httpclient.Options{
 			Timeout:            opts.Timeout,
-			InsecureSkipVerify: true, // .mil/.gov sites use DoD certificates
+			InsecureSkipVerify: opts.InsecureTLS, //nolint:gosec // opt-in
+			RootCAsPath:        opts.TLSCACertPath,
 			ForceIPv4:          true, // avoid IPv6 issues on restricted networks
 		}),
 		visited:      make(map[string]bool),

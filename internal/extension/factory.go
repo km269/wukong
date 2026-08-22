@@ -6,6 +6,8 @@ import (
 
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/extension/builtin"
+	"github.com/km269/wukong/pkg/capability"
+	"github.com/km269/wukong/pkg/sandbox"
 
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
@@ -21,7 +23,23 @@ func CreateBuiltinToolSet(
 ) (tool.ToolSet, error) {
 	switch name {
 	case "developer":
-		return builtin.NewDeveloperToolSet(), nil
+		// Wire security.sandbox (process-level resource caps and
+		// lifecycle binding) into the developer toolset's shell
+		// execution seam. With zero-value defaults (see defaults.go)
+		// this is equivalent to the legacy NewSandboxShellService().
+		sb := cfg.Security.Sandbox
+		shell := capability.NewSandboxShellServiceWithLimits(
+			sandbox.ResourceLimits{
+				MaxCPUSeconds:   sb.Limits.MaxCPUSeconds,
+				MaxMemoryBytes:  sb.Limits.MaxMemoryBytes,
+				MaxFileBytes:    sb.Limits.MaxFileBytes,
+				MaxProcesses:    sb.Limits.MaxProcesses,
+			},
+			sb.KillOnParentExit,
+		)
+		return builtin.NewDeveloperToolSet(
+			builtin.WithShellService(shell),
+		), nil
 	case "computer_controller":
 		return builtin.NewComputerControllerToolSet(cfg), nil
 	case "memory":

@@ -1,891 +1,593 @@
-# 记忆系统架构
+# Wukong 记忆系统架构
 
-> 三层记忆: 短期(Recall) → 中期(CortexStore) → 长期(tRPC Memory)
-> 混合检索: FTS5 全文 + HNSW 向量 + 知识图谱
-> 知识格式: OKF v0.1 | 发现协议: ARD | 自动丰富: EnrichmentAgent
-
----
-
-## 目录
-
-1. [系统概述](#1-系统概述)
-2. [三层记忆架构](#2-三层记忆架构)
-3. [短期记忆：Recall 系统](#3-短期记忆recall-系统)
-4. [中期记忆：CortexStore](#4-中期记忆cortexstore)
-5. [长期记忆：tRPC Memory](#5-长期记忆trpc-memory)
-6. [记忆流服务：MemoryFlow](#6-记忆流服务memoryflow)
-7. [知识图谱：GraphFlow](#7-知识图谱graphflow)
-8. [知识格式：OKF](#8-知识格式okf)
-9. [混合检索引擎](#9-混合检索引擎)
-10. [配置参考](#10-配置参考)
-11. [常见问题](#11-常见问题)
+> 本文档基于源码深度扫描，描述 Wukong 的多层记忆与知识检索系统。
+> 所有结论均与源码逐行核对，附文件路径与行号引用。
+> 最后更新：2026-08-11
 
 ---
 
-## 1. 系统概述
+## 1. 系统全景
 
-### 1.1 设计理念
+Wukong 的记忆系统是一个**多层、可配置、渐进增强**的智能记忆栈。设计哲学是：每一层都能独立工作，叠加后提供更强的语义能力；任何 LLM/向量化依赖点都有确定性回退路径，保证系统在降级条件下仍可用。
 
-借鉴人类记忆的三层结构，构建 **"输入 → 处理 → 存储 → 检索"** 的完整记忆流水线：
+记忆栈由五个紧密协作的子系统组成：
 
-```
-对话输入
-    │
-    ▼
-┌──────────────────────────────┐
-│  短期记忆 (Short-term)        │
-│  Recall 系统                  │
-│  ├── FTS5 全文检索            │
-│  ├── 会话级上下文             │
-│  └── 消息条数限制             │
-└──────────────┬───────────────┘
-               │  重要事实提升
-               ▼
-┌──────────────────────────────┐
-│  中期记忆 (Mid-term)          │
-│  CortexStore (CortexDB)       │
-│  ├── HNSW 向量索引            │
-│  ├── 语义相似度检索           │
-│  └── 知识图谱实体关系         │
-└──────────────┬───────────────┘
-               │  持久化知识
-               ▼
-┌──────────────────────────────┐
-│  长期记忆 (Long-term)         │
-│  tRPC Memory Service          │
-│  ├── 结构化事实存储           │
-│  ├── 用户偏好记忆             │
-│  └── 跨会话知识复用           │
-└──────────────────────────────┘
-```
-
-### 1.2 核心组件
-
-| 层级 | 组件 | 存储引擎 | 检索方式 | 保留时间 |
-|------|------|---------|---------|---------|
-| 短期 | Recall | SQLite FTS5 | 关键词全文 | 会话级 / N 条 |
-| 中期 | CortexStore | CortexDB (HNSW + FTS5) | 语义向量 + 全文 | 中长期 |
-| 长期 | tRPC Memory | tRPC 内存服务 | 结构化查询 | 永久 |
-| 流 | MemoryFlow | CortexDB MemoryFlow | 分层唤醒上下文 | 会话驱动 |
-| 图谱 | GraphFlow | CortexDB GraphRAG | SPARQL 图查询 | 永久 |
-
-### 1.3 代码组织
+| 子系统 | 源码位置 | 职责 | 底层存储 |
+|--------|----------|------|----------|
+| **CortexStore** | `internal/cortex/store.go` | 混合检索核心（FTS5 + HNSW + Rerank + MMR） | SQLite `chat_recall` + CortexDB HNSW |
+| **MemoryFlowService** | `internal/cortex/memoryflow.go` | 对话转录、三层唤醒上下文、事实提升 | CortexDB MemoryFlow transcript |
+| **GraphFlowService** | `internal/cortex/graphflow.go` | 实体/关系提取与知识图谱构建 | CortexDB GraphRAG (SPARQL) |
+| **MemoryManager** | `internal/memory/store.go` | 跨会话用户偏好/事实持久化、智能淘汰 | tRPC memory + `memory_metadata` |
+| **recall.Store** | `internal/recall/store.go` | 原生 SQLite FTS5 召回（CortexStore 的轻量替代/回退） | SQLite `chat_recall` + FTS5 |
 
 ```
-internal/
-    ├── recall/                  # 短期记忆系统
-    │   ├── store.go             # FTS5 存储 + 混合搜索
-    │   ├── tool.go              # 工具定义
-    │   └── store_test.go        # 单元测试
-    │
-    ├── cortex/                  # 中期记忆 + 知识图谱
-    │   ├── store.go             # CortexStore 向量 + 词法存储
-    │   ├── recall_manager.go    # Recall 工具管理器
-    │   ├── memoryflow.go        # MemoryFlow 记忆流服务
-    │   ├── graphflow.go         # GraphFlow 知识图谱
-    │   ├── embedder.go          # 向量嵌入器
-    │   ├── planner.go           # 查询规划器
-    │   ├── extractor.go         # 会话提取器
-    │   ├── lexical.go           # 词法存储 (FTS5)
-    │   ├── vector_cache.go      # 向量缓存
-    │   ├── okf_enrichment.go    # OKF 知识丰富代理
-    │   ├── okf_injector.go      # OKF 注入器
-    │   ├── import_flow.go       # 导入流
-    │   ├── import_tools.go      # 导入工具
-    │   ├── json_generator.go    # JSON 生成器 (LLM)
-    │   └── kg_tools.go          # 知识图谱工具
-    │
-    ├── extension/builtin/
-    │   └── memory.go            # tRPC Memory 内置扩展
-    │
-    ├── okf/                     # OKF 知识格式
-    │   ├── bundle.go            # Bundle 结构
-    │   ├── concept.go           # 概念结构
-    │   ├── frontmatter.go       # Frontmatter
-    │   └── io.go                # 读写操作
-    │
-    └── ard/                     # 自动发现协议
-        └── okf.go               # OKF Bundle 发现
+┌─────────────────────────────────────────────────────────────────┐
+│  Agent Loop (internal/agent/)                                   │
+│  ┌────────────┐  ┌────────────┐  ┌──────────────────────────┐  │
+│  │ recall_    │  │ memory_*   │  │ knowledge_graph_*        │  │
+│  │ search工具 │  │ (6个工具)  │  │ graph_query/build工具    │  │
+│  └─────┬──────┘  └─────┬──────┘  └────────────┬─────────────┘  │
+├────────┼───────────────┼──────────────────────┼────────────────┤
+│  Cortex 层 (HNSW + FTS5 + GraphRAG)                            │
+│  ┌─────▼──────┐ ┌──────▼───────┐ ┌────────────▼────────────┐  │
+│  │ CortexStore│ │MemoryFlow    │ │GraphFlow                │  │
+│  │ (store.go) │ │Service       │ │Service                  │  │
+│  └─────┬──────┘ └──────┬───────┘ └────────────┬────────────┘  │
+│        │   SearchGenome│Chunking│Vertical│Tune (internal/search)│
+├────────┼───────────────┼──────────────────────┼────────────────┤
+│  存储                                                           │
+│  ┌──────────┐  ┌──────────────┐  ┌────────────┐  ┌─────────┐  │
+│  │ SQLite   │  │ CortexDB     │  │ tRPC mem   │  │ OKF     │  │
+│  │(共享*sql │  │ (HNSW 向量+  │  │ +metadata  │  │(.md注入)│  │
+│  │ .DB)     │  │  GraphRAG)   │  │  表        │  │         │  │
+│  └──────────┘  └──────────────┘  └────────────┘  └─────────┘  │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 2. 三层记忆架构
+## 2. CortexStore — 混合检索核心
 
-### 2.1 记忆流转机制
+源码：`internal/cortex/store.go`
 
-```
-每轮对话
-    │
-    ├── 写入短期记忆 (Recall)
-    │   └── 会话内快速检索
-    │
-    ├── 写入中期记忆 (CortexStore)
-    │   ├── 向量化 + HNSW 索引
-    │   └── 跨会话语义检索
-    │
-    └── MemoryFlow 处理
-        ├── WakeUp: 构建上下文
-        │   ├── Layer 1: Identity (角色)
-        │   ├── Layer 2: Recalled memories (召回)
-        │   └── Layer 3: Session context (会话)
-        │
-        └── PromoteFacts: 提升重要事实
-            └── → 长期记忆 (tRPC Memory)
-```
+### 2.1 双存储架构
 
-### 2.2 各层职责对比
+CortexStore 采用**双路径存储**，两个存储后端共享同一个 `*sql.DB` 句柄（避免 SQLite 多连接事务冲突）：
 
-| 维度 | 短期记忆 | 中期记忆 | 长期记忆 |
-|------|---------|---------|---------|
-| **目标** | 会话内上下文 | 语义记忆 + 知识图谱 | 持久化事实 |
-| **数据** | 原始消息文本 | 消息向量 + 实体关系 | 结构化事实 |
-| **检索** | 关键词 / BM25 | 向量相似度 + 全文 | 精确匹配 / 搜索 |
-| **容量** | 有限 (N 条/会话) | 较大 (向量索引) | 大 (结构化存储) |
-| **写入** | 每轮对话自动 | 每轮对话自动 | 手动 / 自动提升 |
-| **丢失** | 会话结束 / 超限 | 数据库清理 | 手动删除 |
-| **典型用例** | "我们刚才说的那个..." | "之前我们讨论过类似的..." | "记住我的偏好..." |
-
-### 2.3 写入路径
-
-```
-用户/助手消息
-    │
-    ├──→ Recall.StoreMessage()  ──→ SQLite FTS5
-    │                              (短期: 会话级)
-    │
-    ├──→ CortexStore.StoreMessage()
-    │       ├── 词法表 (权威来源)
-    │       └── 向量表 (HNSW 索引)
-    │                              (中期: 语义级)
-    │
-    └──→ MemoryFlow.IngestTurn()
-            └── 转录存储
-                   │
-                   └── 会话结束时 PromoteFacts
-                           └──→ tRPC Memory (长期)
-```
-
-### 2.4 检索路径
-
-```
-用户查询
-    │
-    ├──→ recall_search 工具
-    │       ├── CortexStore 向量搜索 (有 embedding 时)
-    │       ├── 或 FTS5 全文搜索 (无 embedding 时)
-    │       └── + 可选: tRPC Memory 交叉搜索
-    │
-    ├──→ memory_search 工具
-    │       └── tRPC Memory 结构化搜索
-    │
-    └──→ MemoryFlow.WakeUp()
-            ├── Layer 1: 身份/角色
-            ├── Layer 2: 历史记忆召回
-            └── Layer 3: 当前会话上下文
-```
-
----
-
-## 3. 短期记忆：Recall 系统
-
-### 3.1 功能定位
-
-Recall 系统负责 **会话级记忆**，类似人类的工作记忆：
-- 存储当前及历史对话消息
-- 支持快速全文检索
-- 限制每会话消息数，防止无限增长
-
-### 3.2 数据模型
+- **`lexicalStore`（FTS5，权威数据源）**：消息**始终**写入 SQLite `chat_recall` 表，并由 FTS5 触发器同步到 `chat_recall_fts` 虚拟表。即使没有 embedder，词法检索永远可用。
+- **CortexDB HNSW 向量索引（条件性）**：仅当配置了 embedder 时（`store.go:75` `if embedder != nil`），额外打开 CortexDB 并写入 HNSW 向量索引。
 
 ```go
-type ChatMessage struct {
-    ID        int64      // 自增 ID
-    SessionID string     // 会话 ID
-    UserID    string     // 用户 ID
-    Role      string     // user / assistant / tool
-    Content   string     // 消息内容
-    CreatedAt time.Time  // 创建时间
+// store.go:28-39
+type CortexStore struct {
+    cfg         *config.CortexConfig
+    embedder    *Embedder
+    reranker    *Reranker
+    router      *vertical.Router       // 垂直域路由
+    chunker     *chunking.Chunker      // 语义分块
+    metrics     *metrics.SearchMetrics
+    db          *cortexdb.DB           // 真实 CortexDB (HNSW + FTS5)
+    lexical     *lexicalStore          // FTS5，共享 *sql.DB
+    vectorCache *VectorCache
+    genome      search.SearchGenome    // 检索策略参数
 }
 ```
 
-### 3.3 存储引擎：SQLite FTS5
+**共享 DB 管理要点**：
+- `lexicalStore` 接收 `DatabasePool` 分配的共享 `*sql.DB`（`store.go:65`）。
+- `noCloseDBWrapper` 防止共享 DB 被某一方误关闭。
+- CortexDB（HNSW）虽是独立存储，但其 FTS5 部分与 `chat_recall` 表设计一致。
 
-**表结构**：
+### 2.2 Search 方法 — 检索决策树
 
-```sql
--- 主表
-CREATE TABLE chat_recall (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- FTS5 虚拟表 (全文索引)
-CREATE VIRTUAL TABLE chat_recall_fts USING fts5(
-    content,
-    content='chat_recall',
-    content_rowid='id',
-    tokenize='unicode61'
-);
-
--- 同步触发器 (INSERT/DELETE/UPDATE)
-CREATE TRIGGER recall_fts_insert AFTER INSERT ON chat_recall
-BEGIN
-    INSERT INTO chat_recall_fts(rowid, content)
-    VALUES (new.id, new.content);
-END;
-```
-
-### 3.4 检索方式
-
-#### 方式一：FTS5 全文检索（默认）
-
-```go
-func (s *Store) Search(query, userID string, limit int) ([]SearchResult, error)
-```
-
-**特性**：
-- **BM25 排序**：比简单 LIKE 更精准的相关性评分
-- **前缀匹配**：每个词自动加 `*`，支持部分匹配
-- **Unicode61 分词**：支持中英文等多语言
-- **降级机制**：FTS5 不可用时自动回退到 LIKE
-
-#### 方式二：混合搜索 (Hybrid Search)
-
-```go
-func (s *Store) SearchHybrid(
-    ctx context.Context,
-    query, userID string,
-    limit int,
-) ([]SearchResult, error)
-```
-
-**流程**：
-```
-Step 1: FTS5 检索 Top 50 候选
-Step 2: Query 向量化
-Step 3: 候选文本向量化
-Step 4: 计算余弦相似度
-Step 5: 混合评分 = 0.7 × 语义 + 0.3 × BM25
-Step 6: 重排序返回 Top K
-```
-
-### 3.5 消息数量限制
-
-每会话消息数超过 `MaxMessagesPerSession` 时，自动删除最旧的消息：
-
-```sql
-DELETE FROM chat_recall WHERE id IN (
-    SELECT id FROM chat_recall
-    WHERE session_id = ?
-    ORDER BY created_at ASC
-    LIMIT (SELECT MAX(0, COUNT(*) - ?) FROM chat_recall WHERE session_id = ?)
-)
-```
-
-### 3.6 会话管理
-
-| 方法 | 说明 |
-|------|------|
-| `StoreMessage(msg)` | 存储一条消息 |
-| `Search(query, userID, limit)` | 全局搜索 |
-| `SearchBySession(sessionID, query, limit)` | 会话内搜索 |
-| `ListSessions(userID)` | 列出会话列表 |
-| `DeleteSession(sessionID)` | 删除会话 |
-
----
-
-## 4. 中期记忆：CortexStore
-
-### 4.1 功能定位
-
-CortexStore 是 **语义级记忆**，基于 CortexDB 实现：
-- HNSW 向量索引 → 语义相似度检索
-- FTS5 全文索引 → 关键词检索
-- 共享数据库连接 → 避免 SQLite 事务冲突
-
-### 4.2 双引擎架构
-
-```
-CortexStore
-    ├── 词法引擎 (Lexical Store)
-    │   ├── SQLite FTS5
-    │   ├── 权威数据源
-    │   └── 共享 *sql.DB 连接
-    │
-    └── 向量引擎 (Vector Store)
-        ├── CortexDB HNSW 索引
-        ├── 语义相似度搜索
-        └── 独立 CortexDB 实例 (可共享)
-```
-
-### 4.3 共享连接设计
-
-**问题**：多个独立 SQLite 连接同时操作同一文件会导致 "transaction has already been committed" 错误。
-
-**解决方案**：
-- 词法存储 (lexical) 使用共享的 `*sql.DB` (来自 DatabasePool)
-- 向量存储使用独立的 CortexDB 实例
-- 当 MemoryFlow 也启用时，两者共享同一个 CortexDB 实例
-
-```go
-// 共享 DB 模式 (CortexStore + MemoryFlow 共用一个 CortexDB)
-func NewMemoryFlowWithDB(cfg, db, planner, extractor)
-func (s *CortexStore) SetDB(db)
-```
-
-### 4.4 向量缓存
-
-```go
-type VectorCache struct { ... }
-```
-
-**作用**：避免重复计算向量嵌入，节省 LLM API 调用。
-
-**缓存键**：
-- 消息向量：`msg_{ID}`
-- 查询向量：`query:{query}`
-
-**获取或计算**：
-
-```go
-func (c *VectorCache) GetOrComputeMessageVector(
-    ctx context.Context,
-    key string,
-    text string,
-    computeFunc func(ctx, []string) ([][]float64, error),
-) ([]float32, error)
-```
-
-### 4.5 写入流程
-
-```
-StoreMessage(msg)
-    │
-    ├── Step 1: 写入词法表 (权威)
-    │   └── 获取自增 ID
-    │
-    └── Step 2: 有 Embedding 时写入向量
-        ├── 检查向量缓存
-        ├── 命中 → 使用缓存的向量
-        ├── 未命中 → 调用 Embedder
-        └── 写入 CortexDB HNSW 索引
-```
-
-### 4.6 检索流程
+`CortexStore.Search()` 是整个检索的调度入口，按优先级形成决策树（`store.go` Search 方法）：
 
 ```
 Search(query, userID, limit)
-    │
-    ├── 有 Embedding?
-    │   ├── 是 → 向量搜索 (CortexDB HNSW)
-    │   └── 否 → FTS5 全文搜索
-    │
-    └── 返回 SearchResult[]
-        ├── Score: 相似度 / BM25
-        └── Preview: 前 200 字符预览
+  │
+  ├─ 1. 垂直路由优先（若命中意图）
+  │     router.Search() 命中 → mergeVertical() 合并平台 API 与本地结果
+  │     （store.go:245, 326-333）
+  │
+  ├─ 2. 按 SearchGenome 模式分发
+  │     ├─ g.IsLexicalOnly() → 纯 FTS5 检索 (lexicalStore.Search)
+  │     ├─ g.IsVectorOnly()  → 纯 HNSW 检索 (+ VectorCache)
+  │     ├─ g.IsHybrid()      → 五阶段混合流水线 searchHybridCortex()
+  │     └─ Fallback          → 向量优先，失败降级到词法
+  │
+  ├─ 3. (可选) SearchWithMemory 合并 tRPC memory 结果
+  │     每条 memory 结果 Score=0.5 注入候选集 (store.go:730-750)
+  │
+  └─ 4. recordMetric() 记录可观测性指标
 ```
 
-### 4.7 交叉搜索：Recall + Memory
+### 2.3 混合检索五阶段流水线
+
+`searchHybridCortex()`（`store.go:460+`）实现经典的"宽召回 → 融合 → 重排 → 多样性 → 截断"流水线：
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ 阶段 1：FTS5 词法召回                                              │
+│   pool = EffectivePoolSize()（默认 50），宽候选池                  │
+│   store.go:470 poolSize := g.EffectivePoolSize()                  │
+├──────────────────────────────────────────────────────────────────┤
+│ 阶段 2：HNSW 向量召回                                              │
+│   查询向量经 VectorCache.GetOrComputeQueryVector 计算/复用         │
+│   返回同 pool_size 的向量候选                                      │
+├──────────────────────────────────────────────────────────────────┤
+│ 阶段 3：融合（两策略，由 genome 选择）                             │
+│   ① RRF (Reciprocal Rank Fusion):                                │
+│      store.go:518  k := g.EffectiveRRFK()                        │
+│      score += 1/(k + rank + 1)  —— 双通道命中者被显著加权         │
+│   ② Weighted (加权融合):                                          │
+│      store.go:561-580                                             │
+│      score = DenseWeight × sim + TextWeight × (1/rank)           │
+├──────────────────────────────────────────────────────────────────┤
+│ 阶段 4a：冒泡排序                                                  │
+│   store.go 按融合分数对候选排序                                    │
+├──────────────────────────────────────────────────────────────────┤
+│ 阶段 4b：Cross-Encoder 重排（可选，配置 reranker 时启用）          │
+│   对 top-N 调用 reranker.Rerank()（/rerank 端点或本地模型）        │
+│   失败则保留融合排序结果（降级）                                    │
+├──────────────────────────────────────────────────────────────────┤
+│ 阶段 4c：MMR 多样性（可选）                                        │
+│   store.go:650  lambda := g.EffectiveMMRLambda()                 │
+│   相似度采用 Jaccard（词集合），防止结果聚集                        │
+├──────────────────────────────────────────────────────────────────┤
+│ 阶段 5：截断到 top-K 返回                                          │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### 2.4 SearchGenome — 检索策略参数
+
+`cortexGenomeFromConfig()`（`store.go:780+`）将 `CortexConfig.SearchStrategy` 映射为 `SearchGenome`。**默认混合模式权重 70/30**：
 
 ```go
-func (s *CortexStore) SearchWithMemory(
-    query, userID string,
-    limit int,
-    memoryReader MemoryReader,
-) ([]recall.SearchResult, error)
+// store.go:806-807 默认值
+DenseWeight: 0.7,   // 向量权重
+TextWeight:  0.3,   // 词法权重
 ```
 
-**同时搜索两个来源**：
-1. 对话历史 (CortexStore / Recall)
-2. tRPC 持久化记忆
+| 参数 | 方法 | 默认值 | 说明 |
+|------|------|--------|------|
+| `PoolSize` | `EffectivePoolSize()` | 50 | 每路召回的宽候选池大小 |
+| `RRFK` | `EffectiveRRFK()` | — | RRF 常数 k，奖励双通道命中 |
+| `DenseWeight` | — | 0.7 | 加权融合时向量相似度权重 |
+| `TextWeight` | — | 0.3 | 加权融合时词法 (1/rank) 权重 |
+| `MMRLambda` | `EffectiveMMRLambda()` | — | MMR 多样性/相关性权衡 |
+| 模式判定 | `IsLexicalOnly/IsVectorOnly/IsHybrid` | hybrid | 决定走哪条检索路径 |
 
-**结果合并**：
-- 对话历史结果：正常显示
-- 记忆结果：标记 `[Memory]` 前缀，固定得分 0.5
+### 2.5 长消息语义分块
+
+`StoreMessage` 调用 `chunker.Chunk()`（`internal/search/chunking`）对超长消息分块：
+
+- **四级递归切分**：段落（双换行）→ 句子 → 词 → 强制截断。
+- **CJK 感知的 token 估算**：ASCII 约 4 字符/token，CJK 约 1.5 字符/token。
+- **多 chunk 独立嵌入**：当 chunker 产出 >1 个 chunk 时，每个 chunk 单独 embed，作为独立向量存储，向量 key 格式为 `msg_{id}_chunk_{i}`。
+- 单 chunk 消息则直接以 `msg_{id}` 为 key。
+
+### 2.6 向量缓存 VectorCache
+
+源码：`internal/cortex/vector_cache.go`
+
+双层 LRU 缓存，避免对同一消息/查询重复调用 embedder：
+
+| 属性 | 值 |
+|------|----|
+| 缓存层 | `messageCache` + `queryCache`（分离） |
+| TTL | 5 分钟 |
+| `maxEntries` | 1000 |
+| 清理周期 | 后台 goroutine 每 1 分钟扫描过期条目 |
+| 统计 | `HitRate()` 命中率 |
+
+核心 API：
+- `GetOrComputeMessageVector(msgID, text)` — 单条消息向量（带计算回填）
+- `GetOrComputeQueryVector(query)` — 查询向量
+- `BatchGetOrComputeMessageVectors(...)` — 批量计算，减少 embedder API 往返
+- `Stop()` — 用 `isRunning` 守卫防止 double-close
 
 ---
 
-## 5. 长期记忆：tRPC Memory
+## 3. MemoryFlowService — 对话转录与唤醒
 
-### 5.1 功能定位
+源码：`internal/cortex/memoryflow.go`
 
-tRPC Memory 是 **持久化事实记忆**，通过 tRPC 协议与内存服务交互：
-
-- 结构化事实存储
-- 用户偏好记忆
-- 跨会话知识复用
-- 支持增删改查完整操作
-
-### 5.2 工具集
-
-通过 `MemoryToolSet` 暴露的工具：
-
-| 工具名 | 说明 |
-|--------|------|
-| `memory_add` | 添加记忆 |
-| `memory_search` | 搜索记忆 |
-| `memory_delete` | 删除记忆 |
-| `memory_update` | 更新记忆 |
-| `memory_load` | 加载全部记忆 |
-| `memory_clear` | 清空记忆 |
-
-### 5.3 注入方式
+封装 CortexDB 的 `memoryflow.Service`，字段结构（`memoryflow.go:30-40`）：
 
 ```go
-type MemoryToolSet struct {
-    tools   []tool.Tool
-    cfg     *config.WukongConfig
-    svc     memory.Service    // tRPC 记忆服务
-    userKey memory.UserKey    // {AppName, UserID}
+type MemoryFlowService struct {
+    cfg       *config.CortexConfig
+    db        *cortexdb.DB
+    flow      memoryflow.Service     // 转录服务
+    planner   *LLMQueryPlanner       // 查询规划（可选）
+    extractor *LLMSessionExtractor   // 会话事实提取（可选）
 }
 ```
 
-**工作原理**：
-1. 启动时创建空的 `MemoryToolSet`
-2. tRPC 记忆服务就绪后调用 `SetMemoryService()`
-3. 注入后 `Tools()` 返回标准 tRPC 记忆工具
-4. 避免工具名冲突，确保一致性
+### 3.1 核心方法
 
-### 5.4 与中期记忆的关系
+| 方法 | 功能 | 关键细节 |
+|------|------|----------|
+| `IngestTurn` | 记录单轮对话到转录存储 | `Scope=MemoryScopeSession`，`Source="chat"`（`memoryflow.go:91,99`） |
+| `WakeUp` | 构建三层唤醒上下文 | 见 3.2 |
+| `PromoteFacts` | 从转录提取可提升的事实候选 | `GetTranscript → SessionState → extractor.Extract` |
+
+### 3.2 WakeUp 三层上下文
+
+`WakeUp()`（`memoryflow.go:110-148`）调用 `flow.WakeUpLayers()`，返回的 `resp.Layers` 拼装为 **Markdown** 格式注入 agent：
 
 ```
-中期记忆 (CortexStore)           长期记忆 (tRPC Memory)
-─────────────────────           ─────────────────────
- 对话消息的向量索引               结构化事实/偏好
- 自动写入每轮对话                 手动/自动提升写入
- 语义相似度检索                   精确/模糊搜索
- 跨会话上下文                     持久化知识复用
-         │                              ▲
-         └──── PromoteFacts ────────────┘
-              (重要事实提升)
+WakeUp(userID, sessionID, identity)
+  │
+  ├─ Layer 1: Identity（身份层）
+  │    └─ "You are assisting {userID}..."（agent 人设）
+  │
+  ├─ Layer 2: Recalled memories（回忆层）
+  │    └─ 从历史转录提取的用户偏好/事实/决策
+  │
+  └─ Layer 3: Session context（会话层）
+       └─ Scope=MemoryScopeSession，当前会话最近对话摘要
 ```
+
+### 3.3 事实提升 PromoteFacts
+
+`PromoteFacts`（`memoryflow.go:179+`）流程：`GetTranscript` → 构建 `SessionState` → `extractor.Extract`。提取器为 `LLMSessionExtractor`（详见 §7.2），LLM 不可用时回退到启发式关键词匹配。
+
+### 3.4 共享 DB 模式
+
+`NewMemoryFlowWithDB` 允许复用已打开的 CortexDB 句柄，避免重复打开同一向量库文件。
 
 ---
 
-## 6. 记忆流服务：MemoryFlow
+## 4. GraphFlowService — 知识图谱
 
-### 6.1 功能定位
+源码：`internal/cortex/graphflow.go`
 
-MemoryFlow 是 **上下文构建引擎**，负责从记忆中提取相关信息，组织成结构化的上下文层，注入到 system prompt 中。
+从对话转录中提取实体/关系并构建知识图谱，底层依赖 CortexDB GraphRAG。
 
-借鉴 CortexDB 的 MemoryFlow Service 实现。
-
-### 6.2 三层唤醒 (WakeUp)
+### 4.1 提取器选择（`graphflow.go:38-57`）
 
 ```go
-func (m *MemoryFlowService) WakeUp(
-    ctx context.Context,
-    identity string,     // 角色设定
-    query string,        // 当前查询
-    sessionID string,
-    userID string,
-) (string, error)
-```
-
-**三层上下文结构**：
-
-```
-Layer 1: Identity  (身份层)
-  └── Agent 角色 / Persona
-
-Layer 2: Recalled Memories  (回忆层)
-  └── 从历史对话中召回的相关片段
-
-Layer 3: Session Context  (会话层)
-  └── 当前会话的上下文信息
-```
-
-**输出格式**：Markdown 格式，可直接拼接到 system prompt。
-
-### 6.3 转录摄入 (IngestTurn)
-
-```go
-func (m *MemoryFlowService) IngestTurn(
-    ctx context.Context,
-    sessionID string,
-    userID string,
-    role string,
-    content string,
-) error
-```
-
-每轮对话后调用，记录到 transcript 存储中。
-
-**Transcript 结构**：
-```go
-memoryflow.Transcript{
-    SessionID: sessionID,
-    UserID:    userID,
-    Source:    "chat",
-    Turns: []memoryflow.TranscriptTurn{
-        {Role: role, Content: content},
-    },
+if jsonGen != nil {                        // 有 JSONGenerator（LLM）能力
+    extractor = graphflow.LLMExtractor{...}
+} else {
+    extractor = graphflow.HeuristicExtractor{}   // 启发式回退
 }
 ```
 
-### 6.4 事实提升 (PromoteFacts)
+- **`LLMExtractor`**：通过 `JSONGenerator` 接口（`internal/cortex/json_generator.go`）让 LLM 输出结构化 JSON。
+- **`HeuristicExtractor`**：无 LLM 时的确定性回退。
 
-```go
-func (m *MemoryFlowService) PromoteFacts(
-    ctx context.Context,
-    sessionID string,
-    userID string,
-) ([]memoryflow.PromotionCandidate, error)
+### 4.2 图谱构建 BuildGraph
+
+`ExtractFromTranscript`（`graphflow.go:75-78`）将转录包装为 `SourceDocument{Type: "conversation"}`。`BuildGraph` 流程：
+
+```
+SourceDocument("conversation")
+  │
+  ├─ extractor.Extract → nodes + edges
+  │
+  ├─ nodes → []ToolEntityInput
+  ├─ edges → []ToolRelationInput
+  │
+  └─ GraphRAGTools 持久化：
+       ├─ Call("ingest_document", payload)   (graphflow.go:142)
+       └─ Call("upsert_relations", payload)  (graphflow.go:163)
 ```
 
-**流程**：
-1. 从存储中获取会话转录
-2. 使用 `SessionExtractor` 提取候选事实
-3. 返回提升候选列表
-4. （可选）写入 tRPC 长期记忆
+### 4.3 SPARQL 查询
 
-**调用时机**：会话结束时 / 定期调用
-
-### 6.5 依赖组件
-
-| 组件 | 接口 | 说明 |
-|------|------|------|
-| **QueryPlanner** | `memoryflow.QueryPlanner` | LLM 驱动的查询规划 |
-| **SessionExtractor** | `memoryflow.SessionExtractor` | 会话事实提取 |
-
----
-
-## 7. 知识图谱：GraphFlow
-
-### 7.1 功能定位
-
-GraphFlow 负责 **知识图谱构建与查询**：
-- 从对话中提取实体和关系
-- 构建属性图 (Property Graph)
-- 支持 SPARQL 图查询
-- 用于知识增强的上下文构建
-
-### 7.2 实体关系提取
-
-```go
-func (g *GraphFlowService) ExtractFromTranscript(
-    ctx context.Context,
-    sessionID string,
-    transcriptText string,
-) (*graphflow.ExtractionResult, error)
-```
-
-**两种提取器**：
-
-| 提取器 | 实现 | 适用场景 |
-|--------|------|---------|
-| **LLM Extractor** | `graphflow.LLMExtractor` | 高质量，需要 LLM |
-| **Heuristic Extractor** | `graphflow.HeuristicExtractor` | 轻量，无 LLM 时降级 |
-
-### 7.3 图谱构建
-
-```go
-func (g *GraphFlowService) BuildGraph(
-    ctx context.Context,
-    result *graphflow.ExtractionResult,
-) error
-```
-
-**持久化路径**：
-```
-ExtractionResult
-    ├── Nodes (实体)
-    │   └──→ CortexDB GraphRAG → ingest_document
-    │
-    └── Edges (关系)
-        └──→ CortexDB GraphRAG → upsert_relations
-```
-
-### 7.4 SPARQL 查询
-
-```go
-func (g *GraphFlowService) QueryKnowledge(
-    ctx context.Context,
-    sparqlQuery string,
-) (string, error)
-```
-
-**示例：关键词过滤查询**
+- **`QueryKnowledge`**：直接执行 SPARQL 查询语句。
+- **`BuildContext`**（`graphflow.go:198-222`）：根据关键词动态构造 SPARQL：
 
 ```sparql
-PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-SELECT DISTINCT ?subject ?predicate ?object WHERE {
-    ?subject ?predicate ?object .
-    FILTER(CONTAINS(LCASE(STR(?object)), "keyword"))
-}
+# graphflow.go:212, 220-222
+FILTER(CONTAINS(LCASE(STR(?object)), "关键词"))
+...
 LIMIT 20
 ```
 
-### 7.5 上下文增强
+`LCASE(STR(?object))` 实现大小写不敏感的子串匹配，结果上限 20 条。
+
+---
+
+## 5. MemoryManager — 持久化记忆
+
+源码：`internal/memory/store.go` + `internal/memory/metadata.go`
+
+封装 tRPC-Agent-Go memory service，提供跨会话的用户偏好/事实持久化，并叠加智能淘汰与引用追踪。
+
+### 5.1 双模式
+
+| 模式 | 机制 | 细节 |
+|------|------|------|
+| **Auto Extract** | LLM 自动从对话提取记忆 | 3 个异步 worker，本地模型超时 600s（`store.go:642`） |
+| **Manual Tools** | 6 个显式工具 | `add / search / update / delete / load / clear` |
+
+`trackingMemoryService` 包装底层 `Service`，跟踪在途（in-flight）任务；worker 池自然排空而非强制关闭 DB（`store.go:139,182`），以保留共享 DB。
+
+### 5.2 SmartCleanup — 容量感知淘汰（`store.go:330-369`）
 
 ```go
-func (g *GraphFlowService) BuildContext(
-    ctx context.Context,
-    keywords []string,
-) (string, error)
+// store.go:361-362
+keepTarget := m.cfg.MaxMemories * 60 / 100   // 淘汰目标：降到 60%
+softLimit  := m.cfg.MaxMemories * 80 / 100   // 触发阈值：达到 80%
 ```
 
-从知识图谱中提取与关键词相关的三元组，注入到系统提示词中，增强 Agent 的知识广度。
+| 容量状态 | 策略 |
+|----------|------|
+| `< 80%` | 仅删除已过期（> TTL）的记忆 |
+| `≥ 80%` | 按四维评分排序，淘汰最低分者直到降到 60% |
+
+**四维评分公式**（`store.go:329-340, 437-477`）：
+
+```
+score = recency×0.4 + reference×0.3 + importance×0.2 + length×0.1
+
+recency     = 1.0 - age/maxAge          (maxAge = 365 天, store.go:371)
+              < 0 则截断为 0
+reference   = ReferenceCount / 10.0      (上限 1.0, store.go:443)
+importance  = high=1.0 / medium=0.5 / low=0.2   (store.go:449-459)
+length      = contentLen / 500.0         (上限 1.0, store.go:468)
+```
+
+权重来自配置 `RecencyWeight / ReferenceWeight / ImportanceWeight / LengthWeight`，默认即 0.4/0.3/0.2/0.1。
+
+### 5.3 动态 TTL（`AdjustTTLByReference`）
+
+引用频率越高，记忆存活越久；零引用则加速过期：
+
+| 引用次数 (`ReferenceCount`) | TTL 倍率 |
+|------------------------------|----------|
+| `≥ 5` | `× 2.0` |
+| `≥ 2` | `× 1.5` |
+| `== 0` | `× 0.5` |
+
+### 5.4 MetadataManager 与 DB Schema
+
+源码：`internal/memory/metadata.go`
+
+```sql
+-- metadata.go:43-57
+CREATE TABLE IF NOT EXISTS memory_metadata (
+    memory_id          TEXT PRIMARY KEY,
+    user_id            TEXT,
+    reference_count    INTEGER DEFAULT 0,
+    importance         TEXT,           -- high/medium/low
+    last_referenced_at TIMESTAMP,
+    created_at         TIMESTAMP
+);
+-- 索引：user_id / reference_count DESC / importance
+```
+
+关键操作：
+- **`RecordReference`**（`metadata.go:71-77`）：`INSERT OR REPLACE` + `COALESCE` 累加引用计数并保留原始 `created_at`。
+- **`AdjustTTLByReference`**：动态 TTL 计算（见 5.3）。
+- **`GetImportanceScore`**：将 high/medium/low 映射为 1.0/0.5/0.2。
+- **`QueryHighImportance`**：按 importance 查询高重要性记忆。
+- **`QueryLowReference`**（`metadata.go:320-324`）：`ORDER BY reference_count DESC, last_referenced_at DESC` 查低引用候选（供淘汰）。
 
 ---
 
-## 8. 知识格式：OKF
+## 6. recall.Store — 原生 FTS5 召回
 
-### 8.1 什么是 OKF？
+源码：`internal/recall/store.go`
 
-**OKF (Open Knowledge Format)** 是开放知识格式，用于结构化知识表示。
+作为 CortexStore 的轻量级替代/回退方案，与 `cortex/lexical.go` **共享同一套 `chat_recall` + `chat_recall_fts` + 触发器设计**。
 
-**版本**: v0.1
+### 6.1 SQLite Schema
 
-**核心概念**：
-- **Concept (概念)**：知识的基本单元
-- **Bundle (束)**：多个概念的集合
-- **Frontmatter**：概念元数据
-
-### 8.2 Concept 结构
-
-```go
-type Concept struct {
-    ID          string       // 概念唯一标识
-    FilePath    string       // 相对文件路径
-    Frontmatter Frontmatter  // 元数据
-    Body        string       // Markdown 正文
-}
-```
-
-### 8.3 Frontmatter 元数据
-
-```yaml
----
-type: table              # 概念类型
-title: users            # 标题
-description: 用户表       # 描述
-resource: ddl://users    # 来源资源
-tags: [database, table] # 标签
-timestamp: 2024-01-01T00:00:00Z
----
-```
-
-### 8.4 Bundle 结构
-
-```go
-type Bundle struct {
-    RootDir  string
-    Concepts []*Concept
-}
-```
-
-### 8.5 丰富代理：EnrichmentAgent
-
-自动从结构化数据源生成 OKF 概念文档：
-
-| 数据源 | 方法 | 说明 |
-|--------|------|------|
-| **DDL** | `EnrichFromDDL()` | 从 CREATE TABLE 生成表概念 |
-| **目录** | `EnrichFromDirectory()` | 从文件目录批量导入 |
-
-**DDL 丰富示例**：
-```
-输入: CREATE TABLE users (id INT, name TEXT)
-输出: concepts/tables/users.md
-    ├── Frontmatter: type=table, tags=[database, table]
-    └── Body: 表名 + 列清单 + 外键关系
-```
-
-### 8.6 ARD 发现协议
-
-**ARD (Automatic Resource Discovery)** 自动资源发现协议支持 OKF Bundle：
-
-```
-MediaType: application/okf-bundle+json
-Metadata:
-  - okf_version: 版本号
-  - concept_count: 概念数量
-  - concept_types: 概念类型列表
-  - bundle_path: Bundle 路径
-```
-
----
-
-## 9. 混合检索引擎
-
-### 9.1 检索策略对比
-
-| 策略 | 技术 | 精度 | 召回率 | 速度 | 适用场景 |
-|------|------|------|--------|------|---------|
-| **全文检索** | FTS5 BM25 | 中 | 中 | 快 | 关键词明确 |
-| **向量检索** | HNSW 余弦相似度 | 高 | 高 | 中 | 语义模糊匹配 |
-| **混合检索** | BM25 + 向量重排 | 高 | 高 | 中 | 通用场景 |
-| **图检索** | SPARQL | 高 | 低 | 慢 | 实体关系查询 |
-| **记忆检索** | tRPC Memory | 中 | 中 | 快 | 事实/偏好查询 |
-
-### 9.2 RecallManager 工具
-
-```go
-func (m *RecallManager) Tools() []tool.Tool
-```
-
-暴露的 Agent 工具：
-
-| 工具名 | 说明 |
-|--------|------|
-| `recall_search` | 搜索对话历史（语义向量 + 全文） |
-| `recall_sessions` | 列出历史会话 |
-
-### 9.3 交叉检索
-
-```
-用户查询: "上次我们讨论的那个数据库方案"
-    │
-    ├── recall_search
-    │   ├── CortexStore 向量搜索 → 找到历史对话片段
-    │   └── + tRPC Memory 搜索 → [Memory] 相关事实
-    │
-    └── 结果合并 → 返回给 Agent
-```
-
----
-
-## 10. 配置参考
-
-### 10.1 Recall 配置
-
-```yaml
-recall:
-  enabled: true
-  db_path: "~/.wukong/recall.db"
-  max_messages_per_session: 1000
-  max_results: 10
-  search_mode: fts5  # fts5 / hybrid
-```
-
-| 配置项 | 类型 | 默认值 | 说明 |
-|--------|------|--------|------|
-| `recall.enabled` | bool | `true` | 启用 Recall 系统 |
-| `recall.db_path` | string | `~/.wukong/recall.db` | SQLite 数据库路径 |
-| `recall.max_messages_per_session` | int | `1000` | 每会话最大消息数 |
-| `recall.max_results` | int | `10` | 搜索返回最大结果数 |
-| `recall.search_mode` | string | `fts5` | 搜索模式: fts5/hybrid |
-
-### 10.2 Cortex 配置
-
-```yaml
-cortex:
-  enabled: false
-  db_path: "~/.wukong/cortex.db"
-  max_results: 10
-  embedding:
-    provider: openai  # openai / ollama / none
-    model: text-embedding-3-small
-    dimensions: 1536
-    api_key: ""
-```
-
-### 10.3 MemoryFlow 配置
-
-```yaml
-memoryflow:
-  enabled: false
-  db_path: "~/.wukong/memoryflow.db"
-  namespace: default
-  embedding_dimensions: 1536
-```
-
-### 10.4 GraphFlow 配置
-
-```yaml
-graphflow:
-  enabled: false
-  db_path: "~/.wukong/graphflow.db"
-  max_chars_per_doc: 8000
-```
-
----
-
-## 11. 常见问题
-
-### Q1: Recall 和 CortexStore 有什么区别？
-
-| 维度 | Recall | CortexStore |
-|------|--------|-------------|
-| **定位** | 短期工作记忆 | 中期语义记忆 |
-| **检索** | FTS5 关键词 | 向量语义搜索 |
-| **存储** | 纯 SQLite | CortexDB (SQLite + HNSW) |
-| **依赖** | 无外部依赖 | 需要 Embedder |
-| **速度** | 快 | 中 (向量计算耗时) |
-
-**使用建议**：
-- 简单场景用 Recall (FTS5 足够)
-- 需要语义理解时启用 CortexStore
-- 两者可以同时启用，RecallManager 自动选择
-
-### Q2: 为什么用共享数据库连接？
-
-SQLite 的多连接事务处理有局限，多个独立 `*sql.DB` 同时操作同一文件会导致：
-- "database is locked" 错误
-- "transaction has already been committed" 错误
-
-**解决方案**：
-- 词法存储使用 DatabasePool 的共享连接
-- CortexDB 实例在 MemoryFlow 和 CortexStore 之间共享
-- 通过 `SetDB()` / `NewMemoryFlowWithDB()` 注入
-
-### Q3: 混合搜索的评分公式是什么？
-
-```
-combined_score = 0.7 × cosine_similarity + 0.3 × bm25_normalized
-```
-
-其中：
-- **余弦相似度** (0-1)：语义相关度，权重 70%
-- **BM25 归一化** (1/(rank+1))：关键词相关度，权重 30%
-
-> 语义权重更高，因为混合搜索的目的是利用向量的语义理解能力。
-
-### Q4: 向量缓存有什么用？
-
-- **节省 API 调用**：相同文本不会重复向量化
-- **提升速度**：缓存命中时跳过 LLM 调用
-- **一致性**：查询向量也缓存，相同查询直接用缓存
-- **渐进式更新**：新消息增量向量化
-
-### Q5: MemoryFlow 和 Recall 是什么关系？
-
-**互补关系**：
-- **Recall**：关键词搜索，快速查找历史消息
-- **MemoryFlow**：分层上下文构建，智能组织记忆
-
-**协作方式**：
-1. Recall 存储所有对话消息（原始数据）
-2. MemoryFlow 从转录中提取上下文（加工后的）
-3. WakeUp 输出可直接注入 system prompt 的结构化文本
-4. PromoteFacts 将重要事实提升到长期记忆
-
----
-
-## 附录
-
-### 相关文档
-
-| 文档 | 说明 |
+| 对象 | 用途 |
 |------|------|
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | 系统架构详解 |
-| [CONFIG.md](./CONFIG.md) | 配置参考手册 |
-| [README.md](../README.md) | 项目主页 |
+| `chat_recall` | 主消息表（id, session_id, user_id, role, content, created_at） |
+| `chat_recall_fts` | FTS5 虚拟表（unicode61 tokenizer，content 自动同步） |
+| `chat_recall_vec` | 向量索引表（msg_id, vector JSON, content_snippet） |
+| 触发器 ×3 | INSERT / DELETE / UPDATE 保持 FTS5 与主表同步 |
 
-### 相关代码
+### 6.2 检索与降级链
 
-- `internal/recall/` — 短期记忆系统 (3 文件, ~630 行)
-- `internal/cortex/` — 中期记忆 + 知识图谱 (14 文件)
-- `internal/okf/` — OKF 知识格式
-- `internal/extension/builtin/memory.go` — tRPC Memory 扩展
-- `internal/ard/okf.go` — ARD OKF 发现
+```
+SearchHybrid (store.go)
+  │
+  ├─ FTS5 召回（store.go:165-182）
+  │    SELECT ... FROM chat_recall_fts fts
+  │    JOIN chat_recall cr ...
+  │    WHERE chat_recall_fts MATCH ftsQuery(query)
+  │    ORDER BY fts.rank
+  │
+  ├─ embed 查询 + 候选 → RRF / 加权融合
+  │
+  └─ 冒泡排序取 top-K
+```
+
+**`ftsQuery`**（`store.go:286-300`）：为每个词添加 `*` 前缀匹配（除非已含 `*"'()` 等通配/操作符），实现前缀自动补全。
+
+**降级策略链**：FTS5 MATCH 失败 → `searchLike`（LIKE 搜索，`store.go:224`）→ 内存中 cosine 向量搜索。
+
+### 6.3 消息限制裁剪
+
+超限会话按时间删除最旧消息（`store.go:127`）：
+
+```sql
+DELETE FROM chat_recall WHERE id IN (
+  SELECT id FROM chat_recall WHERE session_id = ?
+  ORDER BY created_at ASC
+  LIMIT (SELECT MAX(0, COUNT(*) - ?) FROM chat_recall WHERE session_id = ?)
+)
+```
+
+### 6.4 向后兼容
+
+`genomeFromConfig` 向后兼容：未配置 SearchStrategy 时回退到默认 genome，老配置可直接运行。
 
 ---
 
-> **版本**: v1.0 | **最后更新**: 2026-07-23 | **相关代码**: internal/recall/, internal/cortex/, internal/okf/
+## 7. LLM 组件与确定性回退
+
+每个 LLM 依赖点都配有确定性启发式回退，保证无 LLM 时系统仍可运行。
+
+### 7.1 LLMQueryPlanner（`internal/cortex/planner.go`）
+
+查询路由规划：决定单次查询走 lexical / vector / hybrid。
+
+| 策略 | 机制 |
+|------|------|
+| **LLM 主路径** | 单词输出（lexical/vector/hybrid），`MaxTokens=8`，`Temperature=0.0`（追求确定性） |
+| **启发式回退** | `>10 词 → hybrid`；含抽象标记 → `vector`；否则 `lexical` |
+
+### 7.2 LLMSessionExtractor（`internal/cortex/extractor.go`）
+
+两级事实提取：
+
+| 策略 | 机制 |
+|------|------|
+| **LLM 主路径** | 输出 JSON 格式 facts，`Temperature=0.3`，超时 120s |
+| **启发式回退** | 中英文关键词匹配（preference/decision/note 等） |
+
+### 7.3 LLMJSONGenerator（`internal/cortex/json_generator.go`）
+
+供 GraphFlow 的 `LLMExtractor` 使用，约束 LLM 输出可解析 JSON。不可用则 GraphFlow 退化为 `HeuristicExtractor`。
+
+---
+
+## 8. 数据流总览
+
+### 8.1 对话记忆写入流
+
+```
+用户消息
+  │
+  ├─→ Agent Loop
+  │
+  ├─→ recall.StoreMessage()                    [internal/recall/store.go]
+  │     └─ chat_recall + FTS5 trigger 同步
+  │
+  ├─→ CortexStore.StoreMessage()               [internal/cortex/store.go]
+  │     ├─ lexicalStore.storeMessage()         [SQLite chat_recall，权威源]
+  │     └─ storeCortexVector()                 [HNSW，含 chunking:
+  │            chunker.Chunk() → 每块 embed → msg_{id}_chunk_{i}]
+  │
+  └─→ MemoryFlowService.IngestTurn()           [internal/cortex/memoryflow.go]
+        └─ transcript 记录, Scope=Session, Source="chat"
+```
+
+### 8.2 检索记忆流
+
+```
+recall_search 工具 / Run() 上下文注入
+  │
+  ├─→ CortexStore.Search()                     [internal/cortex/store.go]
+  │     │
+  │     ├─ 垂直路由命中? → mergeVertical()      [store.go:245,326]
+  │     │
+  │     ├─ IsLexicalOnly? → FTS5 检索
+  │     ├─ IsVectorOnly?  → HNSW + VectorCache
+  │     ├─ IsHybrid?      → searchHybridCortex()
+  │     │     ├─ Step1 FTS5 召回 (pool=EffectivePoolSize 默认 50)
+  │     │     ├─ Step2 HNSW 召回
+  │     │     ├─ Step3 融合 (RRF k=EffectiveRRFK / Weighted Dense×sim+Text×1/rank)
+  │     │     ├─ Step4a 冒泡排序
+  │     │     ├─ Step4b (可选) Cross-Encoder 重排 (reranker.Rerank)
+  │     │     ├─ Step4c (可选) MMR (lambda=EffectiveMMRLambda, Jaccard)
+  │     │     └─ Step5 top-K
+  │     │
+  │     └─ recordMetric()
+  │
+  └─→ SearchWithMemory() (可选)                [store.go:730-750]
+        └─ tRPC memory 结果合并 (每条 Score=0.5)
+```
+
+### 8.3 唤醒与知识注入流（会话启动）
+
+```
+会话启动
+  │
+  ├─→ WakeUpWithKnowledgeIndex()
+  │     └─ KnowledgeIndexInjector.Inject()      [internal/cortex/okf_injector.go]
+  │           └─ 解析 OKF bundle 的 index.md → 注入系统提示
+  │
+  └─→ MemoryFlowService.WakeUp()               [internal/cortex/memoryflow.go]
+        └─ 三层上下文 (Identity → Recalled → Session) → Markdown 注入 system prompt
+```
+
+### 8.4 知识图谱构建流（异步）
+
+```
+对话结束后（异步）
+  │
+  ├─→ MemoryFlowService.PromoteFacts()
+  │     └─ GetTranscript → SessionState → LLMSessionExtractor → PromotionCandidate
+  │
+  └─→ GraphFlowService.ExtractFromTranscript()
+        └─ SourceDocument("conversation")
+              └─ LLMExtractor / HeuristicExtractor → nodes/edges
+              └─ BuildGraph → GraphRAG: ingest_document + upsert_relations
+```
+
+---
+
+## 9. DB Schema 汇总
+
+| 表/对象 | 位置 | 关键字段 |
+|---------|------|----------|
+| `chat_recall` | SQLite（recall/cortex 共享） | id, session_id, user_id, role, content, created_at |
+| `chat_recall_fts` | SQLite FTS5 虚拟表 | content（unicode61），触发器同步 |
+| `chat_recall_vec` | SQLite | msg_id, vector(JSON), content_snippet |
+| `memory_metadata` | SQLite（`internal/memory/metadata.go:43`） | memory_id(PK), user_id, reference_count, importance, last_referenced_at, created_at |
+| CortexDB HNSW | CortexDB（条件性，embedder 启用时） | 向量 key: `msg_{id}` / `msg_{id}_chunk_{i}` |
+| MemoryFlow transcript | CortexDB | Scope=Session, Source="chat" |
+| GraphRAG | CortexDB | 实体（ingest_document）/ 关系（upsert_relations） |
+
+---
+
+## 10. 关键设计决策
+
+### 10.1 渐进降级
+
+每一层都内置降级路径，单点故障不会击穿整个记忆栈：
+
+| 故障点 | 降级路径 |
+|--------|----------|
+| FTS5 不可用 | LIKE 搜索（`searchLike`） |
+| Embedder 失败 | 纯词法检索 |
+| 向量结果不足 | FTS5 补充候选 |
+| Reranker 失败 | 保留融合排序结果 |
+| MMR 失败 | 保留重排结果 |
+| LLM 不可用 | 启发式提取/规划（planner/extractor/graphflow 三处） |
+| JSONGenerator 缺失 | GraphFlow 退化为 HeuristicExtractor |
+
+### 10.2 共享连接管理
+
+SQLite 单文件多连接会导致 "transaction has already been committed" 错误。统一通过 `util.DatabasePool` 管理：
+
+- `lexicalStore` 接收共享 `*sql.DB`（`store.go:65`）。
+- `CortexStore.SetDB()` 允许复用 MemoryFlow 的 CortexDB 句柄。
+- `noCloseDBWrapper` 防止共享 DB 被误关闭。
+- `NewMemoryFlowWithDB` 复用已打开的 CortexDB。
+
+### 10.3 LLM + 启发式双策略
+
+每个 LLM 依赖点都有确定性回退，且 LLM 调用参数追求稳定输出：
+
+| 组件 | LLM 参数 | 回退 |
+|------|----------|------|
+| QueryPlanner | MaxTokens=8, Temp=0.0 | 词数/抽象标记启发式 |
+| SessionExtractor | Temp=0.3, 120s 超时 | 中英文关键词匹配 |
+| GraphFlow LLMExtractor | 经 JSONGenerator | HeuristicExtractor |
+
+### 10.4 权威源单一化
+
+`lexicalStore`（FTS5 → `chat_recall`）始终是**权威数据源**：无论是否启用向量索引，消息必经此路径写入。HNSW 向量索引是**增强层**而非必需，这保证了向量库损坏/缺失时数据零丢失。
+
+### 10.5 双通道奖励机制
+
+混合检索的 RRF 融合（`k=EffectiveRRFK`）天然奖励**同时被 FTS5 与 HNSW 召回**的候选——双通道命中者在 `Σ 1/(k+rank+1)` 中累加两次，排名显著提升，这正是混合检索优于单通道的核心所在。
+
+---
+
+## 11. 相关文档
+
+- [系统架构](ARCHITECTURE.md) — 分层设计与启动流程
+- [技术实现](TECHNICAL_IMPLEMENTATION.md) — 各子系统实现细节
+- [OKF 指南](OKF_GUIDE.md) — Open Knowledge Format（唤醒流注入的 bundle 格式）
+- [配置参考](CONFIG.md) — Cortex/Memory/Recall/SearchStrategy 配置项

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/km269/wukong/pkg/httpclient"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
 )
@@ -17,7 +18,7 @@ import (
 type searxngTool struct {
 	baseURL    string
 	apiKey     string
-	httpClient *http.Client
+	httpClient *httpclient.Client
 }
 
 type searxngResult struct {
@@ -38,11 +39,9 @@ func NewSearXNGTool(baseURL string, apiKey string) tool.Tool {
 		baseURL += "/"
 	}
 	st := &searxngTool{
-		baseURL: baseURL,
-		apiKey:  apiKey,
-		httpClient: &http.Client{
-			Timeout: 15 * time.Second,
-		},
+		baseURL:    baseURL,
+		apiKey:     apiKey,
+		httpClient: newSearchHTTPClient(15 * time.Second),
 	}
 	return function.NewFunctionTool(
 		st.search,

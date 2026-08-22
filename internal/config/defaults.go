@@ -39,6 +39,7 @@ func (l *Loader) setAgentDefaults() {
 	l.v.SetDefault("agent.max_llm_calls", 50)
 	l.v.SetDefault("agent.max_tool_iterations", 30)
 	l.v.SetDefault("agent.max_run_duration", "900s")
+	l.v.SetDefault("agent.tool_call_timeout", "120s")
 
 	// Generation parameters
 	l.v.SetDefault("agent.parallel_tools", true)
@@ -98,6 +99,16 @@ func (l *Loader) setSecurityDefaults() {
 	l.v.SetDefault("security.guardrail_enabled", false)
 	l.v.SetDefault("security.ignore_file_enabled", true)
 	l.v.SetDefault("security.ignore_file", ".wukongignore")
+
+	// Sandbox process-level resource limits and lifecycle binding.
+	// All-zero defaults keep legacy behavior (no Job Object / no
+	// setrlimit) so existing deployments are unaffected unless
+	// operators explicitly enable caps in config.yaml.
+	l.v.SetDefault("security.sandbox.kill_on_parent_exit", false)
+	l.v.SetDefault("security.sandbox.limits.max_cpu_seconds", 0)
+	l.v.SetDefault("security.sandbox.limits.max_memory_bytes", 0)
+	l.v.SetDefault("security.sandbox.limits.max_file_bytes", 0)
+	l.v.SetDefault("security.sandbox.limits.max_processes", 0)
 }
 
 // setStorageDefaults registers storage subsystem defaults
@@ -110,6 +121,11 @@ func (l *Loader) setStorageDefaults() {
 	l.v.SetDefault("session.ttl", "0h")
 	l.v.SetDefault("session.enable_summary", true)
 	l.v.SetDefault("session.summary_trigger", 50)
+	// Model-visible event log: records the messages the model
+	// actually sees after context enrichment, enforcing the
+	// "model-visible means logged" invariant. Distinct from the
+	// framework session service's own event storage.
+	l.v.SetDefault("session.enable_model_event_log", true)
 
 	// Memory
 	l.v.SetDefault("memory.backend", "sqlite")
@@ -208,7 +224,6 @@ func (l *Loader) setFeatureDefaults() {
 	l.v.SetDefault("browser.proxy.rotate_every", 10)
 
 	// Browser Search
-	l.v.SetDefault("browser.search.backends", []string{"duckduckgo"})
 	l.v.SetDefault("browser.search.duckduckgo.enabled", true)
 	l.v.SetDefault("browser.search.duckduckgo.url", "https://api.duckduckgo.com/")
 	l.v.SetDefault("browser.search.searxng.enabled", false)
@@ -347,7 +362,6 @@ func (l *Loader) setOrchestrationDefaults() {
 	l.v.SetDefault("workflow.mode", "single")
 	l.v.SetDefault("workflow.max_iterations", 10)
 	l.v.SetDefault("workflow.cycle_mode", "default")
-	l.v.SetDefault("workflow.engine", "bsp")
 
 	// Dify
 	l.v.SetDefault("dify.enabled", false)
@@ -376,12 +390,25 @@ func (l *Loader) setServerDefaults() {
 	l.v.SetDefault("acp_server.address", ":9091")
 	l.v.SetDefault("acp_server.path", "/acp")
 	l.v.SetDefault("acp_server.enable_streaming", true)
-	l.v.SetDefault("acp_server.auth_type", "")
+	// Security defaults — must match ACPServerConfig.Security
+	// (ServerSecurityConfig). Previous code set the top-level key
+	// "acp_server.auth_type" which has no corresponding mapstructure
+	// tag and was silently dropped, leaving auth middleware
+	// disabled even when users followed the docs.
+	l.v.SetDefault("acp_server.security.auth.type", "")
+	l.v.SetDefault("acp_server.security.auth.api_key", "")
 
 	// ACP MCP Bridge
 	l.v.SetDefault("acp_mcp.enabled", true)
 	l.v.SetDefault("acp_mcp.address", ":3400")
 	l.v.SetDefault("acp_mcp.path", "/mcp")
+
+	// Standalone MCP server (exposes extensions via JSON-RPC 2.0).
+	// Security defaults to empty auth — users exposing this on a
+	// non-loopback interface MUST set security.auth.type explicitly
+	// to prevent unauthorized tools/call access.
+	l.v.SetDefault("mcp_server.security.auth.type", "")
+	l.v.SetDefault("mcp_server.security.auth.api_key", "")
 }
 
 // setObservabilityDefaults registers observability & evaluation

@@ -58,8 +58,6 @@ type ANPConfig struct {
 type SkillConfig struct {
 	Enabled   bool   `mapstructure:"enabled"`
 	SkillsDir string `mapstructure:"skills_dir"`
-	AutoLoad  bool   `mapstructure:"auto_load"`
-	MaxSkills int    `mapstructure:"max_skills"`
 }
 
 // EvolutionConfig defines the skill self-evolution system settings.
@@ -87,7 +85,6 @@ type KnowledgeConfig struct {
 	VectorStore      string   `mapstructure:"vector_store"`
 	MaxResults       int      `mapstructure:"max_results"`
 	EnableSourceSync bool     `mapstructure:"enable_source_sync"`
-	RerankerEnabled  bool     `mapstructure:"reranker_enabled"`
 	SearchToolName   string   `mapstructure:"search_tool_name"`
 }
 
@@ -116,16 +113,16 @@ type DifyConfig struct {
 type WorkflowMode string
 
 const (
-	WorkflowModeSingle         WorkflowMode = "single"
-	WorkflowModeChain          WorkflowMode = "chain"
-	WorkflowModeParallel       WorkflowMode = "parallel"
-	WorkflowModeCycle          WorkflowMode = "cycle"
-	WorkflowModeGraph          WorkflowMode = "graph"
+	WorkflowModeSingle          WorkflowMode = "single"
+	WorkflowModeChain           WorkflowMode = "chain"
+	WorkflowModeParallel        WorkflowMode = "parallel"
+	WorkflowModeCycle           WorkflowMode = "cycle"
+	WorkflowModeGraph           WorkflowMode = "graph"
 	WorkflowModeTeamCoordinator WorkflowMode = "team_coordinator"
-	WorkflowModeTeamSwarm      WorkflowMode = "team_swarm"
-	WorkflowModeClaudeCode     WorkflowMode = "claude_code"
-	WorkflowModeCodex          WorkflowMode = "codex"
-	WorkflowModeDify           WorkflowMode = "dify"
+	WorkflowModeTeamSwarm       WorkflowMode = "team_swarm"
+	WorkflowModeClaudeCode      WorkflowMode = "claude_code"
+	WorkflowModeCodex           WorkflowMode = "codex"
+	WorkflowModeDify            WorkflowMode = "dify"
 )
 
 // WorkflowConfig defines multi-mode agent orchestration settings.
@@ -133,9 +130,6 @@ type WorkflowConfig struct {
 	Mode          string             `mapstructure:"mode"`
 	MaxIterations int                `mapstructure:"max_iterations"`
 	CycleMode     string             `mapstructure:"cycle_mode"`
-	StreamMode    string             `mapstructure:"stream_mode"`
-	CacheEnabled  bool               `mapstructure:"cache_enabled"`
-	Engine        string             `mapstructure:"engine"`
 	SubAgents     []SubAgentConfig   `mapstructure:"sub_agents"`
 	TeamMembers   []TeamMemberConfig `mapstructure:"team_members"`
 	ClaudeCodeBin string             `mapstructure:"claude_code_bin"`

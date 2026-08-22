@@ -49,10 +49,11 @@ type AssetDownloader struct {
 }
 
 // DefaultAssetDownloader returns a downloader with sensible defaults.
+// TLS verification is ON by default (InsecureSkipVerify=false); to relax it
+// pass the options through NewAssetDownloader with the cloner's TLS settings.
 func DefaultAssetDownloader() *AssetDownloader {
 	opts := httpclient.DefaultOptions()
 	opts.ForceIPv4 = true
-	opts.InsecureSkipVerify = true
 	client := httpclient.New(opts)
 	return &AssetDownloader{
 		Client:    client.Client,
@@ -60,6 +61,39 @@ func DefaultAssetDownloader() *AssetDownloader {
 		MaxBytes:  50 * 1024 * 1024, // 50 MB.
 		Retries:   3,
 	}
+}
+
+// NewAssetDownloader builds an asset downloader honouring the cloner's TLS
+// policy: strict verification by default, optional DoD/public root CA
+// bundle for .mil/.gov certificates, or InsecureSkipVerify as an explicit
+// opt-out.
+func NewAssetDownloader(insecure bool, caCertPath string) *AssetDownloader {
+	dl := DefaultAssetDownloader()
+	if insecure || caCertPath != "" {
+		opts := httpclient.DefaultOptions()
+		opts.ForceIPv4 = true
+		opts.InsecureSkipVerify = insecure
+		opts.RootCAsPath = caCertPath
+		client := httpclient.New(opts)
+		dl.Client = client.Client
+	}
+	return dl
+}
+
+// tlsConfigOfClient returns a copy of the TLS config carried by the given
+// http.Client's transport, so proxy branches can reuse the cloner's TLS
+// policy (strict verification, InsecureTLS, or a custom RootCAs bundle).
+// A new *tls.Config is returned each call to avoid shared-mutation hazards.
+func tlsConfigOfClient(c *http.Client) *tls.Config {
+	src := &tls.Config{ // default: strict verification
+		MinVersion: tls.VersionTLS12,
+	}
+	if c != nil {
+		if tr, ok := c.Transport.(*http.Transport); ok && tr.TLSClientConfig != nil {
+			src = tr.TLSClientConfig.Clone()
+		}
+	}
+	return src
 }
 
 // DownloadResult holds the result of a successful asset download.
@@ -205,9 +239,9 @@ func (d *AssetDownloader) tryDownload(ctx context.Context, assetURL string) (*Do
 		if err == nil {
 			transport := &http.Transport{
 				Proxy: http.ProxyURL(proxyParsed),
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: true,
-				},
+				// Inherit the AssetDownloader's TLS policy (strict by default,
+				// or InsecureTLS / RootCAs when configured on the cloner).
+				TLSClientConfig: tlsConfigOfClient(d.Client),
 				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 					if network == "tcp" {
 						network = "tcp4"
@@ -228,9 +262,9 @@ func (d *AssetDownloader) tryDownload(ctx context.Context, assetURL string) (*Do
 		if err == nil {
 			transport := &http.Transport{
 				Proxy: http.ProxyURL(proxyParsed),
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: true,
-				},
+				// Inherit the AssetDownloader's TLS policy (strict by default,
+				// or InsecureTLS / RootCAs when configured on the cloner).
+				TLSClientConfig: tlsConfigOfClient(d.Client),
 				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 					if network == "tcp" {
 						network = "tcp4"

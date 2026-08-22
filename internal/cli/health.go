@@ -13,6 +13,7 @@ import (
 
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/health"
+	"github.com/km269/wukong/internal/util"
 	"github.com/km269/wukong/pkg/sandbox"
 )
 
@@ -59,7 +60,7 @@ func runHealth(cmd *cobra.Command, args []string) error {
 	sysInfo := collectSystemInfo()
 
 	// Try to load config if available
-	reg := health.NewRegistry(Version)
+	reg := health.NewRegistry(util.Version)
 	registerSystemHealth(reg, sysInfo)
 
 	// Load config and register config-dependent checkers
@@ -129,7 +130,7 @@ func collectSystemInfo() systemInfo {
 		GoVersion: runtime.Version(),
 		CPUs:      runtime.NumCPU(),
 		Sandbox:   sandboxStatus,
-		Version:   Version,
+		Version:   util.Version,
 	}
 }
 

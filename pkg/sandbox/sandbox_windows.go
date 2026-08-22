@@ -51,10 +51,17 @@ func getLowIL() (*windows.SID, error) {
 }
 
 func applySandbox(cmd *exec.Cmd, ctx *sandboxCtx) error {
-	if err := setLowLabelOnDirs(ctx.writable); err != nil {
-		return fmt.Errorf("sandbox: label directories: %w", err)
-	}
+	// 1. Best-effort low-integrity labeling. This calls
+	//    SetNamedSecurityInfo which requires admin privileges; on a
+	//    non-admin shell it fails. Labeling is decoupled from the
+	//    Job Object path (per design): a failure here is skipped
+	//    (graceful degradation) so that the restricted Low-IL token
+	//    below and the Job Object resource limits / lifecycle still
+	//    apply. Both of those do NOT require admin.
+	_ = setLowLabelOnDirs(ctx.writable)
 
+	// 2. Restricted token with Low integrity level. Duplicating and
+	//    relabeling a token we own does not require admin.
 	var token windows.Token
 	if err := windows.OpenProcessToken(
 		windows.CurrentProcess(),
@@ -87,6 +94,101 @@ func applySandbox(cmd *exec.Cmd, ctx *sandboxCtx) error {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.Token = syscall.Token(dupToken)
+
+	// 3. Job Object for process lifecycle (kill-on-parent-exit) and
+	//    resource limits (CPU / memory / process count). Job Object
+	//    APIs do not require admin, so this enforces even when
+	//    labeling was skipped above.
+	if err := applyJobObject(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+// applyJobObject creates a Job Object with the requested resource
+// limits and/or kill-on-parent-exit, registers a cleanup to close
+// the handle (closing the last handle kills all assigned processes
+// when JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE is set), and registers a
+// post-start hook to assign the child process to the job once it has
+// started.
+//
+// No-op when neither limits nor KillOnParentExit are requested.
+func applyJobObject(ctx *sandboxCtx) error {
+	limits := ctx.limits
+	needJob := ctx.killOnParentExit ||
+		limits.MaxCPUSeconds > 0 ||
+		limits.MaxMemoryBytes > 0 ||
+		limits.MaxProcesses > 0
+	if !needJob {
+		return nil
+	}
+
+	job, err := windows.CreateJobObject(nil, nil)
+	if err != nil {
+		return fmt.Errorf("sandbox: create job object: %w", err)
+	}
+
+	info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
+	if ctx.killOnParentExit {
+		info.BasicLimitInformation.LimitFlags |=
+			windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	}
+	if limits.MaxMemoryBytes > 0 {
+		info.ProcessMemoryLimit = uintptr(limits.MaxMemoryBytes)
+		info.BasicLimitInformation.LimitFlags |=
+			windows.JOB_OBJECT_LIMIT_PROCESS_MEMORY
+	}
+	if limits.MaxCPUSeconds > 0 {
+		// PerProcessUserTimeLimit is in 100ns ticks.
+		info.BasicLimitInformation.PerProcessUserTimeLimit =
+			int64(limits.MaxCPUSeconds) * 10_000_000
+		info.BasicLimitInformation.LimitFlags |=
+			windows.JOB_OBJECT_LIMIT_PROCESS_TIME
+	}
+	if limits.MaxProcesses > 0 {
+		info.BasicLimitInformation.ActiveProcessLimit =
+			uint32(limits.MaxProcesses)
+		info.BasicLimitInformation.LimitFlags |=
+			windows.JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+	}
+
+	if _, err := windows.SetInformationJobObject(
+		job,
+		windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)),
+		uint32(unsafe.Sizeof(info)),
+	); err != nil {
+		windows.CloseHandle(job)
+		return fmt.Errorf("sandbox: set job limits: %w", err)
+	}
+
+	// Closing the last open handle to the job kills all assigned
+	// processes when KILL_ON_JOB_CLOSE is set; otherwise it just
+	// detaches the job. Registered as cleanup so Wait()/error paths
+	// release the handle.
+	ctx.addCleanup(func() { windows.CloseHandle(job) })
+
+	// Assign the child to the job after it starts. We need a process
+	// handle with PROCESS_SET_QUOTA (and PROCESS_TERMINATE so the job
+	// can enforce kill-on-close).
+	ctx.addPostStart(func(cmd *exec.Cmd) error {
+		if cmd.Process == nil {
+			return fmt.Errorf("sandbox: process not started")
+		}
+		h, err := windows.OpenProcess(
+			windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE,
+			false, uint32(cmd.Process.Pid),
+		)
+		if err != nil {
+			return fmt.Errorf("sandbox: open child process %d: %w",
+				cmd.Process.Pid, err)
+		}
+		defer windows.CloseHandle(h)
+		if err := windows.AssignProcessToJobObject(job, h); err != nil {
+			return fmt.Errorf("sandbox: assign to job: %w", err)
+		}
+		return nil
+	})
 	return nil
 }
 

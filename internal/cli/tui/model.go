@@ -562,10 +562,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if pendingTools > 0 {
 			m.setStatus(fmt.Sprintf("%d tool(s) running...", pendingTools))
 		} else {
-			m.setStatus("Stream complete")
+			m.setStatus("Thinking...")
 		}
 		m.updateViewport()
-		return m, nil
+		return m, readStreamEvent(m.streamCh)
 
 	case streamingErrorMsg:
 		m.addMessage("system", string(msg))
@@ -1247,7 +1247,7 @@ func StartTUI(
 	util.SetQuietMode()
 
 	if version == "" {
-		version = "v0.2.7"
+		version = util.Version
 	}
 
 	m := NewModel(ModelConfig{
