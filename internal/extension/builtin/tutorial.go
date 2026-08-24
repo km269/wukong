@@ -167,7 +167,7 @@ func (ts *TutorialToolSet) startTutorial(
 			Success:     true,
 			Title:       req.Topic,
 			Description: "从文件加载的教程",
-			Steps: []string{string(data)},
+			Steps:       []string{string(data)},
 		}, nil
 	}
 	return tutorial, nil

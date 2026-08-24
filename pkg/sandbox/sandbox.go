@@ -79,10 +79,10 @@ type Policy struct {
 
 // ResourceLimits are per-process resource caps. Zero = unlimited.
 type ResourceLimits struct {
-	MaxCPUSeconds   uint64 // Windows: JOB_OBJECT_LIMIT_PROCESS_TIME; Linux: RLIMIT_CPU
-	MaxMemoryBytes  uint64 // Windows: JOB_OBJECT_LIMIT_PROCESS_MEMORY; Linux: RLIMIT_AS
-	MaxFileBytes    uint64 // Linux: RLIMIT_FSIZE (Windows: ignored — no equivalent)
-	MaxProcesses    uint64 // Windows: JOB_OBJECT_LIMIT_ACTIVE_PROCESS; Linux: RLIMIT_NPROC
+	MaxCPUSeconds  uint64 // Windows: JOB_OBJECT_LIMIT_PROCESS_TIME; Linux: RLIMIT_CPU
+	MaxMemoryBytes uint64 // Windows: JOB_OBJECT_LIMIT_PROCESS_MEMORY; Linux: RLIMIT_AS
+	MaxFileBytes   uint64 // Linux: RLIMIT_FSIZE (Windows: ignored — no equivalent)
+	MaxProcesses   uint64 // Windows: JOB_OBJECT_LIMIT_ACTIVE_PROCESS; Linux: RLIMIT_NPROC
 }
 
 // Command returns a Cmd to execute the named program with the given

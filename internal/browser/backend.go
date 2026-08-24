@@ -1,10 +1,12 @@
 package browser
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/km269/wukong/internal/browser/renderkit"
 	"github.com/km269/wukong/internal/browser/rodbackend"
 	"github.com/km269/wukong/internal/browser/types"
 	"github.com/km269/wukong/internal/config"
@@ -43,12 +45,25 @@ type BackendOptions struct {
 	// InsecureTLS disables Chrome certificate verification (opt-out for
 	// intranet/.mil certs). Strict verification is the default.
 	InsecureTLS bool
+	// GlobalRenderSlots sizes the process-wide render budget shared by
+	// every pool (first caller to install it wins). 0 = auto
+	// (max(4, NumCPU)); negative disables the global budget entirely.
+	GlobalRenderSlots int
 }
 
-func NewBackend(backendType BackendType, opts BackendOptions) (types.BrowserBackend, error) {
+// NewBackend creates the selected browser backend. The pool's
+// lifetime is bound to ctx: cancelling ctx drains the pool and
+// releases the browser process; Close() remains the explicit,
+// idempotent cleanup path.
+func NewBackend(ctx context.Context, backendType BackendType, opts BackendOptions) (types.BrowserBackend, error) {
+	// Install the process-wide render budget before any pool exists so
+	// every pool created from here on shares one admission ceiling and
+	// its resource watermarks. Idempotent; first caller's size wins.
+	renderkit.EnsureGlobalBudget(opts.GlobalRenderSlots)
+
 	switch backendType {
 	case BackendRod:
-		rodBackend, err := rodbackend.New(rodbackend.Options{
+		rodBackend, err := rodbackend.New(ctx, rodbackend.Options{
 			Headless:         opts.Headless,
 			Workers:          opts.Workers,
 			Settle:           opts.Settle,
@@ -66,7 +81,7 @@ func NewBackend(backendType BackendType, opts BackendOptions) (types.BrowserBack
 			logutil.Warn("rod backend failed, falling back to chromedp",
 				slog.String("error", err.Error()))
 			// Fallback to chromedp if rod fails
-			return New(Options{
+			return New(ctx, Options{
 				Headless:         opts.Headless,
 				Workers:          opts.Workers,
 				Settle:           opts.Settle,
@@ -82,7 +97,7 @@ func NewBackend(backendType BackendType, opts BackendOptions) (types.BrowserBack
 		}
 		return rodBackend, nil
 	default:
-		return New(Options{
+		return New(ctx, Options{
 			Headless:         opts.Headless,
 			Workers:          opts.Workers,
 			Settle:           opts.Settle,
@@ -98,7 +113,10 @@ func NewBackend(backendType BackendType, opts BackendOptions) (types.BrowserBack
 	}
 }
 
-func NewBackendFromConfig(cfg *config.BrowserConfig) (types.BrowserBackend, error) {
+// NewBackendFromConfig builds a backend from config. Long-lived
+// callers that manage cleanup via Close() (e.g. the Controller) pass
+// context.Background(); task-scoped callers pass their task context.
+func NewBackendFromConfig(ctx context.Context, cfg *config.BrowserConfig) (types.BrowserBackend, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("browser config is nil")
 	}
@@ -130,17 +148,18 @@ func NewBackendFromConfig(cfg *config.BrowserConfig) (types.BrowserBackend, erro
 		proxy = globalProxyPool.GetProxy()
 	}
 
-	return NewBackend(backendType, BackendOptions{
-		Headless:         cfg.Headless,
-		Workers:          workers,
-		Settle:           settleTimeout,
-		RenderTimeout:    cfg.Timeout,
-		Scroll:           cfg.Scroll,
-		ChromeBin:        cfg.BrowserPath,
-		ControlURL:       cfg.ControlURL,
-		Stealth:          cfg.Stealth,
-		ProfileDir:       cfg.ProfileDir,
-		DisableDownloads: true,
-		Proxy:            proxy,
+	return NewBackend(ctx, backendType, BackendOptions{
+		Headless:          cfg.Headless,
+		Workers:           workers,
+		Settle:            settleTimeout,
+		RenderTimeout:     cfg.Timeout,
+		Scroll:            cfg.Scroll,
+		ChromeBin:         cfg.BrowserPath,
+		ControlURL:        cfg.ControlURL,
+		Stealth:           cfg.Stealth,
+		ProfileDir:        cfg.ProfileDir,
+		DisableDownloads:  true,
+		Proxy:             proxy,
+		GlobalRenderSlots: cfg.GlobalRenderSlots,
 	})
 }

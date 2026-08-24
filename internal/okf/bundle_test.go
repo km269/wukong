@@ -98,11 +98,11 @@ func TestLoadBundle(t *testing.T) {
 
 	// Create test files.
 	files := map[string]string{
-		"index.md": "---\ntype: index\nokf_version: \"0.1\"\n---\n\n# Index\n",
-		"log.md":   "---\ntype: changelog\n---\n\n# Log\n",
-		"tables/orders.md": "---\ntype: table\ntitle: Orders\n---\n\n# Orders\n\nSee [customers](../tables/customers.md)\n",
+		"index.md":            "---\ntype: index\nokf_version: \"0.1\"\n---\n\n# Index\n",
+		"log.md":              "---\ntype: changelog\n---\n\n# Log\n",
+		"tables/orders.md":    "---\ntype: table\ntitle: Orders\n---\n\n# Orders\n\nSee [customers](../tables/customers.md)\n",
 		"tables/customers.md": "---\ntype: table\ntitle: Customers\n---\n\n# Customers\n",
-		"api/checkout.md": "---\ntype: api\n---\n\n# Checkout API\n",
+		"api/checkout.md":     "---\ntype: api\n---\n\n# Checkout API\n",
 	}
 
 	for path, content := range files {

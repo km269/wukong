@@ -67,12 +67,12 @@ func (c MultiFidelityConfig) WithDefaults() MultiFidelityConfig {
 
 // MultiFidelityResult holds the output of three-pass evaluation.
 type MultiFidelityResult struct {
-	FastPass    *TuneRun                 `json:"fast_pass"`
-	MiddlePass  *TuneRun                 `json:"middle_pass,omitempty"`
-	ConfirmPass *TuneRun                 `json:"confirm_pass"`
-	Survivors   []search.SearchGenome    `json:"survivors"`
-	BestMetrics search.StrategyMetrics   `json:"best_metrics"`
-	Report      TuneReport               `json:"report"`
+	FastPass    *TuneRun               `json:"fast_pass"`
+	MiddlePass  *TuneRun               `json:"middle_pass,omitempty"`
+	ConfirmPass *TuneRun               `json:"confirm_pass"`
+	Survivors   []search.SearchGenome  `json:"survivors"`
+	BestMetrics search.StrategyMetrics `json:"best_metrics"`
+	Report      TuneReport             `json:"report"`
 }
 
 // RunMultiFidelity executes the three-pass evaluation pipeline.

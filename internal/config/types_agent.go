@@ -9,11 +9,11 @@ import "time"
 // AgentConfig controls the core agent loop behavior, LLM generation
 // parameters, and tool execution retry policies.
 type AgentConfig struct {
-	MaxLLMCalls                          int              `mapstructure:"max_llm_calls"`
-	MaxToolIterations                    int              `mapstructure:"max_tool_iterations"`
-	ParallelTools                        bool             `mapstructure:"parallel_tools"`
-	Streaming                            bool             `mapstructure:"streaming"`
-	MaxRunDuration                       time.Duration    `mapstructure:"max_run_duration"`
+	MaxLLMCalls       int           `mapstructure:"max_llm_calls"`
+	MaxToolIterations int           `mapstructure:"max_tool_iterations"`
+	ParallelTools     bool          `mapstructure:"parallel_tools"`
+	Streaming         bool          `mapstructure:"streaming"`
+	MaxRunDuration    time.Duration `mapstructure:"max_run_duration"`
 	// ToolCallTimeout caps the execution time of a single tool call.
 	// It prevents one slow or hung tool (e.g. a web fetch to a heavy
 	// site) from consuming the entire run budget. Zero disables the
@@ -82,7 +82,7 @@ type SecurityConfig struct {
 	// binding for shell commands executed by the developer toolset.
 	// Defaults to all-zero (unlimited, no lifecycle binding) so
 	// existing behavior is unchanged unless explicitly enabled.
-	Sandbox                SandboxConfig   `mapstructure:"sandbox"`
+	Sandbox SandboxConfig `mapstructure:"sandbox"`
 }
 
 // SandboxConfig configures the process-level sandbox applied to

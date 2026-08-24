@@ -135,45 +135,14 @@ scoop install wukong
 
 ## 3. 配置体系
 
-### 3.1 配置文件查找优先级
+配置加载遵循 7 级优先级（`internal/config/config.go`）：CLI flags > 环境变量（`WUKONG_` 前缀自动映射）> `--config` 显式文件 > `./config.yaml` > `~/.config/wukong/config.yaml` > `/etc/wukong/config.yaml` > 内置默认值（`internal/config/defaults.go`）。密钥类字段支持 `${VAR}` / `${VAR:-default}` 展开，展开的键名会被收集用于日志脱敏。
 
-`internal/config/config.go` 按以下顺序解析：
+> 加载优先级的完整规则、环境变量映射细节、20+ 支持展开的字段清单与完整校验规则（致命 + 警告）见 [CONFIG.md](./CONFIG.md) §1–§3，此处不重复。
 
-```
-+---------------------------------------------------+
-| 1. CLI flags（最高，如 --config）                 |
-+---------------------------------------------------+
-| 2. 环境变量（WUKONG_ 前缀，自动映射）             |
-+---------------------------------------------------+
-| 3. --config 显式指定的文件                        |
-+---------------------------------------------------+
-| 4. ./config.yaml（当前工作目录）                  |
-+---------------------------------------------------+
-| 5. ~/.config/wukong/config.yaml（用户目录）       |
-+---------------------------------------------------+
-| 6. /etc/wukong/config.yaml（非 Windows 系统目录） |
-+---------------------------------------------------+
-| 7. 内置默认值 internal/config/defaults.go（最低） |
-+---------------------------------------------------+
-```
-
-### 3.2 环境变量展开
-
-所有含密钥的配置键支持 `${VAR}` / `${VAR:-default}` 语法（`expandEnvTracked()`），展开的密钥键名被收集用于日志脱敏：
-
-```yaml
-providers:
-  deepseek:
-    api_key: ${DEEPSEEK_API_KEY}           # 必须通过环境变量注入
-    base_url: https://api.deepseek.com/v1
-```
-
-环境变量映射规则：`WUKONG_` 前缀 + 下划线分隔路径，如 `providers.deepseek.api_key` → `WUKONG_PROVIDERS_DEEPSEEK_API_KEY`。
-
-### 3.3 配置校验
+运维常用命令：
 
 ```bash
-wukong config validate     # 12 项检查：必填项、互斥项、路径可达性等
+wukong config validate     # 12 项检查：必填项、互斥项、路径可达性等（部署前自检）
 wukong config show         # 打印合并后的最终配置（密钥脱敏）
 ```
 
@@ -181,7 +150,7 @@ wukong config show         # 打印合并后的最终配置（密钥脱敏）
 
 ## 4. 路径约定与运行时目录
 
-Wukong 对文件系统路径有严格的分层约定：
+部署时需要区分并分别持久化两组目录（完整路径解析规则见 [CONFIG.md](./CONFIG.md) §4 路径约定）：
 
 ```
 ~/.config/wukong/                    # 用户配置根目录（可持久化）
@@ -194,7 +163,7 @@ Wukong 对文件系统路径有严格的分层约定：
 .wukong/                             # 运行时工作目录（当前工作目录下）
 ├── apps/                            # 应用执行产物
 ├── cache/                           # 缓存（克隆/搜索等）
-├── recipes/                         # Recipe 执行产物
+├── recipes/                         # Recipe 定义
 ├── skills/                          # 技能定义（SKILL.md）
 ├── visuals/                         # 可视化输出
 ├── okf/                             # OKF 知识 Bundle
@@ -203,7 +172,7 @@ Wukong 对文件系统路径有严格的分层约定：
 .wukongignore                        # Git 式忽略文件（控制 Agent 文件访问范围）
 ```
 
-> **`.wukong/` 是运行时目录，`~/.config/wukong/` 是用户配置目录**——两者职责分离。
+> **`.wukong/` 是运行时目录，`~/.config/wukong/` 是用户配置目录**——两者职责分离；容器/K8s 部署时前者随工作目录（如 `/data`）挂载，后者需独立卷。
 
 ---
 
@@ -248,22 +217,17 @@ Wukong 对文件系统路径有严格的分层约定：
 
 | 子系统 | 默认 | 可选 | 配置路径 |
 |--------|------|------|----------|
-| session | sqlite (`wukong.db`) | redis（`go-redis v9.12.1`） | `session.backend: redis` |
-| memory | sqlite (`wukong.db`) | redis | `memory.backend: redis` |
+| session | sqlite (`wukong.db`) | memory / redis（`go-redis v9.12.1`） | `session.backend` + `session.redis_url` |
+| memory | sqlite (`wukong.db`) | memory（进程内）；`redis` 仅在配置校验中为合法值，**实际未实现** | `memory.backend` |
 | 制品/产物 | 本地文件 | 对象存储 COS | `artifact.backend: cos` |
 
 ```yaml
 session:
   backend: redis
-  redis:
-    addr: localhost:6379
-    db: 0
-memory:
-  backend: redis
-  redis:
-    addr: localhost:6379
-    db: 1
+  redis_url: "redis://localhost:6379/0"   # 留空时回退 redis://localhost:6379/0
 ```
+
+> **注意**：`SessionConfig` 只有 `redis_url` 一个 Redis 连接字段（`internal/config/types_storage.go`），**没有** `redis.addr` / `redis.db` 之类的嵌套结构——`NewRedisSessionService` 通过 `redis.ParseURL` 解析该 URL。`MemoryConfig` 没有任何 Redis 连接字段，`internal/memory` 的 `createService` 仅实现 `sqlite` / `memory` 两种后端（配置 `backend: redis` 会在启动时报 unsupported memory backend）。
 
 ---
 
@@ -277,7 +241,7 @@ memory:
 | AG-UI SSE | `:8080` `/agui` | `agui.address` / `agui.path` | 禁用 |
 | ACP Server | `:9091` `/acp` | `acp_server.address` / `acp_server.path` | 禁用 |
 | **ACP MCP Bridge** | `:3400` `/mcp` | `acp_mcp.address` / `acp_mcp.path` | **默认启用** |
-| Standalone MCP Server | `:9091` | `mcp_server.address` | 禁用 |
+| Standalone MCP Server | 无内置默认（config.yaml 模板为 `:3401`，`mcp_server.enabled: true` 时 `address` 必填） | `mcp_server.address` | 禁用 |
 | ANP Server | `:9092` | `anp.port` | 禁用 |
 | ARD Registry | 动态 / `0` | `ard.publish_port` | 禁用 |
 | Health HTTP | `:8086` | 硬编码（仅 server 模式） | server 模式自动启用 |
@@ -347,7 +311,7 @@ type ComponentHealth struct {
 ```json
 {
   "status": "healthy",
-  "version": "v0.2.0",
+  "version": "v0.2.9",
   "uptime": "2h13m",
   "components": [
     { "name": "database",    "status": "healthy", "message": "database is reachable", "latency_ms": 2 },
@@ -498,7 +462,7 @@ telemetry:
   exporter_type: grpc          # 默认 console
   endpoint: localhost:4317     # OTel Collector 默认地址
   service_name: wukong
-  service_version: v0.2.0
+  service_version: v0.2.9
   environment: production
   sample_rate: 1.0             # 1.0 = 全采样
 ```
@@ -695,7 +659,7 @@ spec:
 | `wukong backup` | 对 `wukong.db` 做带时间戳的 `.bak` 拷贝 |
 | `wukong system-check` | 系统就绪诊断：config / provider / DB / sandbox / 工作目录 |
 | `wukong bench` | 模型延迟基准（tokens/s、延迟统计） |
-| `wukong config validate` / `config show` | 配置校验（12 项检查）与查看 |
+| `wukong config validate` / `config show` | 配置完整校验（与启动路径一致）与查看 |
 
 ### 12.2 常见问题
 
@@ -727,19 +691,19 @@ SQLite WAL 模式支持多进程读但只允许单进程写。**不推荐多个 
 
 ### 13.2 Redis 后端实现水平扩展
 
-当需要多实例部署时，将 session 和 memory 切换到 Redis 后端：
+当需要多实例部署时，将 session 切换到 Redis 后端（`session.backend: redis` + `session.redis_url`，见 §5.2；memory 的 redis 后端当前未实现，多实例下各实例仍使用本地 SQLite）：
 
 ```
                           ┌──────────────┐
     Wukong Instance A ────┤              │
     (wukong server)       │   Redis      │  ← session 共享
-                          │   :6379      │  ← memory 共享
+                          │   :6379      │
     Wukong Instance B ────┤              │
     (wukong server)       │              │
                           └──────────────┘
 ```
 
-每个实例仍然维护自己的本地 `wukong.db`（用于 todo / recall / cortex 等本地子系统），但会话和记忆通过 Redis 共享。
+每个实例仍然维护自己的本地 `wukong.db`（用于 memory / todo / recall / cortex 等本地子系统），会话数据通过 Redis 共享。
 
 ### 13.3 备份恢复
 
@@ -760,11 +724,11 @@ cp ~/.config/wukong/wukong.db-shm /backup/ 2>/dev/null || true
 | 主题 | 文档 |
 |------|------|
 | 配置项完整参考 | [CONFIG.md](./CONFIG.md) |
-| 架构设计 | [ARCHITECTURE.md](./ARCHITECTURE.md) |
+| 架构设计 | [ARCHITECTURE.md](./ARCHITECTURE.md)（含关键流程实现细节） |
 | CLI 与 TUI 使用 | [CLI_TUI.md](./CLI_TUI.md) |
-| 技术实现 | [TECHNICAL_IMPLEMENTATION.md](./TECHNICAL_IMPLEMENTATION.md) |
+| 项目总览 | [README.md](../README.md) |
 | 记忆系统 | [MEMORY_ARCHITECTURE.md](./MEMORY_ARCHITECTURE.md) |
 
 ---
 
-> **版本**: v0.2.0 | **最后更新**: 2026-08-11
+> **版本**: v0.2.9 | **最后更新**: 2026-08-23

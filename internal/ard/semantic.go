@@ -18,31 +18,31 @@ import (
 // It uses OpenAI-compatible embedding API to generate vectors from
 // representativeQueries and computes cosine similarity for ranking.
 type SemanticIndex struct {
-	mu          sync.RWMutex
-	entries     map[string]*IndexedEntry // URN -> indexed entry
-	vectors     map[string][]float32     // URN -> embedding vector
-	dimensions  int                      // Vector dimensions
-	embedderURL string                   // Embedding API base URL
-	embedderKey string                   // Embedding API key
-	embedderModel string                 // Embedding model name
-	client      *http.Client
+	mu            sync.RWMutex
+	entries       map[string]*IndexedEntry // URN -> indexed entry
+	vectors       map[string][]float32     // URN -> embedding vector
+	dimensions    int                      // Vector dimensions
+	embedderURL   string                   // Embedding API base URL
+	embedderKey   string                   // Embedding API key
+	embedderModel string                   // Embedding model name
+	client        *http.Client
 }
 
 // IndexedEntry represents a catalog entry with its embedding vector.
 type IndexedEntry struct {
-	URN        string
-	Entry      *CatalogEntry
-	Vector     []float32
-	QueryVecs  [][]float32 // Vectors for each representativeQuery
+	URN       string
+	Entry     *CatalogEntry
+	Vector    []float32
+	QueryVecs [][]float32 // Vectors for each representativeQuery
 }
 
 // NewSemanticIndex creates a new semantic index.
 func NewSemanticIndex(embedderURL, embedderKey, embedderModel string) *SemanticIndex {
 	return &SemanticIndex{
-		entries:      make(map[string]*IndexedEntry),
-		vectors:      make(map[string][]float32),
-		embedderURL:  embedderURL,
-		embedderKey:  embedderKey,
+		entries:       make(map[string]*IndexedEntry),
+		vectors:       make(map[string][]float32),
+		embedderURL:   embedderURL,
+		embedderKey:   embedderKey,
 		embedderModel: embedderModel,
 		client: &http.Client{
 			Timeout: 30 * time.Second,
@@ -80,8 +80,8 @@ func (si *SemanticIndex) IndexEntry(ctx context.Context, entry *CatalogEntry) er
 
 	// Store indexed entry
 	indexed := &IndexedEntry{
-		URN:   entry.Identifier,
-		Entry: entry,
+		URN:    entry.Identifier,
+		Entry:  entry,
 		Vector: vectors[0],
 	}
 
@@ -365,9 +365,9 @@ func truncatePreview(s string, maxLen int) string {
 
 // HybridSearch combines lexical and semantic search.
 type HybridSearch struct {
-	lexical    *Registry
-	semantic   *SemanticIndex
-	alpha      float64 // Weight for semantic (0-1), lexical is (1-alpha)
+	lexical  *Registry
+	semantic *SemanticIndex
+	alpha    float64 // Weight for semantic (0-1), lexical is (1-alpha)
 }
 
 // NewHybridSearch creates a hybrid search combining lexical and semantic.

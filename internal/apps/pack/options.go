@@ -19,26 +19,26 @@ const (
 
 // Options defines configuration for application packaging.
 type Options struct {
-	Format        Format
-	OutputPath    string
-	AppName       string
+	Format         Format
+	OutputPath     string
+	AppName        string
 	AppDescription string
-	AppVersion    string
-	BaseBinary    string
-	IconPath      string
-	Compress      bool
-	IncludeAssets bool
-	EmbedFonts    bool
+	AppVersion     string
+	BaseBinary     string
+	IconPath       string
+	Compress       bool
+	IncludeAssets  bool
+	EmbedFonts     bool
 
 	// ZIM metadata.
-	Language   string // ISO 639-3 language code (default "eng").
-	Creator    string // Archive creator (default "Wukong").
-	Publisher  string // Archive publisher.
-	Date       string // Archive date (YYYY-MM-DD, default today).
-	Title      string // Override title (default from main page <title>).
+	Language     string // ISO 639-3 language code (default "eng").
+	Creator      string // Archive creator (default "Wukong").
+	Publisher    string // Archive publisher.
+	Date         string // Archive date (YYYY-MM-DD, default today).
+	Title        string // Override title (default from main page <title>).
 	MainPagePath string // Preferred main page relative path (e.g. "biographies-list.html").
-	                   // If set and the file exists, it takes priority over root index.html
-	                   // and the auto-generated content index.
+	// If set and the file exists, it takes priority over root index.html
+	// and the auto-generated content index.
 
 	// Incremental ZIM packing.
 	Incremental bool   // Reuse unchanged clusters from cache.
@@ -48,16 +48,16 @@ type Options struct {
 // DefaultOptions returns default packaging options.
 func DefaultOptions() Options {
 	return Options{
-		Format:        FormatHTML,
-		OutputPath:    "",
-		AppName:       "",
+		Format:         FormatHTML,
+		OutputPath:     "",
+		AppName:        "",
 		AppDescription: "",
-		AppVersion:    "1.0.0",
-		BaseBinary:    "",
-		IconPath:      "",
-		Compress:      false,
-		IncludeAssets: true,
-		EmbedFonts:    false,
+		AppVersion:     "1.0.0",
+		BaseBinary:     "",
+		IconPath:       "",
+		Compress:       false,
+		IncludeAssets:  true,
+		EmbedFonts:     false,
 	}
 }
 

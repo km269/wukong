@@ -45,17 +45,17 @@ const (
 // AppBridge provides bidirectional communication between UI and host.
 // Implements JSON-RPC 2.0 over postMessage transport.
 type AppBridge struct {
-	mu              sync.RWMutex
-	requestHandler  RequestHandler
-	notifyHandler   NotifyHandler
-	messageHandler  MessageHandler
-	initialized     bool
-	hostContext     *HostContext
-	requestID       int64
-	pendingReqs     map[int64]*pendingRequest
-	messageQueue    []JSONRPCMessage
-	queueMu         sync.Mutex
-	onSendCallback  func(msg JSONRPCMessage) error
+	mu             sync.RWMutex
+	requestHandler RequestHandler
+	notifyHandler  NotifyHandler
+	messageHandler MessageHandler
+	initialized    bool
+	hostContext    *HostContext
+	requestID      int64
+	pendingReqs    map[int64]*pendingRequest
+	messageQueue   []JSONRPCMessage
+	queueMu        sync.Mutex
+	onSendCallback func(msg JSONRPCMessage) error
 }
 
 // pendingRequest tracks an outgoing request awaiting response.
@@ -97,7 +97,7 @@ type HostContext struct {
 // NewAppBridge creates a new AppBridge.
 func NewAppBridge() *AppBridge {
 	return &AppBridge{
-		pendingReqs: make(map[int64]*pendingRequest),
+		pendingReqs:  make(map[int64]*pendingRequest),
 		messageQueue: make([]JSONRPCMessage, 0),
 	}
 }

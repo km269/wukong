@@ -1,7 +1,28 @@
 # Wukong 系统架构
 
-> 本文档基于全量源码深度扫描，描述 Wukong 的分层架构、启动流程、核心数据流与设计原则。
-> 最后更新：2026-08-11
+> 本文档基于全量源码深度扫描，描述 Wukong 的分层架构、启动流程、核心数据流、各子系统的技术实现细节与设计原则。
+> 最后更新：2026-08-23
+
+---
+
+## 目录
+
+1. [项目定位](#1-项目定位)
+2. [分层架构](#2-分层架构)
+3. [启动流程](#3-启动流程)
+4. [CoreLoop — 编排引擎核心](#4-coreloop--编排引擎核心)
+5. [Provider 系统](#5-provider-系统)
+6. [协议层](#6-协议层)
+7. [记忆系统（双引擎三层）](#7-记忆系统双引擎三层)
+8. [技能自进化系统](#8-技能自进化系统)
+9. [扩展与发现系统](#9-扩展与发现系统)
+10. [安全系统](#10-安全系统)
+11. [会话与存储](#11-会话与存储)
+12. [可观测性](#12-可观测性)
+13. [基础设施](#13-基础设施)
+14. [目录结构](#14-目录结构)
+15. [关键设计原则](#15-关键设计原则)
+16. [相关文档](#16-相关文档)
 
 ---
 
@@ -57,16 +78,16 @@
 ║  ┌────────────────────────────▼────────────────────────────────────┐  ║
 ║  │             编排层 / Orchestration (agent/)                    │  ║
 ║  │                                                                 │  ║
-║  │  ┌───────────────────────────────────────────────────────────┐  │  ║
-║  │  │                      CoreLoop                             │  │  ║
-║  │  │  Run() → 4重上下文注入 → runner.Run() → 事件流 → 后处理   │  │  ║
-║  │  │                                                          │  │  ║
-║  │  │  4 重上下文注入：                                         │  │  ║
-║  │  │  ├─ MemoryFlow.WakeUp()       [历史对话唤醒, 3层上下文]  │  │  ║
-║  │  │  ├─ Recall/Cortex Search()    [FTS5/HNSW 跨会话检索]    │  │  ║
-║  │  │  ├─ Memory.ReadMemories()     [持久记忆注入+去重]        │  │  ║
-║  │  │  └─ ContextRevisionEngine     [令牌预算/异步摘要压缩]    │  │  ║
-║  │  └───────────────────────────────────────────────────────────┘  │  ║
+║  │  ┌───────────────────────────────────────────────────────────┐  ║
+║  │  │                      CoreLoop                             │  ║
+║  │  │  Run() → 4重上下文注入 → runner.Run() → 事件流 → 后处理   │  ║
+║  │  │                                                          │  ║
+║  │  │  4 重上下文注入：                                         │  ║
+║  │  │  ├─ MemoryFlow.WakeUp()       [历史对话唤醒, 3层上下文]  │  ║
+║  │  │  ├─ Recall/Cortex Search()    [FTS5/HNSW 跨会话检索]    │  ║
+║  │  │  ├─ Memory.ReadMemories()     [持久记忆注入+去重]        │  ║
+║  │  │  └─ ContextRevisionEngine     [令牌预算/异步摘要压缩]    │  ║
+║  │  └───────────────────────────────────────────────────────────┘  ║
 ║  │                                                                 │  ║
 ║  │  Agent 类型：single | chain | parallel | cycle | graph          │  ║
 ║  │              | team_coordinator | team_swarm                    │  ║
@@ -113,7 +134,7 @@
 ║  │  session/     会话存储 (SQLite / Redis / Memory)               │  ║
 ║  │  errsignal/   信号驱动错误分类 (7类)                           │  ║
 ║  │  cors/        CORS 中间件 (localhost-only)                     │  ║
-║  ╚══════════════════════════════════════════════════════════════════╝  ║
+║  ╚════════════════════════════════════════════════════════════════╝  ║
 ║                                                                        ║
 ╚════════════════════════════════════════════════════════════════════════╝
 ```
@@ -222,6 +243,11 @@ shutdownBootstrap(ctx, state, loop)
 
 CoreLoop 是整个系统的**心脏**，封装了单次 Agent 交互的完整生命周期。定义于 [loop.go](../internal/agent/loop.go)。
 
+Wukong 采用**双层循环设计**：
+
+- **内循环（trpc-agent-go）**：think → act → observe → decide，由 Planner 驱动
+- **外循环（CoreLoop）**：上下文压缩 → 记忆注入 → 安全校验 → 后置记忆固化
+
 ### 4.1 结构
 
 ```go
@@ -284,7 +310,15 @@ type CoreLoop struct {
     └─ [同步] contextMgr.AfterRun() [令牌统计]
 ```
 
-### 4.4 Agent 装配（createSingleAgent）
+### 4.4 三层 Callbacks
+
+| Callback | 钩子 | 作用 |
+|----------|------|------|
+| Agent Callback | Before/After agent run | 执行日志 |
+| Tool Callback | BeforeTool | **安全核心**：4 重校验（权限黑白名单 → 审批模式 → 命令校验 → .wukongignore 文件路径） |
+| Model Callback | AfterModel | Token usage 记录 |
+
+### 4.5 Agent 装配（createSingleAgent）
 
 关键配置旋钮映射（均来自 `config.AgentConfig`）：
 
@@ -299,34 +333,138 @@ type CoreLoop struct {
 | `Planner=builtin` | `builtin.New` | 内置规划器（ReasoningEffort/Thinking） |
 | `Planner=react` | `react.New` | ReAct 规划器 |
 
-### 4.5 Agent 编排模式
+### 4.6 Agent 编排模式
 
-| 模式 | 实现 | 说明 |
-|------|------|------|
-| `single` | LLMAgent | 标准 Agent + 工具调用循环（默认） |
-| `chain` | ChainAgent | 顺序执行（planner→executor→reviewer） |
-| `parallel` | ParallelAgent | 并发执行（code/doc/test-analyzer） |
-| `cycle` | CycleAgent | 多轮自驱循环（planner↔executor 直到 `TASK_COMPLETE`） |
-| `graph` | GraphAgent | 条件路由 DAG（analyze→{code\|search\|answer}→review） |
-| `team_coordinator` | Team.New | 协调者通过 AgentTool 委派成员 |
-| `team_swarm` | Team.NewSwarm | 群体控制转移（`transfer_to_agent`） |
-| `claude_code` | ClaudeCode.New | Claude Code CLI 包装 |
-| `codex` | Codex.New | OpenAI Codex CLI 包装 |
-| `dify` | BuildDify | Dify 平台（阻塞/SSE 流式） |
+| 模式 | 实现 | 默认子 Agent | 说明 |
+|------|------|-------------|------|
+| `single` | LLMAgent | — | 标准 Agent + 工具调用循环（默认） |
+| `chain` | ChainAgent | planner→executor→reviewer | 顺序执行，每个接收上一个输出 |
+| `parallel` | ParallelAgent | code/doc/test-analyzer | 并发执行 |
+| `cycle` | CycleAgent | cycle-planner↔executor | 多轮自驱，`escalationFunc` 检测 `TASK_COMPLETE` 退出（maxIter=10）；code_review 模式 maxIter=5 检测 `CODE_APPROVED` |
+| `graph` | GraphAgent | analyze→{code\|search\|answer}→review | 条件路由 DAG，`AddConditionalEdges` 按分类路由 |
+| `team_coordinator` | Team.New | coordinator + researcher/coder/reviewer | 协调者经 AgentTool 委派，并行工具 |
+| `team_swarm` | Team.NewSwarm | entry + members | 无中心，`transfer_to_agent` 转移，`WithCrossRequestTransfer` 支持跨请求转移 |
+| `claude_code` | ClaudeCode.New | — | Claude Code CLI 包装（`--permission-mode bypassPermissions`，StreamJSON 输出） |
+| `codex` | Codex.New | — | OpenAI Codex CLI 包装（`--sandbox workspace-write`） |
+| `dify` | BuildDify | — | Dify 平台（阻塞/SSE 流式） |
 
-### 4.6 Runner 插件
+**子 Agent 工具过滤**：`SubAgentConfig.AllTools=false` 且 `AllowedTools` 非空时，仅授予列表中的工具。
+
+### 4.7 Runner 插件
 
 | 插件 | 钩子 | 作用 |
 |------|------|------|
-| `toolsearch` | runner | TopK 工具过滤（默认 20），降低 token 成本 |
-| `guardrail` | runner | 独立轻量审查 Agent → promptinjection 检测 |
-| `todoEnforcer` | AfterAgent | 检测未完成 todo（仅警告，不阻塞） |
-| `evolutionTracker` | BeforeAgent + OnEvent | 记录执行轨迹（LLM/工具调用明细）供进化引擎分析 |
+| `toolsearch` | runner | TopK 工具过滤（默认 20，`WithMaxTools` + `WithFailOpen`），降低 token 成本 |
+| `guardrail` | runner | 独立轻量审查 Agent（review.New → promptinjection.New → guardrail.New）→ promptinjection 检测 |
+| `todoEnforcer` | AfterAgent | 读 `temp:todos` state key，检测未完成 todo（仅警告，不阻塞） |
+| `evolutionTracker` | BeforeAgent + OnEvent | 记录执行轨迹（`evo_start_at`/`evo_llm_calls`/`evo_tool_call_count`/`evo_tool_calls[]`）供进化引擎分析 |
 | `RecipeToolSet` | 工具集 | YAML Recipe 子 Agent + list/reload/stats 辅助工具 |
+
+### 4.8 上下文管理与压缩
+
+定义于 [context.go](../internal/agent/context.go)。`ContextRevisionEngine` 实现 Goose 风格的上下文压缩策略。
+
+#### 触发条件（shouldRevise）
+
+满足其一即触发异步摘要：
+
+- `estimatedTokens > maxTokens × (1.0 - TrimRatio)`
+- `messageCount > 100`
+- 距上次压缩超过 5 分钟
+
+#### 压缩策略
+
+| 方法 | 策略 |
+|------|------|
+| `SummarizeContent` | 用 RevisionModel 生成摘要；无模型则 `truncateContent` |
+| `TruncateCommandOutput` | 智能截断：保留头尾，中间插入 `[N bytes truncated]`（默认上限 8000） |
+| `FilterIrrelevant` | 分两半：旧消息 LLM 摘要/占位符 + 近期消息保留 |
+| `ProgressiveSummarize` | 增量合并：冷却门控 → LLM 合并（`[Existing Summary]`/`[New Messages]` 前缀）→ 失败回退 `algorithmicMerge` |
+| `algorithmicMerge` | 非 LLM：拼接 + `--- Recent Activity ---` 分隔 + 截断 |
+
+#### ContextCompaction 两阶段
+
+- **Pass 1**：`WithContextCompactionToolResultMaxTokens`（默认 1024）— 用占位符替换旧的超大工具结果
+- **Pass 2**：`WithContextCompactionOversizedToolResultMaxTokens`（推荐 8192）— 截断剩余大工具结果的头尾
+- **保护近期**：`WithContextCompactionKeepRecentRequests`
+- **按工具配置**：`ForceCleanToolNames`（强制清理噪声工具）/ `KeepToolNames`（排除关键工具）
+
+#### RevisionModel 解析优先级
+
+`revision.revision_provider` → `lightweight_provider` → `default_provider`。
+
+`revisionModelAdapter` 内部 prompt 通过 `[Existing Summary]` 前缀自动切换"全新摘要"/"合并摘要"模式。
+
+### 4.9 Recipe 子 Agent 系统
+
+Recipe 是 YAML 定义的"结构化子 Agent"，从 `.wukong/recipes/*.yaml` 加载，注册为 `recipe-<name>` 工具。定义于 [recipe.go](../internal/agent/recipe.go) 等。
+
+#### RecipeConfig 字段
+
+| 字段 | 类型 | 说明 | 演进阶段 |
+|------|------|------|---------|
+| `name` | string | 唯一标识，工具名 `recipe-<name>` | 基础 |
+| `description` | string | 主 Agent 选择工具的依据 | 基础 |
+| `instruction` | string | 子 Agent 系统提示 | 基础 |
+| `prompt` | string | Go text/template 参数化任务模板 | P0 |
+| `parameters` | []RecipeParameter | 动态参数（string/number/boolean/select） | P0 |
+| `response` | *RecipeResponseConfig | 结构化输出 JSON Schema | P0 |
+| `retry` | *RecipeRetryConfig | 指数退避重试 | P1-B |
+| `extends` | string | 继承另一个 Recipe | P2-B |
+| `model` | string | 每 Recipe 独有 LLM 模型 | P3-A |
+| `tools` | []string | 授予的工具名（可含 recipe 引用） | 基础/P1-A |
+| `timeout` | string | 执行超时 | P3-B |
+
+#### 七阶段构建流水线
+
+1. **Phase 1**：加载 Recipe 配置（磁盘 `.wukong/recipes/*.yaml` + 内联 `config.Agent.InlineRecipes`）
+2. **Phase 2**：解析 extends 链（递归，`visiting` map 检测循环）
+3. **Phase 3**：子 Recipe 依赖拓扑排序（Kahn 算法，保证确定性，检测循环依赖）
+4. **Phase 4**：按序构建——模型覆盖 → 工具合并 → LLMAgent → agenttool 包装
+5. **参数化包装**：`len(Parameters) > 0 && Prompt != ""` 时用 `recipeTool` 包装
+6. **Retry 包装**：`recipe.Retry != nil` 时用 `retryTool` 包装
+7. **Timeout 包装**：`recipe.Timeout != ""` 时用 `timeoutTool` 包装
+
+#### 辅助工具
+
+- `list_recipes`：返回所有 Recipe 的 JSON 描述
+- `reload_recipes`：手动触发磁盘重载
+- `recipe_stats`：查询执行统计（CallCount/SuccessCount/TotalDuration）
+
+#### 热重载
+
+`hotReloader` 使用 `fsnotify` 监视 Recipe 目录，500ms 去抖，监听 Create/Write/Remove/Rename 事件触发重建。
 
 ---
 
-## 5. 协议层
+## 5. Provider 系统
+
+### 5.1 统一 LLM 工厂
+
+支持 8 种 provider 类型，定义于 [provider/factory.go](../internal/provider/factory.go)。除 ACP 外全部走 OpenAI 兼容 API：
+
+| Type | Base URL | 实现 |
+|------|----------|------|
+| `openai` | api.openai.com/v1 | `openai.New` |
+| `anthropic` | api.anthropic.com/v1 | `openai.New`（兼容层） |
+| `google` | generativelanguage…/openai | `openai.New`（兼容层） |
+| `deepseek` | api.deepseek.com | `openai.New` |
+| `ollama` | localhost:11434/v1 | `openai.New` |
+| `lmstudio` | localhost:1234/v1 | `openai.New` |
+| `vllm` | localhost:8888/v1 | `openai.New` |
+| `acp` | 自定义 agent_url | `NewACPProvider` |
+
+### 5.2 ACP Provider
+
+`ACPProvider` 实现 `model.Model`，对接 ACP 远程 agent（[acp.go](../internal/provider/acp.go)）：
+
+- 提取最后一条 user 消息 → 构建 ACPRequest（含 MCPConfig.ServerURL）→ POST `/message/send`
+- 工具调用映射：ACP ToolCalls → tRPC model.ToolCall
+- 300s 超时，单向非流式
+
+---
+
+## 6. 协议层
 
 多协议端点共享同一个 Agent 和 Runner 实例，保证行为一致性。
 
@@ -340,7 +478,23 @@ type CoreLoop struct {
 | **ANP** | :9092 | Agent Network Protocol（元协议+E2EE） | `summon.MetaProtocol` |
 | **Gateway** | — | IM 消息渠道（飞书 WebSocket） | `gateway.GatewayServer` |
 
-### 5.1 安全中间件
+### 6.1 ACP 与 AG-UI 端点明细
+
+ACP 服务器（[server/acp.go](../internal/server/acp.go)）：
+
+| 方法 | 路径 | 用途 |
+|------|------|------|
+| POST | `/acp/message/send` | 主对话端点，SSE 流式 |
+| GET | `/acp/tools/list` | Agent Card / 工具发现 |
+| POST | `/acp/tools/call` | 直接工具调用（经 guardFn 校验） |
+| GET | `/acp/.well-known/agent.json` | 能力声明 |
+| GET | `/acp/health` | 健康检查 |
+
+SSE 事件类型：`text_delta` / `tool_call` / `done`。
+
+AG-UI 服务器（[server/agui.go](../internal/server/agui.go)）：Wukong 原生实现，轻量 SSE，单端点 `POST /agui`，10MB 请求体限制。
+
+### 6.2 安全中间件
 
 所有协议端点共享安全防护（定义于 [server/security.go](../internal/server/security.go)）：
 - **认证**：API Key（`subtle.ConstantTimeCompare` 防时序侧信道）或 JWT（HMAC 强制）
@@ -348,7 +502,7 @@ type CoreLoop struct {
 - **CORS**：localhost-only（防恶意网页跨域调用，[cors.go](../internal/cors/cors.go)）
 - **Guard 链**：`tools/call` 端点注入 `guardFn` 回调，镜像 Agent Loop 的 4 重校验（权限/审批/命令/文件路径）
 
-### 5.2 Gateway 消息流水线
+### 6.3 Gateway 消息流水线
 
 ```
 飞书平台 → WebSocket 长连接（larkws.Client，无需公网回调 URL）
@@ -363,9 +517,16 @@ GatewayServer.dispatch()  [6 步流水线，全链路 OTel 追踪]
     └─ 6. Channel.SendReply()  [流式卡片 500ms patch / 文本 / response_url]
 ```
 
+#### 飞书渠道细节（[gateway/feishu/](../internal/gateway/feishu/)）
+
+- **WebSocket 长连接**（`larkws.Client`，无需公网回调 URL），SDK 处理认证/重连/心跳/分片重组
+- **流式卡片**：创建交互式卡片 → 定期 patch 更新（500ms ticker）→ 完成
+- **回复路径优先级**：ResponseURL > StreamCard > 文本
+- 最大消息长度 4096 字符，API 重试 3 次
+
 ---
 
-## 6. 记忆系统（双引擎三层）
+## 7. 记忆系统（双引擎三层）
 
 Wukong 的记忆系统是其核心差异化能力，由 4 个子系统协同构成：
 
@@ -376,7 +537,7 @@ Wukong 的记忆系统是其核心差异化能力，由 4 个子系统协同构�
 | 长期 | `memory.MemoryManager` | 持久事实记忆 | tRPC Memory + LLM 自动提取 + SmartCleanup |
 | 结构化 | `cortex.GraphFlowService` | 实体关系知识图谱 | LLM/启发式抽取 + SPARQL 查询 |
 
-### 6.1 检索管线
+### 7.1 检索管线
 
 ```
 recall_search 工具调用 → CortexStore.Search()
@@ -394,7 +555,7 @@ recall_search 工具调用 → CortexStore.Search()
     └─ → 返回 top-K
 ```
 
-### 6.2 SmartCleanup 四维评分
+### 7.2 SmartCleanup 四维评分
 
 当记忆容量超 80% 时触发淘汰至 60%：
 
@@ -408,7 +569,7 @@ score = recency×0.4 + reference×0.3 + importance×0.2 + length×0.1
 
 ---
 
-## 7. 技能自进化系统
+## 8. 技能自进化系统
 
 LLM 驱动的闭环自我改进机制（定义于 [evolution/](../internal/evolution/)）：
 
@@ -431,11 +592,36 @@ LLM 驱动的闭环自我改进机制（定义于 [evolution/](../internal/evolu
         └─ store.RecordEvolution()
 ```
 
+### 8.1 核心类型
+
+- **ExecutionTrace**：技能执行完整轨迹（SkillName/ToolCalls/ErrorCount/QualityScore/Success）
+- **PatchSuggestion**：LLM 补丁建议（ProblemType 枚举 5 类 + DiffContent + Confidence）
+- **SkillVersion**：版本快照（BackupPath + FileHash SHA-256）
+
+### 8.2 ApplyPatch 十步流程
+
+1. 读取当前 SKILL.md
+2. 确定新版本号
+3. 创建版本备份 `SKILL.v{NNN}.md`
+4. 计算 SHA-256 文件哈希
+5. 追加补丁到 YAML frontmatter 之后
+6. 安全验证 `validateContent`
+7. 写入更新（失败则从备份恢复）
+8. 记录版本到数据库
+9. 修剪旧版本（`PruneOldVersions`）
+10. 更新 OKF log.md / log.json
+
+### 8.3 补丁安全验证
+
+- 非空检查 + 大小限制（100KB）
+- **危险指令检测**（15+ 模式）：`rm -rf`、`sudo`、`system(`、`subprocess.`、`shutdown`、fork bomb 等
+- **提示注入检测**（12 种模式）：`ignore previous`、`disregard prior`、`you are not`、`### system:` 等
+
 ---
 
-## 8. 扩展与发现系统
+## 9. 扩展与发现系统
 
-### 8.1 内置扩展（17 个）
+### 9.1 内置扩展（17 个）
 
 | 扩展 | 功能 |
 |------|------|
@@ -453,14 +639,17 @@ LLM 驱动的闭环自我改进机制（定义于 [evolution/](../internal/evolu
 | `top_of_mind` | 持久化指令注入 |
 | `bing` / `google` / `searxng` / `tavily` | 单引擎搜索 |
 
-### 8.2 Summon 子代理委派
+### 9.2 Summon 子代理委派
 
 `.wukong/skills/*.md` 每个文件成为一个 Delegate，包装为可调用工具：
 - 独立 LLMAgent（MaxLLMCalls=10, MaxToolIterations=5, Temperature=0.3）
+- 工具重试（2 次, 500ms, 2.0 指数退避）
+- `agenttool.NewTool` 包装，`ResponseModeFinalOnly` 避免中间推理噪音
 - 信号量并发限制（MaxConcurrent=5）
 - 远程 A2A agent 经 `A2AAgent` 包装为 `RemoteDelegateTool`
+- **凭证轮换**（[auth.go](../internal/summon/auth.go)）：三种认证类型自动轮换——api_key（`wak_` 前缀）/ jwt（64 字节）/ oauth2（client_credentials grant），由 `CredentialRotator` 统一管理（BootstrapState 持有，关闭时 Stop）
 
-### 8.3 ARD 双向发现
+### 9.3 ARD 双向发现
 
 - **发布**：`RegistryServer` 暴露 `/.well-known/ai-catalog.json` + `/api/v1/search`
 - **发现**：`Client`（CircuitBreaker + ResponseCache）查询远程注册表
@@ -470,7 +659,119 @@ LLM 驱动的闭环自我改进机制（定义于 [evolution/](../internal/evolu
 
 ---
 
-## 9. 目录结构
+## 10. 安全系统
+
+定义于 [security/](../internal/security/)。
+
+### 10.1 Guard 权限控制（[guard.go](../internal/security/guard.go)）
+
+四种权限模式：
+
+| 模式 | 行为 |
+|------|------|
+| `auto` | 全部自动批准 |
+| `smart` | 高风险操作需审批（文件删除/命令执行/浏览器导航等） |
+| `manual` | 所有写操作需审批 |
+| `chat_only` | 仅允许对话，禁止所有工具 |
+
+### 10.2 命令守卫（[command_tokens.go](../internal/security/command_tokens.go)）
+
+Token 级命令分析（非子串匹配）：
+- `tokenizeCommand`：分词
+- `tokensToSet`：展开组合短标志（`-rf` → `-r` + `-f`），避免 `rm -rf /` 被 `rm -r -f /` 绕过
+- `isGitPushForce`：检测 `git push --force`
+- `isPipedToShell`：检测管道到 shell 的危险组合
+- sudo 本身判定为危险
+
+### 10.3 SSRF 防护（[ssrf.go](../internal/security/ssrf.go)）
+
+`CheckURL` 拒绝：loopback（127.0.0.0/8）/ link-local（169.254.0.0/16，含 AWS metadata 169.254.169.254）/ private（10/172.16/192.168）/ unspecified（0.0.0.0）/ multicast（224.0.0.0/4）。
+
+### 10.4 .wukongignore（[ignore.go](../internal/security/ignore.go)）
+
+gitignore 兼容语法，从 cwd/home/.wukong 路径加载。`IsFileAccessTool`/`ExtractFilePathFromArgs`/`CheckFilePath` 综合路径检查。
+
+---
+
+## 11. 会话与存储
+
+### 11.1 三后端（[session/store.go](../internal/session/store.go)）
+
+| 后端 | 用途 | 特点 |
+|------|------|------|
+| memory | 开发/测试 | 重启丢失 |
+| sqlite | 单实例生产（默认） | 共享 DatabasePool 连接 |
+| redis | 多实例共享 | Pipeline 批量化 + LTrim 滚动窗口 |
+
+### 11.2 Redis 键空间（[session/redis.go](../internal/session/redis.go)）
+
+```
+wk:session:{app}:{user}:{sid}        # 前缀
+  ...:events                          # LIST (JSON 事件流, RPush/LTrim)
+  ...:meta                            # HASH (元数据)
+wk:user_sessions:{app}:{user}         # SET (用户 session 索引)
+```
+
+`AppendEvent` Pipeline：RPush + LTrim + HSet + Expire 保证原子性。
+
+### 11.3 DatabasePool（[util/database.go](../internal/util/database.go)）
+
+DSN：`?_journal_mode=WAL&_synchronous=NORMAL&_foreign_keys=ON&_busy_timeout=5000`，`SetMaxOpenConns(4)`/`SetMaxIdleConns(2)`。`Close()` 先 `PRAGMA wal_checkpoint(TRUNCATE)` 刷新 WAL。`MultiPool` 支持子系统使用独立数据库文件。
+
+---
+
+## 12. 可观测性
+
+### 12.1 OpenTelemetry（[telemetry/telemetry.go](../internal/telemetry/telemetry.go)）
+
+全链路追踪：`agent.RunStream` span 携带 user_id/session_id/event_count/tool_call_count/response_length。支持 gRPC/HTTP/console exporter，ParentBased + TraceIDRatioBased 采样，W3C TraceContext + Baggage 传播。
+
+### 12.2 Langfuse（[observability/langfuse.go](../internal/observability/langfuse.go)）
+
+LLM 专用 tracing，经 OTLP HTTP，凭证从 config 或 `LANGFUSE_*` 环境变量。
+
+### 12.3 错误信号分类（[errsignal/errsignal.go](../internal/errsignal/errsignal.go)）
+
+7 类错误（优先级 BotDetection > RateLimited > Permanent > AuthRequired > Invalid > Transient > Unknown），每类附带推荐处理策略（重试/退避/跳过/升级）。`RetryDelay` 指数退避 + 抖动，上限 30s。
+
+### 12.4 健康检查（[health/health.go](../internal/health/health.go)）
+
+K8s 兼容：liveness（恒 200）/ readiness（全 healthy 才 200）。Checker 工厂：DBChecker / ModelChecker / ExtensionChecker / A2AServerChecker。
+
+---
+
+## 13. 基础设施
+
+### 13.1 配置体系（[config/](../internal/config/)）
+
+**优先级**（高→低）：CLI flags → 环境变量（`WUKONG_` 前缀）→ YAML 文件 → 内置默认值。
+
+**搜索路径**：`./config.yaml` → `~/.config/wukong/config.yaml` → `/etc/wukong/config.yaml`（非 Windows）。
+
+**环境变量展开**：`${VAR}` 和 `${VAR:-default}`，`expandEnvTracked()` 返回被展开的密钥列表用于日志脱敏。
+
+### 13.2 Code Mode（[codemode/executor.go](../internal/codemode/executor.go)）
+
+goja 纯 Go JavaScript 引擎。安全限制：并发 5 / JSON 解析 1MB / 代码 1MB / 内存 128MB / 超时 10s。
+
+### 13.3 OS 沙箱（[pkg/sandbox/](../pkg/sandbox/)）
+
+跨平台文件系统沙箱：
+- **Linux**：Landlock LSM（内核 5.13+），自执行助手模式，ABI 1-3 适配
+- **macOS**：`sandbox-exec(1)`，`(deny file-write*)` + 显式可写目录
+- **Windows**：Low Integrity Level（`S-1-16-4096`）+ Restricted Token
+
+### 13.4 TopOfMind（[topofmind/mind.go](../internal/topofmind/mind.go)）
+
+持久指令注入，**双重检查锁定模式**（double-check locking）：RLock 检查文件修改时间 → 未变快速返回 → 变则升级 WLock → 再次检查防并发重复重载。
+
+### 13.5 OKF（[okf/bundle.go](../internal/okf/bundle.go)）
+
+Open Knowledge Format v0.1：YAML frontmatter + Markdown body，保留文件 index.md / log.md。Frontmatter 含 Type/Title/Description/Resource/Tags/Timestamp，`yaml:",inline"` 保留未知字段（规范要求消费者容错）。
+
+---
+
+## 14. 目录结构
 
 ```
 wukong/
@@ -478,24 +779,24 @@ wukong/
 │   ├── wukong/             # 主程序 → cli.Execute()
 │   ├── zim-check/          # ZIM 归档校验
 │   └── zim-ls/             # ZIM 归档列举
-├── internal/               # 业务代码（35+ 子系统）
+├── internal/               # 业务代码（33 个子系统）
 │   ├── agent/              # ★ 编排层：CoreLoop + 10种编排模式 + Recipe + HITL
 │   ├── cli/                # ★ CLI 命令层（Cobra）+ TUI（Bubbletea）
 │   ├── config/             # 配置体系（Viper, 10 个类型文件）
 │   ├── provider/           # LLM 提供商工厂（8 种）
 │   ├── extension/          # ★ MCP 扩展管理 + 17个内置工具集 + ACP-MCP桥接
-│   ├── browser/            # 双后端浏览器 + 5级反爬 + 15项stealth注入
+│   ├── browser/            # 双后端浏览器 + 5级反爬 + 15项stealth注入（asset/retry/sanitize 子包）
 │   ├── search/             # 搜索引擎（SPA调优/垂直路由/语义分块/指标）
-│   ├── cortex/             # ★ CortexDB 知识引擎（向量+FTS5+GraphRAG+MemoryFlow+GraphFlow）
+│   ├── cortex/             # ★ CortexDB 知识引擎（向量+FTS5+GraphRAG+MemoryFlow+GraphFlow+ImportFlow+KG工具+召回管理）
 │   ├── recall/             # 原生 SQLite FTS5 召回（cortex 兜底）
 │   ├── memory/             # 持久化记忆（tRPC Memory + SmartCleanup 四维评分）
 │   ├── gateway/            # ★ 消息网关（飞书 WebSocket）
 │   ├── server/             # ★ HTTP 协议端点（ACP/AG-UI/Security）
-│   ├── summon/             # A2A/ANP 子Agent委派 + E2EE + 元协议协商
+│   ├── summon/             # A2A/ANP 子Agent委派 + E2EE + 元协议协商 + 凭证轮换
 │   ├── ard/                # Agent 资源发现 + DID + 联邦 + HTTP签名
 │   ├── session/            # 会话存储（SQLite/Redis/Memory）
 │   ├── security/           # 安全防护（Guard 4模式/命令Token/SSRF/.wukongignore）
-│   ├── apps/               # 应用管理（克隆/打包/消毒/MCP Apps）
+│   ├── apps/               # 应用管理（clone 克隆/pack 打包/sanitize 消毒/mcpapps MCP Apps/server 本地预览）
 │   ├── skill/              # SKILL.md 技能系统
 │   ├── evolution/          # LLM 驱动技能自进化引擎
 │   ├── knowledge/          # RAG 知识管理
@@ -512,7 +813,8 @@ wukong/
 │   ├── artifact/           # 制品存储（inmemory/COS）
 │   ├── project/            # 工作目录追踪
 │   └── util/               # 通用工具（Logger/MultiPool/Version）
-├── pkg/                    # 可外部引用的公共库
+├── pkg/                    # 可外部引用的公共库（5 个包）
+│   ├── capability/         # 开发者工具 fs/shell 执行接缝（FileService/ShellService 接口 + 沙箱后端）
 │   ├── httpclient/         # HTTP 客户端（DNS缓存/限流/uTLS/DNS回退）
 │   ├── logutil/            # 日志工具
 │   ├── sandbox/            # 跨平台文件系统沙箱（Landlock/Seatbelt/Low IL）
@@ -524,7 +826,7 @@ wukong/
 
 ---
 
-## 10. 关键设计原则
+## 15. 关键设计原则
 
 1. **Composition Root 集中化**：`bootstrapSession()` 是唯一的组装点，1400+ 行完成全部依赖注入，无全局单例。
 
@@ -544,10 +846,12 @@ wukong/
 
 ---
 
-## 11. 相关文档
+## 16. 相关文档
 
-- [技术实现深度解析](TECHNICAL_IMPLEMENTATION.md) — 各子系统实现细节与算法
 - [记忆系统架构](MEMORY_ARCHITECTURE.md) — 双引擎三层记忆 / 检索管线 / SmartCleanup
 - [配置手册](CONFIG.md) — 全部配置项与字段说明
 - [CLI & TUI 架构](CLI_TUI.md) — 命令树与终端 UI
 - [部署指南](DEPLOYMENT.md) — 生产环境部署与健康检查
+- [反反爬技术详解](ANTIBOT_GUIDE.md) — 浏览器引擎与五级反爬
+- [网站克隆技术指南](CLONE_GUIDE.md) — 克隆引擎与 ZIM 归档
+- [开发者指南](DEVELOPER_GUIDE.md) — 扩展开发

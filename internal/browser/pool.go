@@ -19,10 +19,10 @@ import (
 	"github.com/chromedp/chromedp"
 	"github.com/km269/wukong/internal/browser/antibot"
 	"github.com/km269/wukong/internal/browser/behavior"
+	"github.com/km269/wukong/internal/browser/renderkit"
 	"github.com/km269/wukong/internal/browser/settle"
 	"github.com/km269/wukong/internal/browser/stealth"
 	"github.com/km269/wukong/internal/browser/types"
-	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/pkg/logutil"
 )
 
@@ -48,10 +48,9 @@ type Pool struct {
 	opts               Options
 	allocCtx           context.Context
 	allocCl            context.CancelFunc
+	lifeCancel         context.CancelFunc
 	workers            []*worker
-	queue              chan *renderJob
-	wg                 sync.WaitGroup
-	closed             bool
+	disp               *renderkit.Dispatcher
 	mu                 sync.Mutex
 	behaviorSimEnabled bool
 	behaviorSimulator  *behavior.Simulator
@@ -59,25 +58,29 @@ type Pool struct {
 	currentUA          *antibot.UAProfile
 }
 
+// Compile-time capability assertions.
+var (
+	_ types.BrowserBackend   = (*Pool)(nil)
+	_ types.UARotator        = (*Pool)(nil)
+	_ types.PriorityRenderer = (*Pool)(nil)
+)
+
 type worker struct {
 	idx    int
 	ctx    context.Context
 	cancel context.CancelFunc
 }
 
-type renderJob struct {
-	url      string
-	referer  string
-	resultCh chan<- renderResultOrErr
-	ctx      context.Context
-}
-
-type renderResultOrErr struct {
-	Result *types.RenderResult
-	Err    error
-}
-
-func New(opts Options) *Pool {
+// New creates a chromedp-backed browser pool whose lifetime is bound
+// to ctx: when ctx is cancelled (parent task done, Ctrl-C, timeout)
+// the pool drains in-flight renders and releases Chrome automatically,
+// so a caller that forgets Close() cannot leak browser processes.
+// Close() remains the explicit cleanup path; it is idempotent and also
+// releases the internal lifecycle goroutine.
+func New(ctx context.Context, opts Options) *Pool {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if opts.Workers <= 0 {
 		opts.Workers = 4
 	}
@@ -119,9 +122,7 @@ func New(opts Options) *Pool {
 		chromedp.Flag("safebrowsing-disable-auto-update", true),
 		chromedp.Flag("safebrowsing-disable-download-protection", true),
 		chromedp.Flag("safebrowsing-disable-extension-blacklist", true),
-		chromedp.Flag("ignore-certificate-errors", true),
 		chromedp.Flag("allow-insecure-localhost", true),
-		chromedp.Flag("ignore-ssl-errors", true),
 		// Reduce download/enterprise policy blocking
 		chromedp.Flag("disable-policy-background-loading", true),
 		chromedp.Flag("disable-extensions-except", ""),
@@ -139,6 +140,9 @@ func New(opts Options) *Pool {
 			chromedp.Flag("ignore-certificate-errors", true),
 			chromedp.Flag("ignore-ssl-errors", true),
 		)
+		logutil.Debug("[chromedp] browser TLS: certificate verification disabled (insecure_tls)")
+	} else {
+		logutil.Debug("[chromedp] browser TLS: strict certificate verification")
 	}
 
 	// Use new headless mode (Chrome 112+) which behaves much closer
@@ -152,11 +156,9 @@ func New(opts Options) *Pool {
 		allocOpts = append(allocOpts, chromedp.ProxyServer(opts.Proxy))
 	}
 
-	if opts.DisableDownloads {
-		allocOpts = append(allocOpts) // Note: main disable-features already includes DownloadBubble flags
-		// to avoid overriding the larger SafeBrowsing set above.
-
-	}
+	// opts.DisableDownloads needs no extra flag here: the main
+	// disable-features set above already includes the DownloadBubble
+	// flags, and appending a lone flag would override that larger set.
 
 	if opts.Stealth {
 		allocOpts = append(allocOpts,
@@ -185,7 +187,8 @@ func New(opts Options) *Pool {
 		allocOpts = append(allocOpts, chromedp.UserDataDir(opts.ProfileDir))
 	}
 
-	allocCtx, allocCl := chromedp.NewExecAllocator(context.Background(), allocOpts...)
+	lifeCtx, lifeCancel := context.WithCancel(ctx)
+	allocCtx, allocCl := chromedp.NewExecAllocator(lifeCtx, allocOpts...)
 
 	escalator := antibot.NewEscalator(antibot.DefaultEscalatorConfig())
 	currentUA := escalator.GetRandomDesktopUA()
@@ -194,7 +197,8 @@ func New(opts Options) *Pool {
 		opts:              opts,
 		allocCtx:          allocCtx,
 		allocCl:           allocCl,
-		queue:             make(chan *renderJob, opts.Workers*4),
+		lifeCancel:        lifeCancel,
+		disp:              renderkit.NewDispatcher(opts.Workers),
 		behaviorSimulator: behavior.New(behavior.DefaultConfig()),
 		escalator:         escalator,
 		currentUA:         currentUA,
@@ -206,9 +210,18 @@ func New(opts Options) *Pool {
 			stealth.Inject(wCtx)
 		}
 		p.workers = append(p.workers, &worker{idx: i, ctx: wCtx, cancel: wCancel})
-		p.wg.Add(1)
-		go p.workerLoop(p.workers[i])
 	}
+	p.disp.Start(opts.Workers, func(idx int, job *renderkit.RenderJob) {
+		p.renderJob(p.workers[idx], job)
+	})
+
+	// Bind the pool lifetime to ctx: cancellation (or Close, which
+	// cancels lifeCtx) drains the pool. Close's Drain guard makes the
+	// watcher's re-entrant call after an explicit Close a no-op.
+	go func() {
+		<-lifeCtx.Done()
+		p.Close()
+	}()
 
 	return p
 }
@@ -233,7 +246,7 @@ func (p *Pool) Screenshot(
 	ctx context.Context, url string, outputPath string,
 ) (string, error) {
 	p.mu.Lock()
-	if p.closed {
+	if p.disp.Closed() {
 		p.mu.Unlock()
 		return "", fmt.Errorf("pool closed")
 	}
@@ -309,15 +322,8 @@ func (p *Pool) Screenshot(
 	return outputPath, nil
 }
 
-func (p *Pool) workerLoop(w *worker) {
-	defer p.wg.Done()
-	for job := range p.queue {
-		p.renderJob(w, job)
-	}
-}
-
-func (p *Pool) renderJob(w *worker, job *renderJob) {
-	_, cancel := context.WithTimeout(job.ctx, p.opts.RenderTimeout)
+func (p *Pool) renderJob(w *worker, job *renderkit.RenderJob) {
+	_, cancel := context.WithTimeout(job.Ctx, p.opts.RenderTimeout)
 	defer cancel()
 
 	tabCtx, tabCancel := chromedp.NewContext(w.ctx)
@@ -338,14 +344,14 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 				"Upgrade-Insecure-Requests": "1",
 				"User-Agent":                ua.UserAgent,
 			}
-			if job.referer != "" {
-				headers["Referer"] = job.referer
+			if job.Referer != "" {
+				headers["Referer"] = job.Referer
 			}
 			return network.SetExtraHTTPHeaders(headers).Do(ctx)
 		}),
-		chromedp.Navigate(job.url),
+		chromedp.Navigate(job.URL),
 	); err != nil {
-		job.resultCh <- renderResultOrErr{Err: fmt.Errorf("navigate: %w", err)}
+		job.ResultCh <- renderkit.RenderResultOrErr{Err: fmt.Errorf("navigate: %w", err)}
 		return
 	}
 
@@ -355,64 +361,13 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 	if p.behaviorSimEnabled {
 		// 模拟自然的滚动和鼠标移动
 		var body string
-		chromedp.Run(tabCtx,
-			// 首先滚动一小段
-			chromedp.Evaluate(`
-				(async () => {
-					// 随机滚动一小段距离
-					const randomScroll = () => {
-						const delta = Math.floor(Math.random() * 200) - 100;
-						window.scrollBy(0, delta);
-						return new Promise(r => setTimeout(r, 200 + Math.random() * 300));
-					};
-					await randomScroll();
-				})()`, &body),
-		)
-
-		// 鼠标移动到随机位置
-		chromedp.Run(tabCtx,
-			chromedp.Evaluate(`
-				(async () => {
-					// 模拟鼠标移动到随机位置
-					const randomX = Math.random() * window.innerWidth;
-					const randomY = Math.random() * window.innerHeight;
-					// 触发鼠标移动事件
-					const mouseEvent = new MouseEvent('mousemove', {
-						clientX: randomX,
-						clientY: randomY,
-						bubbles: true
-					});
-					document.dispatchEvent(mouseEvent);
-					// 模拟鼠标停留一会儿
-					await new Promise(r => setTimeout(r, 150 + Math.random() * 350));
-				})()`, &body),
-		)
+		chromedp.Run(tabCtx, chromedp.Evaluate(renderkit.BehaviorSimScrollJS, &body))
+		chromedp.Run(tabCtx, chromedp.Evaluate(renderkit.BehaviorSimMouseJS, &body))
 	}
 
 	if p.opts.Scroll {
 		var body string
-		chromedp.Run(tabCtx,
-			chromedp.Evaluate(`
-				(async () => {
-					const scrollHeight = document.documentElement.scrollHeight;
-					const viewportHeight = window.innerHeight;
-					let currentScroll = 0;
-					const maxIterations = 20;
-					let iterations = 0;
-					
-					while (currentScroll < scrollHeight - viewportHeight && iterations < maxIterations) {
-						window.scrollBy(0, viewportHeight);
-						currentScroll += viewportHeight;
-						iterations++;
-						await new Promise(r => setTimeout(r, 300 + Math.random() * 500));
-					}
-					
-					if (currentScroll < scrollHeight - viewportHeight) {
-						window.scrollTo(0, scrollHeight);
-						await new Promise(r => setTimeout(r, 500));
-					}
-				})()`, &body),
-		)
+		chromedp.Run(tabCtx, chromedp.Evaluate(renderkit.ScrollJS, &body))
 		settle.Wait(tabCtx, p.opts.Settle)
 	}
 
@@ -422,51 +377,25 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 		chromedp.Evaluate(`window.location.href`, &finalURL),
 		chromedp.Evaluate(`document.contentType`, &contentType),
 	); err != nil {
-		job.resultCh <- renderResultOrErr{Err: fmt.Errorf("render: %w", err)}
+		job.ResultCh <- renderkit.RenderResultOrErr{Err: fmt.Errorf("render: %w", err)}
 		return
 	}
 
-	if !isHTMLContentType(contentType) {
-		job.resultCh <- renderResultOrErr{Err: &types.ErrNotHTML{URL: job.url, ContentType: contentType}}
+	if !renderkit.IsHTMLContentType(contentType) {
+		job.ResultCh <- renderkit.RenderResultOrErr{Err: &types.ErrNotHTML{URL: job.URL, ContentType: contentType}}
 		return
 	}
 
 	// Extract all links from the rendered DOM using JavaScript.
 	var extractedLinks []string
-	chromedp.Run(tabCtx,
-		chromedp.Evaluate(`
-			(function() {
-				const links = new Set();
-				document.querySelectorAll('a[href]').forEach(a => {
-					const href = a.getAttribute('href');
-					if (href && !href.startsWith('#') && !href.startsWith('javascript:') && 
-						!href.startsWith('mailto:') && !href.startsWith('tel:')) {
-						links.add(a.href);
-					}
-				});
-				document.querySelectorAll('area[href]').forEach(area => {
-					const href = area.getAttribute('href');
-					if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
-						links.add(area.href);
-					}
-				});
-				document.querySelectorAll('iframe[src], frame[src]').forEach(f => {
-					const src = f.getAttribute('src');
-					if (src && !src.startsWith('javascript:')) {
-						links.add(f.src);
-					}
-				});
-				return Array.from(links);
-			})()
-		`, &extractedLinks),
-	)
+	chromedp.Run(tabCtx, chromedp.Evaluate(renderkit.CollectLinksArrayJS, &extractedLinks))
 
 	var cfClearance string
 	var cookies []*network.Cookie
 	if err := chromedp.Run(tabCtx,
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			var err error
-			cookies, err = network.GetCookies().WithURLs([]string{job.url}).Do(ctx)
+			cookies, err = network.GetCookies().WithURLs([]string{job.URL}).Do(ctx)
 			return err
 		})); err == nil {
 		for _, c := range cookies {
@@ -478,25 +407,18 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 	}
 
 	if finalURL == "" {
-		finalURL = job.url
+		finalURL = job.URL
 	}
 
-	job.resultCh <- renderResultOrErr{Result: &types.RenderResult{
+	job.ResultCh <- renderkit.RenderResultOrErr{Result: &types.RenderResult{
 		HTML:                html,
 		URL:                 finalURL,
 		Title:               title,
 		ContentType:         contentType,
 		CloudflareClearance: cfClearance,
-		Referer:             job.referer,
+		Referer:             job.Referer,
 		ExtractedLinks:      extractedLinks,
 	}}
-}
-
-func isHTMLContentType(ct string) bool {
-	if ct == "" {
-		return true
-	}
-	return ct == "text/html" || ct == "application/xhtml+xml"
 }
 
 func (p *Pool) Render(ctx context.Context, url string) (*types.RenderResult, error) {
@@ -504,26 +426,15 @@ func (p *Pool) Render(ctx context.Context, url string) (*types.RenderResult, err
 }
 
 func (p *Pool) RenderWithReferer(ctx context.Context, url, referer string) (*types.RenderResult, error) {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		return nil, fmt.Errorf("pool closed")
-	}
-	p.mu.Unlock()
+	return p.disp.Submit(ctx, url, referer)
+}
 
-	resultCh := make(chan renderResultOrErr, 1)
-	select {
-	case p.queue <- &renderJob{url: url, referer: referer, resultCh: resultCh, ctx: ctx}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-
-	select {
-	case res := <-resultCh:
-		return res.Result, res.Err
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+// RenderWithPriority implements types.PriorityRenderer: when browser
+// workers are contended, a higher-priority render is dequeued before
+// queued normal work (long-waiting jobs are aged up so they cannot
+// starve). See renderkit.Dispatcher.
+func (p *Pool) RenderWithPriority(ctx context.Context, url, referer string, prio types.Priority) (*types.RenderResult, error) {
+	return p.disp.SubmitWithPriority(ctx, url, referer, prio)
 }
 
 func (p *Pool) SetSettle(d time.Duration) {
@@ -555,7 +466,7 @@ func (p *Pool) SetBehaviorSimulation(enabled bool) {
 // can corrupt the tab context and break all subsequent layers.
 func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer string) (*types.AssetDownloadResult, error) {
 	p.mu.Lock()
-	if p.closed {
+	if p.disp.Closed() {
 		p.mu.Unlock()
 		return nil, fmt.Errorf("pool closed")
 	}
@@ -961,56 +872,30 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 }
 
 func (p *Pool) Close() {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
+	// Drain the shared dispatcher first: close the job queue, wait for
+	// in-flight renders, and reject new submits. Only the caller that
+	// performed the drain runs the cleanup below — chromedp context
+	// cancels are one-shot (their cancelWait consumes a semaphore
+	// token), so a second invocation on the same cancel deadlocks.
+	// This also makes an explicit Close and the lifecycle watcher's
+	// Close mutually exclusive.
+	if !p.disp.Drain() {
 		return
 	}
-	p.closed = true
-	p.mu.Unlock()
-
-	close(p.queue)
-	p.wg.Wait()
 
 	for _, w := range p.workers {
 		w.cancel()
 	}
 	p.allocCl()
+
+	// Release the lifecycle goroutine. It wakes up and re-enters Close,
+	// which returns immediately via the Drain guard above.
+	if p.lifeCancel != nil {
+		p.lifeCancel()
+	}
 }
 
 func (p *Pool) CloseWithError() error {
 	p.Close()
 	return nil
-}
-
-func NewPoolFromConfig(cfg *config.BrowserConfig) *Pool {
-	if cfg == nil {
-		return nil
-	}
-
-	settleTimeout := 2 * time.Second
-	if cfg.Timeout > 0 {
-		settleTimeout = cfg.Timeout / 3
-		if settleTimeout < 1*time.Second {
-			settleTimeout = 1 * time.Second
-		}
-	}
-
-	workers := 4
-	if cfg.Workers > 0 {
-		workers = cfg.Workers
-	}
-
-	return New(Options{
-		Headless:         cfg.Headless,
-		Workers:          workers,
-		Settle:           settleTimeout,
-		RenderTimeout:    cfg.Timeout,
-		Scroll:           cfg.Scroll,
-		ChromeBin:        cfg.BrowserPath,
-		ControlURL:       cfg.ControlURL,
-		Stealth:          cfg.Stealth,
-		ProfileDir:       cfg.ProfileDir,
-		DisableDownloads: true, // 默认禁止浏览器自动下载,由 cloner 统一管理资源.
-	})
 }

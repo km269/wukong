@@ -3,11 +3,9 @@ package cli
 import (
 	"fmt"
 
-	"github.com/spf13/cobra"
 	"github.com/km269/wukong/internal/util"
+	"github.com/spf13/cobra"
 )
-
-
 
 func newVersionCmd() *cobra.Command {
 	cmd := &cobra.Command{

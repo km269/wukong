@@ -25,12 +25,12 @@ func ExportStructuredData(outputDir string, seedURL string, host string,
 
 	for _, pr := range pageResults {
 		pageData := StructuredPageData{
-			URL:   pr.URL,
-			Title: pr.Title,
-			Depth: pr.Depth,
-			Links: pr.LinksFound,
+			URL:    pr.URL,
+			Title:  pr.Title,
+			Depth:  pr.Depth,
+			Links:  pr.LinksFound,
 			Assets: pr.AssetsFound,
-			Error: pr.Error,
+			Error:  pr.Error,
 		}
 
 		if pr.FilePath != "" {
@@ -92,12 +92,12 @@ func ExportWithMarkdown(outputDir string, seedURL string, host string,
 
 	for _, pr := range pageResults {
 		pageData := StructuredPageData{
-			URL:   pr.URL,
-			Title: pr.Title,
-			Depth: pr.Depth,
-			Links: pr.LinksFound,
+			URL:    pr.URL,
+			Title:  pr.Title,
+			Depth:  pr.Depth,
+			Links:  pr.LinksFound,
 			Assets: pr.AssetsFound,
-			Error: pr.Error,
+			Error:  pr.Error,
 		}
 
 		if pr.FilePath != "" {

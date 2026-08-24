@@ -80,10 +80,10 @@ type SearchRecallReq struct {
 
 // SearchRecallRsp is the output for searching recall.
 type SearchRecallRsp struct {
-	Success bool                 `json:"success"`
+	Success bool                  `json:"success"`
 	Results []recall.SearchResult `json:"results,omitempty"`
-	Count   int                  `json:"count"`
-	Error   string               `json:"error,omitempty"`
+	Count   int                   `json:"count"`
+	Error   string                `json:"error,omitempty"`
 }
 
 func (m *RecallManager) searchRecall(

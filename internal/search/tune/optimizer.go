@@ -87,29 +87,29 @@ func (c OptimizerConfig) WithDefaults() OptimizerConfig {
 type EliteCategory string
 
 const (
-	EliteGlobalBest      EliteCategory = "global_best"
-	EliteQueryTypeBest   EliteCategory = "query_type_best"
-	EliteStableBest      EliteCategory = "stable_best"
-	EliteLowLatencyBest  EliteCategory = "low_latency_best"
+	EliteGlobalBest       EliteCategory = "global_best"
+	EliteQueryTypeBest    EliteCategory = "query_type_best"
+	EliteStableBest       EliteCategory = "stable_best"
+	EliteLowLatencyBest   EliteCategory = "low_latency_best"
 	EliteBaselineImprover EliteCategory = "baseline_improver"
 )
 
 // Elite represents a selected top-performing strategy.
 type Elite struct {
-	Genome   search.SearchGenome      `json:"genome"`
-	Metrics  search.StrategyMetrics   `json:"metrics"`
-	Category EliteCategory            `json:"category"`
-	Score    float64                  `json:"score"`
+	Genome   search.SearchGenome    `json:"genome"`
+	Metrics  search.StrategyMetrics `json:"metrics"`
+	Category EliteCategory          `json:"category"`
+	Score    float64                `json:"score"`
 }
 
 // OptimizerResult holds the output of an optimisation run.
 type OptimizerResult struct {
-	BestGenome    search.SearchGenome      `json:"best_genome"`
-	BestMetrics   search.StrategyMetrics   `json:"best_metrics"`
-	Elites        []Elite                  `json:"elites"`
-	AllEvaluated  []search.StrategyMetrics `json:"all_evaluated"`
-	Iterations    int                      `json:"iterations"`
-	Improvement   float64                  `json:"improvement_vs_baseline"`
+	BestGenome   search.SearchGenome      `json:"best_genome"`
+	BestMetrics  search.StrategyMetrics   `json:"best_metrics"`
+	Elites       []Elite                  `json:"elites"`
+	AllEvaluated []search.StrategyMetrics `json:"all_evaluated"`
+	Iterations   int                      `json:"iterations"`
+	Improvement  float64                  `json:"improvement_vs_baseline"`
 }
 
 // GenerateInitialPopulation creates the first generation of
@@ -145,16 +145,16 @@ func GenerateInitialPopulation(
 
 	// 2. Boundary: KeywordOnly.
 	addUnique(search.SearchGenome{
-		RecallMode:      search.RecallModeLexical,
-		DenseWeight:     0, TextWeight: 1,
+		RecallMode:  search.RecallModeLexical,
+		DenseWeight: 0, TextWeight: 1,
 		MaxRetrievedNum: baseline.MaxRetrievedNum,
 		FTS5PoolSize:    baseline.FTS5PoolSize,
 	})
 
 	// 3. Boundary: SemanticOnly.
 	addUnique(search.SearchGenome{
-		RecallMode:      search.RecallModeVector,
-		DenseWeight:     1, TextWeight: 0,
+		RecallMode:  search.RecallModeVector,
+		DenseWeight: 1, TextWeight: 0,
 		MaxRetrievedNum: baseline.MaxRetrievedNum,
 		FTS5PoolSize:    baseline.FTS5PoolSize,
 	})
@@ -172,8 +172,8 @@ func GenerateInitialPopulation(
 
 	// 5. Keyword match percent variations.
 	addUnique(search.SearchGenome{
-		RecallMode:          search.RecallModeHybrid,
-		DenseWeight:         0.5, TextWeight: 0.5,
+		RecallMode:  search.RecallModeHybrid,
+		DenseWeight: 0.5, TextWeight: 0.5,
 		KeywordMatchPercent: 0.3,
 		MaxRetrievedNum:     baseline.MaxRetrievedNum,
 		FTS5PoolSize:        baseline.FTS5PoolSize,
@@ -181,14 +181,14 @@ func GenerateInitialPopulation(
 
 	// 6. Candidate size variations.
 	addUnique(search.SearchGenome{
-		RecallMode:      search.RecallModeHybrid,
-		DenseWeight:     0.5, TextWeight: 0.5,
+		RecallMode:  search.RecallModeHybrid,
+		DenseWeight: 0.5, TextWeight: 0.5,
 		MaxRetrievedNum: 20,
 		FTS5PoolSize:    100,
 	})
 	addUnique(search.SearchGenome{
-		RecallMode:      search.RecallModeHybrid,
-		DenseWeight:     0.5, TextWeight: 0.5,
+		RecallMode:  search.RecallModeHybrid,
+		DenseWeight: 0.5, TextWeight: 0.5,
 		MaxRetrievedNum: 5,
 		FTS5PoolSize:    30,
 	})

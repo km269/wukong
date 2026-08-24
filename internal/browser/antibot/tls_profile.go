@@ -58,7 +58,7 @@ var tlsProfiles = []TLSProfile{
 }
 
 type TLSProfileManager struct {
-	mu     sync.RWMutex
+	mu      sync.RWMutex
 	current int
 }
 

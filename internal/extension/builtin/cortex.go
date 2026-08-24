@@ -17,8 +17,8 @@ import (
 // built-in extension tool set. The actual CortexDB services are
 // injected externally via SetCortexDependencies before use.
 type CortexToolSet struct {
-	cfg       *config.WukongConfig
-	tools     []tool.Tool
+	cfg   *config.WukongConfig
+	tools []tool.Tool
 }
 
 // NewCortexToolSet creates a new Cortex tool set from configuration.
@@ -138,9 +138,9 @@ type ddlParseReq struct {
 }
 
 type ddlParseRsp struct {
-	Success bool     `json:"success"`
-	Count   int      `json:"count"`
-	Error   string   `json:"error,omitempty"`
+	Success bool   `json:"success"`
+	Count   int    `json:"count"`
+	Error   string `json:"error,omitempty"`
 }
 
 func ddlParseStub(
@@ -167,7 +167,7 @@ func ddlPlanStub(
 	ctx context.Context, req ddlPlanReq,
 ) (ddlPlanRsp, error) {
 	return ddlPlanRsp{
-		Success:    false,
+		Success: false,
 		Error: "ImportFlow service not initialized. " +
 			"Ensure ImportFlow is enabled in configuration.",
 	}, nil

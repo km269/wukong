@@ -95,10 +95,10 @@ type CodeDiscoverReq struct{}
 
 // CodeDiscoverRsp is the output for tool discovery.
 type CodeDiscoverRsp struct {
-	Success bool                       `json:"success"`
-	Tools   []codemode.DiscoveredTool  `json:"tools,omitempty"`
-	Count   int                        `json:"count"`
-	Error   string                     `json:"error,omitempty"`
+	Success bool                      `json:"success"`
+	Tools   []codemode.DiscoveredTool `json:"tools,omitempty"`
+	Count   int                       `json:"count"`
+	Error   string                    `json:"error,omitempty"`
 }
 
 func (ts *CodeModeToolSet) discoverTools(

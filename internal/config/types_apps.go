@@ -26,20 +26,32 @@ type AppsConfig struct {
 // measures", these should be kept consistent with browser.* values.
 // Validate() warns when stealth/headless/backend diverge.
 type CloneDefaults struct {
-	MaxPages            int                `mapstructure:"max_pages"`
-	MaxDepth            int                `mapstructure:"max_depth"`
-	Traversal           string             `mapstructure:"traversal"`
-	Subdomains          bool               `mapstructure:"subdomains"`
-	ScopePrefix         string             `mapstructure:"scope_prefix"`
-	Workers             int                `mapstructure:"workers"`
-	AssetWorkers        int                `mapstructure:"asset_workers"`
-	BrowserPages        int                `mapstructure:"browser_pages"`
-	Timeout             int                `mapstructure:"timeout"`        // seconds
-	RenderTimeout       int                `mapstructure:"render_timeout"` // seconds
-	Settle              int                `mapstructure:"settle"`         // milliseconds (network idle wait)
-	Scroll              bool               `mapstructure:"scroll"`
-	RespectRobots       bool               `mapstructure:"respect_robots"`
-	CrawlDelay          int                `mapstructure:"crawl_delay"` // milliseconds
+	MaxPages      int    `mapstructure:"max_pages"`
+	MaxDepth      int    `mapstructure:"max_depth"`
+	Traversal     string `mapstructure:"traversal"`
+	Subdomains    bool   `mapstructure:"subdomains"`
+	ScopePrefix   string `mapstructure:"scope_prefix"`
+	Workers       int    `mapstructure:"workers"`
+	AssetWorkers  int    `mapstructure:"asset_workers"`
+	Timeout       int    `mapstructure:"timeout"`        // seconds
+	RenderTimeout int    `mapstructure:"render_timeout"` // seconds
+	Settle        int    `mapstructure:"settle"`         // milliseconds (network idle wait)
+	Scroll        bool   `mapstructure:"scroll"`
+	RespectRobots bool   `mapstructure:"respect_robots"`
+	CrawlDelay    int    `mapstructure:"crawl_delay"` // milliseconds
+	// RateLimitWhitelist exempts trusted hosts (your CDN, intranet,
+	// local dev servers) from clone asset rate limiting: no per-host
+	// token bucket and no 429/503 dynamic slowdown. Entries match the
+	// URL host case-insensitively; a portless entry matches any port.
+	RateLimitWhitelist []string `mapstructure:"rate_limit_whitelist"`
+	// RateLimitIPSegment propagates 429/503 penalties across hosts
+	// sharing an IP segment (CDN aliases): penalty-only, DNS consulted
+	// only after a penalty lands. Default true.
+	RateLimitIPSegment bool `mapstructure:"rate_limit_ip_segment"`
+	// RateLimitIPPrefixV4/V6 are the CIDR prefix lengths used to group
+	// IPs into segments (defaults 24 and 64).
+	RateLimitIPPrefixV4 int                `mapstructure:"rate_limit_ip_prefix_v4"`
+	RateLimitIPPrefixV6 int                `mapstructure:"rate_limit_ip_prefix_v6"`
 	NoSitemap           bool               `mapstructure:"no_sitemap"`
 	DedupContent        bool               `mapstructure:"dedup_content"`
 	MobileReadable      bool               `mapstructure:"mobile_readable"`

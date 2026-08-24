@@ -139,8 +139,8 @@ func collectSystemInfo() systemInfo {
 func registerSystemHealth(reg *health.Registry, info systemInfo) {
 	reg.Register("platform", func(ctx context.Context) health.ComponentHealth {
 		return health.ComponentHealth{
-			Name:    "platform",
-			Status:  health.StatusHealthy,
+			Name:   "platform",
+			Status: health.StatusHealthy,
 			Message: fmt.Sprintf("%s/%s, %d CPUs, Go %s",
 				info.OS, info.Arch, info.CPUs, info.GoVersion),
 		}
@@ -178,8 +178,8 @@ func registerConfigHealth(reg *health.Registry, cfg *config.WukongConfig) {
 			}
 		}
 		return health.ComponentHealth{
-			Name:    "config",
-			Status:  health.StatusHealthy,
+			Name:   "config",
+			Status: health.StatusHealthy,
 			Message: fmt.Sprintf("provider=%s, log_level=%s",
 				cfg.DefaultProvider, cfg.LogLevel),
 		}
@@ -206,8 +206,8 @@ func registerConfigHealth(reg *health.Registry, cfg *config.WukongConfig) {
 	// Session backend
 	reg.Register("session", func(ctx context.Context) health.ComponentHealth {
 		return health.ComponentHealth{
-			Name:    "session",
-			Status:  health.StatusHealthy,
+			Name:   "session",
+			Status: health.StatusHealthy,
 			Message: fmt.Sprintf("backend=%s, path=%s",
 				cfg.Session.Backend, cfg.Session.DBPath),
 		}
@@ -260,8 +260,8 @@ func registerConfigHealth(reg *health.Registry, cfg *config.WukongConfig) {
 			endpoints = append(endpoints, "ACP MCP")
 		}
 		return health.ComponentHealth{
-			Name:    "servers",
-			Status:  health.StatusHealthy,
+			Name:   "servers",
+			Status: health.StatusHealthy,
 			Message: fmt.Sprintf("%d active: %s", enabled,
 				strings.Join(endpoints, ", ")),
 		}
@@ -270,8 +270,8 @@ func registerConfigHealth(reg *health.Registry, cfg *config.WukongConfig) {
 	// Security
 	reg.Register("security", func(ctx context.Context) health.ComponentHealth {
 		return health.ComponentHealth{
-			Name:    "security",
-			Status:  health.StatusHealthy,
+			Name:   "security",
+			Status: health.StatusHealthy,
 			Message: fmt.Sprintf("mode=%s, guardrail=%v",
 				cfg.Security.PermissionMode, cfg.Security.GuardrailEnabled),
 		}
@@ -281,8 +281,8 @@ func registerConfigHealth(reg *health.Registry, cfg *config.WukongConfig) {
 	if cfg.Evolution.Enabled {
 		reg.Register("evolution", func(ctx context.Context) health.ComponentHealth {
 			return health.ComponentHealth{
-				Name:    "evolution",
-				Status:  health.StatusHealthy,
+				Name:   "evolution",
+				Status: health.StatusHealthy,
 				Message: fmt.Sprintf("min_confidence=%.1f, cooldown=%s",
 					cfg.Evolution.MinConfidence, cfg.Evolution.CooldownPeriod),
 			}

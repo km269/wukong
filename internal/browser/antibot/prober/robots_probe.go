@@ -127,7 +127,7 @@ func RobotsProbe(ctx context.Context, targetURL string) ProbeResult {
 	return ProbeResult{
 		Dimension:  DimensionRobots,
 		Detected:   detected,
-		Confidence: float64(min(1, int(confidence*10))/10.0),
+		Confidence: float64(min(1, int(confidence*10)) / 10.0),
 		Details:    details,
 		Message:    strings.Join(messages, "; "),
 		Duration:   time.Since(start),

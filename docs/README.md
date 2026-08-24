@@ -1,6 +1,8 @@
 # Wukong 文档中心
 
 > 本目录包含 Wukong AI Agent 平台的所有技术文档。
+>
+> 最后更新：2026-08-23
 
 ---
 
@@ -10,13 +12,13 @@
 
 | 文档 | 说明 | 关键词 |
 |------|------|--------|
-| [系统架构](ARCHITECTURE.md) | 20 章系统全景详解 | CoreLoop、记忆系统、Evolution、ANP、ARD、Gateway |
+| [系统架构](ARCHITECTURE.md) | 系统架构与各子系统技术实现细节 | CoreLoop、记忆系统、Evolution、ANP、ARD、Gateway |
 | [配置手册](CONFIG.md) | 15 组配置全字段说明 | providers、agent、security、cortex、apps |
 | [CLI & TUI 架构](CLI_TUI.md) | 命令树与终端 UI 架构 | Cobra、Bubble Tea、启动序列、流式传输 |
-| [技术实现详解](TECHNICAL_IMPLEMENTATION.md) | 核心模块实现与数据流 | CoreLoop、Provider、Extension、Security |
 | [API 参考](API_REFERENCE.md) | 内部接口签名与用法 | CoreLoop API、Provider Factory、Guard |
 | [开发者指南](DEVELOPER_GUIDE.md) | 环境搭建与开发任务 | Go 1.26、项目结构、测试、调试 |
 | [部署运维](DEPLOYMENT.md) | 部署、健康检查、故障排查 | Docker、GHCR、二进制、WAL |
+| [Gateway 渠道开发指南](../internal/gateway/README.md) | Gateway 渠道开发指南，包内文档 | Channel 接口、飞书 WebSocket、dispatch 流水线 |
 
 ### 专题指南
 
@@ -24,7 +26,7 @@
 |------|------|--------|
 | [网站克隆技术指南](CLONE_GUIDE.md) | 克隆引擎与 ZIM 打包详解 | EnhancedCloner、分页、反反爬、ZIM 打包 |
 | [Web 操作深度分析](WEB_OPERATIONS_ANALYSIS.md) | 浏览器/克隆/反爬/检索/HTTP 全链路剖析与优化建议 | 浏览器、EnhancedCloner、Antibot、aggregate_search、httpclient |
-| [反反爬技术详解](ANTIBOT_GUIDE.md) | 10 层反爬体系详解 | Antibot、Escalator、Stealth、Proxy Pool |
+| [反反爬技术详解](ANTIBOT_GUIDE.md) | 5 级反爬升级体系详解 | Antibot、Escalator、Stealth、Proxy Pool |
 | [记忆系统架构](MEMORY_ARCHITECTURE.md) | 双引擎三层记忆详解 | MemoryFlow、CortexDB、GraphFlow、SmartCleanup |
 | [OKF 知识格式](OKF_GUIDE.md) | OKF v0.1 规范与集成 | Bundle、Concept、Skill、Knowledge、Evolution |
 
@@ -91,19 +93,20 @@
 
 | 指标 | 数值 |
 |------|------|
-| 内部包 | 30+ |
-| 公共包 | 3 |
+| 内部包 | 33 个 |
+| 公共包 | 5 个 |
 | 配置结构体 | 34+ |
 | CLI 顶层命令 | 30 |
 | CLI 子命令 | 60+ |
 | 编排模式 | 10 种 |
 | LLM Provider | 7 种 |
-| 内置扩展 | 12 个 |
-| 反反爬层级 | 10 层 |
+| 内置扩展 | 17 个 |
+| 反爬升级体系 | 5 级 |
 | 安全防御层 | 5 层 |
 | 服务端点 | 6 个协议 |
 | 记忆层级 | 4 层 |
-| 分页模式 | 6 种 |
+| 克隆层分页检测 | 3 种检测模式 + 游标兜底 |
+| 浏览器 API 发现层 | 5 种 kind |
 | 资源下载回退 | 4 层 |
 
 ---
@@ -128,7 +131,7 @@ wukong/
 │   ├── wukong/              # 主 CLI 应用
 │   ├── zim-check/           # ZIM 校验工具
 │   └── zim-ls/              # ZIM 列表工具
-├── internal/                 # 内部包 (30+)
+├── internal/                 # 内部包 (33 个)
 │   ├── agent/               # CoreLoop 核心引擎
 │   ├── apps/                # 应用管理 (克隆/打包)
 │   ├── browser/             # 浏览器引擎 + 反反爬
@@ -139,9 +142,15 @@ wukong/
 │   ├── extension/           # MCP 扩展管理
 │   ├── gateway/             # 消息网关
 │   └── ...                  # 更多子系统
-├── pkg/                      # 公共包
+├── pkg/                      # 公共包 (5 个)
+│   ├── capability/          # fs/shell 能力接口层
 │   ├── httpclient/          # HTTP 客户端
+│   ├── logutil/             # 日志工具
 │   ├── sandbox/             # 跨平台沙箱
 │   └── zim/                 # ZIM 格式读写
 └── docs/                     # 文档 (本目录)
 ```
+
+---
+
+[← 返回项目 README](../README.md)

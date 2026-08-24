@@ -1,6 +1,6 @@
 # 网站克隆引擎与 ZIM 打包技术指南
 
-> 克隆引擎: EnhancedCloner (3173 行) | 单遍 DOM 遍历重写 | 6 种分页模式
+> 克隆引擎: EnhancedCloner | 单遍 DOM 遍历重写 | 3 种分页检测模式 + 游标兜底
 > 资源下载: 代理池轮换 + cf_clearance 注入 | 内容去重: SHA-256 + 硬链接
 > 断点续抓: Frontier 原子写入 | ZIM: Kiwix v6 格式 | 归档回退: Wayback Machine
 
@@ -39,7 +39,7 @@
                         ┌─────────────────────────────────────┐
                         │        EnhancedCloner (主引擎)       │
                         │     internal/apps/clone/             │
-                        │     enhanced_cloner.go (3173 行)     │
+                        │     enhanced_cloner.go               │
                         └──────────────┬──────────────────────┘
                                        │
           ┌────────────┬──────────────┼──────────────┬─────────────┐
@@ -74,17 +74,22 @@
 
 | 子系统 | 源文件 | 核心职责 |
 |--------|--------|---------|
-| **EnhancedCloner** | `enhanced_cloner.go` (3173 行) | 主引擎，协调所有子系统 |
+| **EnhancedCloner** | `enhanced_cloner.go` | 主引擎，协调所有子系统 |
+| **Options** | `options.go` | 克隆选项结构体（页面/作用域/浏览器/反爬等全部可调参数） |
+| **Result** | `result.go` | 克隆结果统计（页面数、资源数、字节数、去重节省等） |
 | **CloneSession** | `session.go` | Netscape cookie 持久化，浏览器实例 cookie 加载 |
 | **Frontier** | `frontier.go` | 爬取队列，seen/visited 去重，JSON 原子持久化 |
 | **urlx** | `urlx.go` | URL 规范化，LocalPath() 确定性映射，分页后缀方案 |
-| **AssetDownloader** | `asset.go` | 代理池轮换，Referer 覆盖，gzip/deflate 解压 |
+| **AssetDownloader** | `asset.go` | 代理池轮换，Referer 覆盖，gzip/deflate 解压，浏览器多层回退 |
+| **Downloader** | `downloader.go` | 独立 HTTP 文件下载器（直连抓取、扩展名过滤、文件名生成、链接提取） |
 | **ContentDeduper** | `dedup.go` | SHA-256 哈希去重，硬链接节省磁盘空间 |
 | **CloneCache** | `cache.go` | ETag/Last-Modified 条件请求，Manifest 持久化 |
 | **robots** | `robots.go` | robots.txt 解析，sitemap 递归抓取，令牌桶限速 |
 | **rewrite** | `rewrite.go` | DOM 重写，蜜罐检测，懒加载解析 |
 | **css** | `css.go` | CSS url() 和 @import 重写 |
 | **platform_api** | `platform_api.go` | 已知平台公共 API 拦截 (Reddit/HN/GitHub 等) |
+| **api_discovery_save** | `api_discovery_save.go` | 将发现的隐藏 API 端点写入 api_endpoints.json，供分页追爬 |
+| **export** | `export.go` | 克隆结果导出为结构化 JSON |
 | **archive_fallback** | `archive_fallback.go` | Wayback Machine 归档回退 |
 
 ---
@@ -99,7 +104,7 @@
 EnhancedCloner
     ├── browserPool        // 浏览器池 (Rod 优先 / Chromedp 备用)
     ├── frontier           // 爬取队列 (BFS/DFS + 原子持久化)
-    ├── assetDownloader    // 资源下载器 (代理池 + 4 层回退)
+    ├── assetDownloader    // 资源下载器 (代理池 + 多层浏览器回退)
     ├── deduper            // 内容去重器 (SHA-256 + 硬链接)
     ├── cache              // 条件缓存 (ETag/Last-Modified)
     ├── robotsChecker      // robots.txt 检查器
@@ -117,7 +122,7 @@ EnhancedCloner
 | `processAsset()` | 资源处理 | 下载资源 → 去重 → 保存 |
 | `rewriteAndDiscover()` | **单遍 DOM 遍历** | 链接重写 + 页面/资源发现同时进行 |
 | `processBrowserExtractedLinks()` | 浏览器链接处理 | 处理浏览器端发现的链接 |
-| `detectAndGeneratePagination()` | 分页检测生成 | 3 种模式：查询参数 / 路径 / 偏移量 |
+| `detectAndGeneratePagination()` | 分页检测生成 | 3 种检测模式（查询参数 / 路径 / 偏移量）+ 游标兜底 |
 | `preflightCloudflareCheck()` | Cloudflare 预检 | Chrome 启动前检测 Cloudflare |
 | `runAntibotProbe()` | 反爬探测 | 运行多维并行探测 |
 
@@ -196,7 +201,7 @@ Seed URL (起始地址)
 │    │    ├── CloneCache 条件请求  │
 │    │    ├── AssetDownloader 下载 │
 │    │    │    ├── HTTP 直连       │
-│    │    │    └── 4 层浏览器回退  │
+│    │    │    └── 浏览器多层回退  │
 │    │    ├── ContentDeduper 去重  │
 │    │    └── 保存资源             │
 │    │                            │
@@ -312,6 +317,8 @@ type RewriteSink interface {
 游标式       ?cursor=abc123           _{cursorParam}_{hash}
                                    如: _cursor_e861b2.html
 ```
+
+> **游标兜底**：游标参数（cursor/seek/token/page_token 等）不满足数值规律、无法自动生成缺失页，克隆引擎只保证已出现的游标链接全部入队不丢失。
 
 ### 5.3 分页 URL 后缀方案对照
 
@@ -488,25 +495,9 @@ case "deflate":
 
 > **DNS 错误标记为非临时**：DNS 解析失败通常是持久性的（域名不存在或配置错误），重试不会改变结果，直接跳过节省时间。
 
-### 8.5 4 层浏览器回退
+### 8.5 浏览器多层回退
 
-当 HTTP 直连失败时，通过浏览器 4 层回退下载（每层使用全新标签上下文）：
-
-```
-Layer 1: 浏览器导航 + Network.getResponseBody
-    │   使用浏览器的 TLS 指纹和 Cookie
-    │   失败 ↓
-Layer 2: <img> 标签加载
-    │   在页面中创建 <img> 触发加载
-    │   失败 ↓
-Layer 3: Network.loadNetworkResource
-    │   CDP 直接加载网络资源
-    │   失败 ↓
-Layer 4: JS fetch + base64
-    │   通过 JavaScript fetch 下载并 base64 编码
-    │   失败 ↓
-  彻底失败
-```
+当 HTTP 直连失败时，通过浏览器逐层回退下载资源（导航取响应体 → `<img>` 标签加载 → CDP `Network.loadNetworkResource` → JS fetch + base64），每层使用全新标签上下文；Rod 后端还额外提供第 5 层 defense.gov 变体（先建立 Referer 上下文再加载）。逐层细节与设计动机见 [ANTIBOT_GUIDE.md §14](./ANTIBOT_GUIDE.md#14-资源下载-4-层回退)。
 
 ---
 
@@ -1085,26 +1076,28 @@ ZIM Reader 的核心特性：
 
 ### 19.1 主要配置项
 
+> 默认值以 `internal/config/defaults.go` 为准。
+
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
 | `apps.clone.max_pages` | int | 0 | 最大页面数 (0=无限制) |
 | `apps.clone.max_depth` | int | 0 | 最大深度 (0=无限制) |
 | `apps.clone.traversal` | string | `bfs` | 遍历策略: bfs/dfs |
-| `apps.clone.workers` | int | 3 | 爬取 Worker 数 |
-| `apps.clone.asset_workers` | int | 5 | 资源下载 Worker 数 |
-| `apps.clone.browser_pages` | int | 3 | 浏览器标签池大小 |
+| `apps.clone.workers` | int | 4 | 爬取 Worker 数 |
+| `apps.clone.asset_workers` | int | 8 | 资源下载 Worker 数 |
 | `apps.clone.headless` | bool | true | 无头模式 |
-| `apps.clone.stealth` | bool | false | 隐身模式 |
-| `apps.clone.antibot_enabled` | bool | false | 启用反反爬 |
-| `apps.clone.antibot_auto_escalate` | bool | false | 自动升级反爬等级 |
+| `apps.clone.stealth` | bool | true | 隐身模式（克隆场景默认开启） |
 | `apps.clone.enable_resume` | bool | true | 启用断点续抓 |
-| `apps.clone.dedup_content` | bool | false | 启用内容去重 |
-| `apps.clone.settle` | int | 2000 | 网络空闲等待 (ms) |
+| `apps.clone.dedup_content` | bool | true | 启用内容去重 |
+| `apps.clone.settle` | int | 1500 | 网络空闲等待 (ms) |
+| `apps.clone.timeout` | int | 300 | HTTP 请求超时 (秒) |
+| `apps.clone.render_timeout` | int | 120 | 页面渲染超时 (秒) |
 | `apps.clone.respect_robots` | bool | true | 遵守 robots.txt |
 | `apps.clone.subdomains` | bool | false | 包含子域名 |
-| `apps.clone.browser_backend` | string | `rod` | 浏览器后端: rod/chromedp |
-| `apps.clone.platform_api` | bool | true | 启用平台 API 拦截 |
+| `apps.clone.browser_backend` | string | 继承 `browser.backend` (`rod`) | 浏览器后端: rod/chromedp |
 | `apps.clone.archive_fallback` | bool | false | 启用归档回退 |
+
+反爬相关键（`apps.clone.antibot_enabled`、`apps.clone.antibot_auto_escalate`、`apps.clone.cookie_file`、`apps.clone.user_agent`、代理池等）统一见 [ANTIBOT_GUIDE.md §16.1](./ANTIBOT_GUIDE.md#16-配置参考)。
 
 ### 19.2 CLI 选项
 
@@ -1112,19 +1105,39 @@ ZIM Reader 的核心特性：
 wukong apps clone <url> [flags]
 
 常用选项:
-  --max-pages int        最大页面数
-  --max-depth int        最大深度
-  --workers int          Worker 数
-  --headless             无头模式
-  --stealth              隐身模式
-  --antibot              启用反反爬
-  --resume               断点续抓
-  --force                强制重新开始
-  --output string        输出目录
-  --cookie-file string   导入 Cookie 文件
+  --max-pages int        最大页面数 (-p)
+  --max-depth int        最大深度 (-d)
+  --workers int          Worker 数 (-w, 默认 4)
+  --asset-workers int    资源下载 Worker 数 (默认同 workers)
+  --settle int           网络空闲等待毫秒数 (默认 1500)
+  --rate-limit-whitelist strings
+                         限速豁免域名 (可重复)。豁免 host 完全跳过 per-host
+                         token bucket 且免疫 429/503 动态降速——适用于自己
+                         控制的 CDN/内网/本机 dev server；无端口条目匹配任意
+                         端口。对应配置 apps.clone.rate_limit_whitelist
+  --no-ip-rate-limit     关闭 IP 段惩罚传播 (429/503 惩罚自动扩散到同 IP 段
+                         的其他 host，如 CDN 别名)。对应配置
+                         apps.clone.rate_limit_ip_segment
+  --no-headless          显示可见 Chrome 窗口 (默认无头)
+  --no-stealth           禁用隐身反检测 (默认开启)
+  --no-antibot           禁用反反爬检测与升级 (默认开启)
+  --no-antibot-auto      仅检测阻塞，跳过自动升级
+  --cookies string       导入 Netscape 格式 Cookie 文件
+  --incremental          使用 ETag/Last-Modified 增量更新
+  --force                删除已有镜像后重新开始 (-f)
+  --refresh              重新渲染所有页面
+  --out string           输出根目录 (-o)
+  --archive-fallback     死链回退 Wayback Machine
+
+断点续抓无需旗标：由 apps.clone.enable_resume (默认 true) 控制。
+反爬相关旗标的完整说明见 [ANTIBOT_GUIDE.md §16.2](./ANTIBOT_GUIDE.md#16-配置参考)。
+```
+
+```bash
+wukong apps pack <app> [flags]
 
 打包选项:
-  --format string        打包格式 (html/zim/binary/app)
+  --format string        打包格式 (zim/html/binary/app, 默认 zim)
   --compress             ZIM 压缩
   --language string      ZIM 语言代码
   --creator string       ZIM 创建者
@@ -1150,9 +1163,9 @@ wukong apps clone <url> [flags]
 
 **解决方案**：
 1. AssetDownloader 的 RefererOverrides 会自动覆盖特定域名
-2. 启用 `--antibot` 反反爬系统
-3. 使用 `--cookie-file` 导入浏览器 Cookie（特别是 cf_clearance）
-4. 浏览器 4 层回退会自动尝试
+2. 反反爬系统默认开启（如需确认未被 `--no-antibot` 禁用）
+3. 使用 `--cookies` 导入浏览器 Cookie 文件（特别是 cf_clearance）
+4. 浏览器多层回退会自动尝试（见 §8.5）
 
 ### Q3: 分页页面没被爬取？
 
@@ -1179,7 +1192,7 @@ wukong apps clone https://example.com --archive-fallback
 
 ### Q6: 如何加速已知平台的克隆？
 
-平台 API 拦截默认启用（`platform_api: true`），会自动检测 Reddit、HackerNews、GitHub、Wikipedia、arXiv 等平台，通过公共 API 直接获取内容，比浏览器渲染快 10-50 倍。
+平台 API 拦截是内置行为（无需配置开关），会自动检测 Reddit、HackerNews、GitHub、Wikipedia、arXiv 等平台，通过公共 API 直接获取内容，比浏览器渲染快 10-50 倍。
 
 ---
 
@@ -1198,21 +1211,12 @@ wukong apps clone https://example.com --archive-fallback
 
 | 模块 | 路径 |
 |------|------|
-| 克隆引擎 | `internal/apps/clone/enhanced_cloner.go` |
-| 会话管理 | `internal/apps/clone/session.go` |
-| 爬取队列 | `internal/apps/clone/frontier.go` |
-| URL 工具 | `internal/apps/clone/urlx.go` |
-| 资源下载 | `internal/apps/clone/asset.go` |
-| HTML 重写 | `internal/apps/clone/rewrite.go` |
-| CSS 重写 | `internal/apps/clone/css.go` |
-| 内容去重 | `internal/apps/clone/dedup.go` |
-| 条件缓存 | `internal/apps/clone/cache.go` |
-| robots | `internal/apps/clone/robots.go` |
-| 平台 API | `internal/apps/clone/platform_api.go` |
-| 归档回退 | `internal/apps/clone/archive_fallback.go` |
-| 打包器 | `internal/apps/pack/packer.go` |
+| 克隆引擎（含全部子模块） | `internal/apps/clone/` |
+| 打包器 | `internal/apps/pack/` |
 | ZIM 格式 | `pkg/zim/` |
+
+> 反爬与浏览器引擎相关源码见 [ANTIBOT_GUIDE.md](./ANTIBOT_GUIDE.md) 的源码索引。
 
 ---
 
-> **版本**: v2.0 | **最后更新**: 2026-08-11 | **相关代码**: internal/apps/clone/ + internal/apps/pack/ + pkg/zim/
+> **版本**: v2.1 | **最后更新**: 2026-08-23 | **相关代码**: internal/apps/clone/ + internal/apps/pack/ + pkg/zim/

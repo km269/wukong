@@ -15,8 +15,9 @@ import (
 
 // parseDeeplink parses a deeplink URL into an ExtensionConfig.
 // Supported formats:
-//   wukong://extension?name=github&type=external&transport=stdio&command=npx&args=-y&args=@modelcontextprotocol/server-github
-//   https://wukong.ai/extension?name=...
+//
+//	wukong://extension?name=github&type=external&transport=stdio&command=npx&args=-y&args=@modelcontextprotocol/server-github
+//	https://wukong.ai/extension?name=...
 func parseDeeplink(rawURL string) (config.ExtensionConfig, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {

@@ -119,14 +119,14 @@ func fetchReddit(ctx context.Context, rawURL string, u *url.URL) (string, bool) 
 		Data struct {
 			Children []struct {
 				Data struct {
-					Title     string `json:"title"`
-					Author    string `json:"author"`
-					Selftext  string `json:"selftext"`
-					URL       string `json:"url"`
-					Score     int    `json:"score"`
-					Subreddit string `json:"subreddit"`
-					Permalink string `json:"permalink"`
-					NumComments int `json:"num_comments"`
+					Title       string `json:"title"`
+					Author      string `json:"author"`
+					Selftext    string `json:"selftext"`
+					URL         string `json:"url"`
+					Score       int    `json:"score"`
+					Subreddit   string `json:"subreddit"`
+					Permalink   string `json:"permalink"`
+					NumComments int    `json:"num_comments"`
 				} `json:"data"`
 			} `json:"children"`
 		} `json:"data"`
@@ -185,15 +185,15 @@ func fetchHackerNews(ctx context.Context, rawURL string, u *url.URL) (string, bo
 	}
 
 	var item struct {
-		ID        int      `json:"id"`
-		Title     string   `json:"title"`
-		By        string   `json:"by"`
-		Text      string   `json:"text"`
-		URL       string   `json:"url"`
-		Score     int      `json:"score"`
+		ID          int    `json:"id"`
+		Title       string `json:"title"`
+		By          string `json:"by"`
+		Text        string `json:"text"`
+		URL         string `json:"url"`
+		Score       int    `json:"score"`
 		Descendants int    `json:"descendants"`
-		Kids      []int    `json:"kids"`
-		Type      string   `json:"type"`
+		Kids        []int  `json:"kids"`
+		Type        string `json:"type"`
 	}
 	if err := json.Unmarshal(data, &item); err != nil || item.Title == "" {
 		return "", false

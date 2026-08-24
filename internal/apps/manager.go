@@ -284,6 +284,10 @@ type CloneOptions struct {
 	AssetSameDomain     *bool    // 仅下载同域资源（nil = 默认true）
 	AssetDomains        []string // 额外允许的资源域名列表
 	CrawlDelay          int      // 爬取延迟（毫秒，0 = 使用robots.txt设定）
+	RateLimitWhitelist  []string // 限速豁免域名（完全跳过 per-host 限速与 429/503 惩罚）
+	RateLimitIPSegment  *bool    // IP 段惩罚传播（nil = 默认开启）
+	RateLimitIPPrefixV4 int      // IPv4 段前缀长度（0 = 默认 24）
+	RateLimitIPPrefixV6 int      // IPv6 段前缀长度（0 = 默认 64）
 	Incremental         *bool    // 是否启用增量缓存（nil = 默认false）
 	CacheMaxAge         int      // 缓存最长有效时间（秒，默认86400）
 	ChromePath          string   // Chrome 浏览器路径（空=自动检测）
@@ -337,9 +341,6 @@ func applyConfigDefaults(eco *clone.EnhancedClonerOptions, dc config.CloneDefaul
 	if dc.AssetWorkers > 0 {
 		eco.AssetWorkers = dc.AssetWorkers
 	}
-	if dc.BrowserPages > 0 {
-		eco.BrowserPages = dc.BrowserPages
-	}
 	if dc.Timeout > 0 {
 		eco.Timeout = time.Duration(dc.Timeout) * time.Second
 	}
@@ -354,6 +355,19 @@ func applyConfigDefaults(eco *clone.EnhancedClonerOptions, dc config.CloneDefaul
 	}
 	if dc.CrawlDelay > 0 {
 		eco.CrawlDelay = time.Duration(dc.CrawlDelay) * time.Millisecond
+	}
+	if len(dc.RateLimitWhitelist) > 0 {
+		eco.RateLimitWhitelist = dc.RateLimitWhitelist
+	}
+	// Boolean default-true: viper always populates it (defaults.go
+	// registers the key), so assign unconditionally — config false
+	// must be able to disable the feature.
+	eco.RateLimitIPSegment = dc.RateLimitIPSegment
+	if dc.RateLimitIPPrefixV4 > 0 {
+		eco.RateLimitIPPrefixV4 = dc.RateLimitIPPrefixV4
+	}
+	if dc.RateLimitIPPrefixV6 > 0 {
+		eco.RateLimitIPPrefixV6 = dc.RateLimitIPPrefixV6
 	}
 	if dc.NoSitemap {
 		eco.NoSitemap = true
@@ -466,6 +480,18 @@ func applyCLIOptions(eco *clone.EnhancedClonerOptions, opts CloneOptions) {
 	}
 	if opts.CrawlDelay > 0 {
 		eco.CrawlDelay = time.Duration(opts.CrawlDelay) * time.Millisecond
+	}
+	if len(opts.RateLimitWhitelist) > 0 {
+		eco.RateLimitWhitelist = opts.RateLimitWhitelist
+	}
+	if opts.RateLimitIPSegment != nil {
+		eco.RateLimitIPSegment = *opts.RateLimitIPSegment
+	}
+	if opts.RateLimitIPPrefixV4 > 0 {
+		eco.RateLimitIPPrefixV4 = opts.RateLimitIPPrefixV4
+	}
+	if opts.RateLimitIPPrefixV6 > 0 {
+		eco.RateLimitIPPrefixV6 = opts.RateLimitIPPrefixV6
 	}
 	eco.Force = opts.Force
 	eco.Refresh = opts.Refresh

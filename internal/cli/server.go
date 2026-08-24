@@ -326,4 +326,3 @@ func registerHealthCheckers(
 // shutdownServers has been replaced by the unified shutdownBootstrap
 // (see shutdown.go), which covers all BootstrapState fields including
 // ANPServer and is idempotent via sync.Once.
-

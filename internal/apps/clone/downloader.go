@@ -197,6 +197,8 @@ func NewDownloader(opts DownloaderOptions) *Downloader {
 }
 
 // initBrowser initializes the browser backend for JS-rendered page crawling.
+// The browser pool's lifetime is bound to d.ctx: cancelling the download
+// context releases the browser even if closeBrowser is somehow skipped.
 func (d *Downloader) initBrowser() {
 	if !d.opts.Headless {
 		return
@@ -206,7 +208,7 @@ func (d *Downloader) initBrowser() {
 		slog.Int("workers", d.opts.Workers))
 
 	var err error
-	d.browserPool, err = browser.NewBackend(browser.BackendChromedp, browser.BackendOptions{
+	d.browserPool, err = browser.NewBackend(d.ctx, browser.BackendChromedp, browser.BackendOptions{
 		Headless:         true,
 		Workers:          d.opts.Workers,
 		Settle:           2 * time.Second,
@@ -568,7 +570,15 @@ func (d *Downloader) crawlViaBrowser(targetURL string) ([]string, error) {
 		logutil.Debug("browser rendering page", slog.String("url", targetURL))
 	}
 
-	renderResult, err := d.browserPool.Render(d.ctx, targetURL)
+	// High priority: this render is the user-requested page itself,
+	// not background crawl work.
+	var renderResult *types.RenderResult
+	var err error
+	if pr, ok := d.browserPool.(types.PriorityRenderer); ok {
+		renderResult, err = pr.RenderWithPriority(d.ctx, targetURL, "", types.PriorityHigh)
+	} else {
+		renderResult, err = d.browserPool.Render(d.ctx, targetURL)
+	}
 	if err != nil {
 		return nil, err
 	}

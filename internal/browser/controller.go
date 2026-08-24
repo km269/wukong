@@ -64,7 +64,9 @@ func NewController(cfg *config.BrowserConfig) *Controller {
 	if cfg != nil && cfg.Enabled &&
 		strings.EqualFold(cfg.BrowserType, "chromium") {
 		var err error
-		c.backend, err = NewBackendFromConfig(cfg)
+		// The Controller is a long-lived component: its backend lives
+		// until Close(), not until some task context ends.
+		c.backend, err = NewBackendFromConfig(context.Background(), cfg)
 		if err != nil {
 			logutil.Warn("failed to initialize browser backend", slog.String("error", err.Error()))
 		}

@@ -22,9 +22,9 @@ func TestNewACPMCPBridge_Disabled(t *testing.T) {
 
 func TestACPMCPBridge_Addr(t *testing.T) {
 	cfg := &config.ACPMCPConfig{
-		Enabled:  true,
-		Address:  ":3400",
-		Path:     "/mcp",
+		Enabled: true,
+		Address: ":3400",
+		Path:    "/mcp",
 	}
 
 	mgr := NewManager(&config.WukongConfig{

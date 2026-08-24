@@ -1,7 +1,7 @@
 # 浏览器引擎与反反爬技术指南
 
-> 双后端: Rod (优先, 1927 行) + Chromedp (备用) | 反爬升级: 5 级递进
-> 隐身欺骗: 15 类指纹伪造 | WAF 识别: 22 种签名 | UA 池: 16 种浏览器配置
+> 双后端: Rod (优先) + Chromedp (备用) | 反爬升级: 5 级递进
+> 隐身欺骗: 15 类指纹伪造 | WAF 识别: 22 种签名 | UA 池: 15 种配置 (另 6 种桌面专用)
 > 探测维度: 5 维并行 | TLS 指纹: 5 种配置 | 行为模拟: 贝塞尔曲线鼠标
 
 ---
@@ -61,7 +61,7 @@ type BrowserBackend interface {
 ┌─────────────────┐    ┌─────────────────────┐
 │  Rod 后端 (优先)  │    │  Chromedp 后端 (备用) │
 │  rodbackend/     │    │  pool.go            │
-│  pool.go (1927行)│    │  (默认回退)          │
+│  pool.go         │    │  (默认回退)          │
 └────────┬────────┘    └─────────────────────┘
          │
          ▼
@@ -74,7 +74,7 @@ type BrowserBackend interface {
    └─────────────────────────────────┘
 ```
 
-### 1.3 Rod 后端核心特性 (rodbackend/pool.go, 1927 行)
+### 1.3 Rod 后端核心特性 (rodbackend/pool.go)
 
 Rod 后端是**首选后端**，提供比 Chromedp 更丰富的功能：
 
@@ -222,12 +222,11 @@ LevelBackoff (4) ──→ 放弃当前 URL
 
 ```go
 type Engine struct {
-    detector   *Detector    // 阻塞检测器
-    escalator  *Escalator   // 自动升级器
+    Escalator *Escalator  // 自动升级器
 }
 ```
 
-Engine 将检测器和升级器组合为统一接口。
+Engine 持有升级器；阻塞检测以包级函数 `Detect()`（HTTP 层 + DOM 层）提供，`CheckResponse()`/`CheckError()` 作为统一入口封装。
 
 ### 4.3 各等级详细对比
 
@@ -279,10 +278,11 @@ func FlagsForLevel(level Level) []string {
 第二层: DOM 内容分析 (深度)
     │
     ├── 空响应? → ReasonEmpty
-    ├── 维护页? (suspiciousPageMaxSize=50000 + 关键词) → ReasonUnavailable
+    ├── 维护页? (maintenancePageMaxSize=15000 + 关键词) → ReasonUnavailable
+    ├── 短阻断页? (<150 字节且含 forbidden/denied) → ReasonBlocked
     ├── Cloudflare Turnstile? → ReasonCloudflare
-    ├── CAPTCHA 关键词? → ReasonCaptcha
-    └── 其他拦截? → ReasonBlocked
+    ├── CAPTCHA 关键词? (≤ suspiciousPageMaxSize=50000 才检查) → ReasonCaptcha
+    └── 无阻塞 → ReasonNone
     │
     ▼
     无阻塞 → ReasonNone
@@ -292,7 +292,8 @@ func FlagsForLevel(level Level) []string {
 
 | 参数 | 值 | 说明 |
 |------|-----|------|
-| `suspiciousPageMaxSize` | 50000 字节 | 超过此大小的页面通常不是拦截页，跳过 DOM 检测以提升性能 |
+| `maintenancePageMaxSize` | 15000 字节 | 超过此大小的页面不视为维护页 |
+| `suspiciousPageMaxSize` | 50000 字节 | 超过此大小的页面跳过 CAPTCHA 关键词检测（大页面几乎不可能是拦截页），以提升性能 |
 
 ### 5.3 检测特征库
 
@@ -383,13 +384,13 @@ ShouldRetry(reason)? ──否──→ 放弃
 
 ### 6.4 UA 轮换
 
-16 个真实浏览器配置的 UA 池：
+15 个真实浏览器配置的 UA 池（`uaProfiles`，含桌面与移动平台）：
 
 | 浏览器 | 平台 | 版本示例 |
 |--------|------|---------|
-| Chrome | Windows / macOS / Linux | 128 / 129 / 130 |
+| Chrome | Windows / macOS / Linux / Android | 128 / 129 / 130 |
 | Firefox | Windows / macOS | 132 |
-| Safari | macOS / iOS | 18 |
+| Safari | macOS / iPhone | 18 |
 | Edge | Windows / macOS | 130 |
 | Opera | Windows | 114 |
 | Brave | Windows | 1.69 |
@@ -397,6 +398,10 @@ ShouldRetry(reason)? ──否──→ 放弃
 ```go
 // 轮换触发: 升级到 LevelAggressive 时自动轮换
 func (e *Escalator) RotateUserAgent() *UAProfile
+
+// 桌面专用池: desktopUAProfiles 共 6 个
+// (Chrome Win/macOS/Linux、Firefox Win、Safari macOS、Edge Win)
+func (e *Escalator) GetRandomDesktopUA() *UAProfile
 ```
 
 **一致性原则**：User-Agent 与 Sec-CH-UA、Sec-CH-UA-Mobile、Sec-CH-UA-Platform 头必须匹配，不一致的指纹会被反爬系统立即标记。
@@ -578,7 +583,7 @@ if matchServer(sig, resp)   { confidence += 0.2 }
 
 ### 10.1 15 类指纹伪造
 
-`internal/browser/stealth/stealth.go` (490 行) 实现 15 类浏览器指纹伪造：
+`internal/browser/stealth/stealth.go` (约 500 行) 实现 15 类浏览器指纹伪造：
 
 ```
 注入方式: Page.addScriptToEvaluateOnNewDocument
@@ -635,17 +640,18 @@ if matchServer(sig, resp)   { confidence += 0.2 }
 ### 10.2 WebGL GPU 配置 (8 种)
 
 ```javascript
-// 8 种常见 GPU 配置, 随机选择一种
+// 8 种常见 GPU 配置, 随机选择一种 (vendor / renderer 均取自真实设备)
 const gpuConfigs = [
-    {vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA GeForce RTX 3060)"},
-    {vendor: "Google Inc. (NVIDIA)", renderer: "ANGLE (NVIDIA GeForce RTX 3070)"},
-    {vendor: "Google Inc. (AMD)",    renderer: "ANGLE (AMD Radeon RX 6700 XT)"},
-    {vendor: "Google Inc. (Intel)",  renderer: "ANGLE (Intel Iris Xe Graphics)"},
-    {vendor: "Google Inc. (Intel)",  renderer: "ANGLE (Intel UHD Graphics 630)"},
-    {vendor: "Google Inc. (Apple)",  renderer: "ANGLE (Apple M1)"},
-    {vendor: "Google Inc. (Apple)",  renderer: "ANGLE (Apple M2)"},
-    {vendor: "Google Inc. (Apple)",  renderer: "ANGLE (Apple M3)"},
+    {vendor:"Google Inc. (Intel)",    renderer:"ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)"},
+    {vendor:"Google Inc. (NVIDIA)",   renderer:"ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)"},
+    {vendor:"Google Inc. (AMD)",      renderer:"ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)"},
+    {vendor:"Intel Inc.",             renderer:"Intel(R) Iris(TM) Plus Graphics"},
+    {vendor:"NVIDIA Corporation",     renderer:"NVIDIA GeForce RTX 3060/PCIe/SSE2"},
+    {vendor:"ATI Technologies Inc.",  renderer:"AMD Radeon Pro 5500M OpenGL Engine"},
+    {vendor:"Microsoft Corporation",  renderer:"Microsoft Basic Display Adapter"},
+    {vendor:"VMware, Inc.",           renderer:"VMware SVGA II"},
 ];
+// 同时保持 MAX_TEXTURE_SIZE 与所选 GPU 一致
 ```
 
 ### 10.3 Canvas 噪声原理
@@ -767,7 +773,7 @@ transport := &http.Transport{
 
 ### 13.1 Settle 机制
 
-`settle.go` 监控 CDP (Chrome DevTools Protocol) 事件判断页面是否"加载完成"：
+`internal/browser/settle/settle.go` 的 `Wait()` 监控 CDP (Chrome DevTools Protocol) 事件判断页面是否"加载完成"，被克隆浏览器池与通用浏览器控制器共用：
 
 ```
 4 个 CDP 事件监控:
@@ -809,8 +815,8 @@ transport := &http.Transport{
 
 | 参数 | 说明 |
 |------|------|
-| `quiet` | 连续无网络事件的时间阈值（默认 2000ms） |
-| `heartbeat` | 检查间隔（200ms） |
+| `quiet` | 连续无网络事件的时间阈值，由调用方传入（克隆场景取 `apps.clone.settle`，默认 1500ms） |
+| `heartbeat` | 检查间隔（固定 200ms） |
 | `timeout` | 最大等待时间 = quiet + 10s |
 
 ---
@@ -866,17 +872,19 @@ Layer 5 (Rod 专有): defense.gov 变体
 
 ### 15.1 七类错误分类
 
-`internal/errsignal/` 将所有网络/浏览器错误分为 7 类：
+`internal/errsignal/` 基于信号（HTTP 状态码、错误消息模式、网络状况）将所有网络/浏览器错误分为 7 类，常量为 `ClassUnknown` / `ClassTransient` / `ClassRateLimited` / `ClassAuthRequired` / `ClassBotDetection` / `ClassPermanent` / `ClassInvalid`：
 
-| 错误类 | 说明 | 处理策略 |
-|--------|------|---------|
-| **BotDetection** | Cloudflare/Turnstile/CAPTCHA 触发 | 不重试，升级隐身等级 |
-| **RateLimited** | 429 / 503 限流 | 遵守 Retry-After，最多 3 次重试 |
-| **Forbidden** | 403 禁止访问 | 升级隐身，有限重试 |
-| **NetworkError** | 连接失败/超时/DNS | 临时错误，自动重试 |
-| **ServerError** | 5xx 服务器错误 | 临时错误，自动重试 |
-| **ClientError** | 4xx 客户端错误 (非 403/429) | 不重试 |
-| **Unknown** | 未分类错误 | 默认不重试 |
+| 错误类 | 触发信号 | 处理策略 |
+|--------|---------|---------|
+| **ClassBotDetection** | Cloudflare / Turnstile / CAPTCHA / WAF 拦截关键词（含 403 且带 cloudflare/captcha 特征） | 不简单重试（MaxRetries=0），升级隐身等级后重新请求 |
+| **ClassRateLimited** | 429，或 503 且带 rate/limit/retry 关键词 | 遵守 Retry-After，否则 5s/10s/20s 退避，最多 3 次重试 |
+| **ClassPermanent** | 404 / 410 / DNS 解析失败 ("no such host") | 跳过，不重试 |
+| **ClassAuthRequired** | 401 / 403 | 升级凭据（Cookie/登录态）或跳过，不重试 |
+| **ClassInvalid** | 400 / 422，格式错误响应 | 跳过并记录以便排查，不重试 |
+| **ClassTransient** | 5xx / 超时 / 连接重置、拒绝、断开等网络错误 | 指数退避重试（1s/2s/4s...上限 30s），最多 3 次 |
+| **ClassUnknown** | 无法归类的错误 | 带状态码则不重试；仅有错误消息时保守重试 1 次 |
+
+> 注意：403 优先落入 ClassAuthRequired（除非伴随 Cloudflare/CAPTCHA 特征升格为 ClassBotDetection）；DNS 失败归入 ClassPermanent（跳过而非重试）。
 
 ### 15.2 BotDetection 处理
 
@@ -894,35 +902,40 @@ Layer 5 (Rod 专有): defense.gov 变体
 ### 15.3 RateLimited 处理
 
 ```
-HTTP 429 / 503 (速率限制)
+HTTP 429 (或 503 + 限流特征)
     │
     ├── 检查 Retry-After 头
     │   ├── 有 → 等待指定时间
-    │   └── 无 → 使用默认退避
+    │   └── 无 → 默认退避 5s / 10s / 20s
     │
     ├── 最多 3 次重试
     │
-    └── 每次重试延迟翻倍
+    └── Transient 类错误则用指数退避 1s / 2s / 4s (上限 30s)
 ```
 
 ---
 
 ## 16. 配置参考
 
-### 16.1 反爬配置项
+### 16.1 反爬相关配置项
+
+配置文件中真实存在的反爬相关键（以 `internal/config/defaults.go` 与 `internal/config/types_apps.go` 为准）：
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `antibot.enabled` | bool | `true` | 启用反反爬检测 |
-| `antibot.auto_escalate` | bool | `true` | 自动升级隐身等级 |
-| `antibot.initial_level` | string | `none` | 初始等级: none/flags/stealth/aggressive |
-| `antibot.max_level` | string | `aggressive` | 最高等级 |
-| `antibot.max_retries` | int | `3` | 单 URL 最大重试次数 |
-| `antibot.cooldown` | duration | `30s` | 重试基础冷却时间 |
-| `browser.backend` | string | `rod` | 浏览器后端: rod/chromedp |
-| `browser.stealth` | bool | `false` | 启用隐身注入 |
-| `browser.behavior` | bool | `false` | 启用行为模拟 |
-| `browser.settle` | duration | `2s` | 网络空闲阈值 |
+| `apps.clone.antibot_enabled` | bool | `true` | 启用反反爬检测与升级（克隆/下载共用） |
+| `apps.clone.antibot_auto_escalate` | bool | `true` | 检测到阻塞后自动升级反爬等级 |
+| `apps.clone.stealth` | bool | `true` | 克隆场景的隐身注入（克隆专用，优先于全局键） |
+| `browser.backend` | string | `rod` | 浏览器后端: rod/chromedp（`apps.clone.browser_backend` 可覆盖） |
+| `browser.stealth` | bool | `false` | 全局浏览器隐身开关（克隆场景以 `apps.clone.stealth` 为准） |
+| `apps.clone.cookie_file` | string | `""` | Netscape 格式 Cookie 文件（导入登录态 / cf_clearance） |
+| `apps.clone.user_agent` | string | `""` | 自定义 User-Agent |
+| `apps.clone.proxy_enabled` | bool | `false` | 启用代理池 |
+| `apps.clone.proxy_pool` | []string | `[]` | 代理地址列表 |
+| `apps.clone.proxy_rotate_every` | int | 10 | 每 N 次请求轮换代理 |
+| `apps.clone.settle` | int | 1500 | 网络空闲等待阈值 (ms)，即 §13 的 quiet |
+
+> 升级体系的等级上限、每 URL 重试数、冷却时间等（MaxLevel=`LevelAggressive`、MaxRetries=3、Cooldown=30s、InitialLevel=`LevelNone`）是 `antibot.Config` 的 Go API 字段默认值，**没有对应的 YAML 配置键**，如需调整须在代码层传入。
 
 ### 16.2 CLI 选项
 
@@ -930,44 +943,49 @@ HTTP 429 / 503 (速率限制)
 wukong apps clone <url> [flags]
 
 反爬相关:
-  --antibot              启用反反爬系统
-  --no-antibot-auto      禁用自动升级（手动控制等级）
-  --stealth              以 stealth 模式启动 (level 2)
-  --aggressive           以 aggressive 模式启动 (level 3)
-  --user-agent string    自定义 User-Agent
-  --cookie-file string   导入浏览器 Cookie 文件
-  --proxy string         代理地址
-  --behavior             启用行为模拟
+  --no-antibot           禁用反反爬检测与升级 (默认开启)
+  --no-antibot-auto      仅检测阻塞, 跳过自动升级 (手动控制等级)
+  --no-stealth           禁用隐身反检测 (默认开启)
+  --no-headless          显示可见 Chrome 窗口 (手动过 Turnstile)
+  --cookies string       导入 Netscape 格式 Cookie 文件
+  --browser-backend str  浏览器后端: rod / chromedp
+
+wukong apps download <url> [flags]
+
+  --antibot              启用反反爬 (默认 true)
+  --stealth              启用隐身反检测 (默认 true)
 ```
+
+克隆相关的其余旗标（分页/作用域/Worker 等）见 [CLONE_GUIDE.md §19.2](./CLONE_GUIDE.md#19-配置参考)。
 
 ### 16.3 推荐配置
 
 #### 温和模式（默认）
 
 ```yaml
-antibot:
-  enabled: true
-  auto_escalate: true
-  initial_level: none
-  max_level: aggressive
-  max_retries: 3
-  cooldown: 30s
+apps:
+  clone:
+    antibot_enabled: true
+    antibot_auto_escalate: true
+    stealth: true
 ```
 
 #### 激进模式（难爬站点）
 
 ```yaml
-antibot:
-  enabled: true
-  auto_escalate: true
-  initial_level: stealth
-  max_level: aggressive
-  max_retries: 5
-  cooldown: 60s
 browser:
   backend: rod
-  stealth: true
-  behavior: true
+apps:
+  clone:
+    antibot_enabled: true
+    antibot_auto_escalate: true
+    stealth: true
+    settle: 3000          # SPA/重 JS 站加大网络空闲等待
+    crawl_delay: 2000     # 主动降速 (ms)
+    proxy_enabled: true
+    proxy_pool:
+      - "http://proxy1.example.com:8080"
+      - "http://proxy2.example.com:8080"
 ```
 
 ---
@@ -982,7 +1000,7 @@ browser:
 | **Referer 缓存** | ✅ refererPages map | ❌ |
 | **资源下载层** | 5 层 (含 defense.gov 变体) | 4 层 |
 | **JS 资源收集** | ✅ 分块 Promise.allSettled | ❌ |
-| **代码量** | 1927 行 (pool.go) | 较少 |
+| **代码量** | 约 1900 行 (pool.go) | 较少 |
 
 Rod 后端功能更丰富，但 Chromedp 作为可靠备用保证了系统健壮性。
 
@@ -1062,23 +1080,17 @@ UTLS HelloChrome_Auto:
 
 | 模块 | 路径 |
 |------|------|
-| 浏览器接口 | `internal/browser/types/types.go` |
-| Chromedp 后端 | `internal/browser/pool.go` |
-| Rod 后端 | `internal/browser/rodbackend/pool.go` |
-| Chrome 检测 | `internal/browser/rodbackend/detect.go` |
-| API 发现 | `internal/browser/rodbackend/api_discovery.go` |
-| 反爬引擎 | `internal/browser/antibot/antibot.go` |
-| 阻塞检测器 | `internal/browser/antibot/detector.go` |
-| 自动升级器 | `internal/browser/antibot/escalator.go` |
-| TLS 指纹 | `internal/browser/antibot/tls_profile.go` |
-| 多维探测器 | `internal/browser/antibot/prober/` |
-| WAF 探测 | `internal/browser/antibot/prober/waf_probe.go` |
-| 隐身注入 | `internal/browser/stealth/stealth.go` |
-| 行为模拟 | `internal/browser/behavior/behavior.go` |
+| 浏览器接口 | `internal/browser/types/` |
+| 浏览器后端与池 | `internal/browser/` (含 Chromedp `pool.go`) |
+| Rod 后端 (含 Chrome 检测、API 发现) | `internal/browser/rodbackend/` |
+| 反爬引擎 (检测/升级/TLS 指纹) | `internal/browser/antibot/` |
+| 多维探测器 (含 WAF 签名库) | `internal/browser/antibot/prober/` |
+| 隐身注入 | `internal/browser/stealth/` |
+| 行为模拟 | `internal/browser/behavior/` |
 | 代理池 | `internal/browser/proxy_pool.go` |
-| 网络空闲 | `internal/browser/settle.go` |
+| 网络空闲 | `internal/browser/settle/` |
 | 错误分类 | `internal/errsignal/` |
 
 ---
 
-> **版本**: v2.0 | **最后更新**: 2026-08-11 | **相关代码**: internal/browser/ + internal/errsignal/
+> **版本**: v2.1 | **最后更新**: 2026-08-23 | **相关代码**: internal/browser/ + internal/errsignal/

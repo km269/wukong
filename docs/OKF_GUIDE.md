@@ -423,16 +423,21 @@ EnsureOKFType(skillFile) → (changed bool, err error)
   └─ 已有 type → 跳过（changed=false）
 ```
 
-**批量操作**：
+**批量操作**（`skill.Manager` 方法，库函数）：
 - `ExportSkillsAsOKF(dir)` — 导出所有技能为 OKF Bundle
 - `ImportOKFSkills(dir)` — 从 OKF Bundle 导入（只导入 `type: skill`）
 - `EnsureAllOKFCompliant()` — 批量确保所有技能合规
 
-```bash
-wukong skill ensure-okf      # 输出: "ensured OKF type compliance: modified_count=3"
-wukong skill export-okf ./skills-bundle
-wukong skill import-okf ./skills-bundle
+```go
+// 批量合规化：输出日志 "okf: ensured OKF type compliance, modified_count=N"
+count, _ := mgr.EnsureAllOKFCompliant()
+
+// 导出 / 导入
+_ = mgr.ExportSkillsAsOKF("./skills-bundle")
+imported, _ := mgr.ImportOKFSkills("./skills-bundle")
 ```
+
+> **注意**：`wukong skill` 命令组当前仅提供 `list` / `show`（见 §8），上述 OKF 能力尚无对应 CLI 子命令，需通过库函数调用。
 
 ### 6.3 知识库互操作（`internal/knowledge/okf.go`）
 
@@ -611,15 +616,17 @@ timestamp: 2026-08-11T12:00:00Z
 
 ## 7. 配置
 
+以下示例展示**显式启用全部 OKF 功能**的配置（示例值非默认；各项默认值见下表，布尔项默认均为 `false`）：
+
 ```yaml
 okf:
-  enabled: true
-  bundle_dir: ".wukong/okf"              # 默认路径
-  injector_enabled: true                 # 启用知识注入到 Agent 上下文
-  enrichment_enabled: true               # 启用自动知识富化
-  enrichment_output_dir: ".wukong/okf"   # 富化输出路径（空则用 bundle_dir）
-  auto_export: true                      # 自动导出对话知识到 OKF
-  register_in_ard: true                  # 注册到 ARD 发现目录
+  enabled: true                  # 主开关（默认 false）
+  bundle_dir: ".wukong/okf"      # 默认路径
+  injector_enabled: true         # 启用知识注入到 Agent 上下文（默认 false）
+  enrichment_enabled: true       # 启用自动知识富化（默认 false）
+  enrichment_output_dir: ".wukong/okf"   # 富化输出路径（默认 ""，空则用 bundle_dir）
+  auto_export: true              # 自动导出对话知识到 OKF（默认 false）
+  register_in_ard: true          # 注册到 ARD 发现目录（默认 false）
 ```
 
 | 配置项 | 类型 | 默认值 | 说明 |
@@ -640,14 +647,16 @@ okf:
 
 ## 8. CLI 命令
 
+与 OKF / 知识相关的实际存在的 CLI 命令（`internal/cli/`）：
+
 | 命令 | 功能 |
 |------|------|
-| `wukong knowledge import <path>` | 导入 OKF Bundle 到知识库 |
-| `wukong knowledge export <path>` | 导出知识库为 OKF Bundle |
-| `wukong skill ensure-okf` | 批量添加 `type: skill` 到 SKILL.md |
-| `wukong skill export-okf <path>` | 导出技能为 OKF Bundle |
-| `wukong skill import-okf <path>` | 从 OKF Bundle 导入技能 |
-| `wukong evolution log [--json]` | 查看 OKF 变更日志 |
+| `wukong knowledge status` | 查看知识库（RAG）配置与状态（knowledge 组仅此一个子命令） |
+| `wukong skill list` | 列出技能目录中的所有 SKILL.md |
+| `wukong skill show <name>` | 查看某个技能的完整内容 |
+| `wukong evolution log <skill-name> [--limit N]` | 查看技能进化日志——读取技能目录的 `log.json`（技能补丁版本记录），**不是** OKF Bundle 的 `log.md`；支持 `--limit`，无 `--json` 旗标 |
+
+> **注意**：OKF Bundle 导入/导出（`internal/knowledge/okf.go` 的 `ImportBundle`/`ExportBundle`）、技能合规化与 OKF 技能导入导出（`internal/skill/okf.go` 的 `EnsureOKFType`/`ExportSkillsAsOKF`/`ImportOKFSkills`/`EnsureAllOKFCompliant`）目前均为库函数，**尚无对应 CLI 子命令**。OKF `log.md` 的读取通过 `evolution.GetChangeHistory()`/`GetRecentChanges()` 库函数完成。
 
 ---
 
@@ -742,7 +751,7 @@ OKF Bundle 目录天然适合 Git 管理，`log.md` 自动追踪变更，配合 
 A: `splitFrontmatter` 检测不到 `---\n` / `---\r\n` 前缀时，整个内容作为 body 返回，`type` 默认为 `"concept"`——这是 Wukong 的扩展容忍，允许 CLAUDE.md / AGENTS.md 等文件直接加载。
 
 **Q: SKILL.md 已经是 OKF 兼容的吗？**
-A: 结构上兼容（YAML frontmatter + Markdown），但可能缺少 `type` 字段。运行 `wukong skill ensure-okf` 自动添加 `type: skill`。
+A: 结构上兼容（YAML frontmatter + Markdown），但可能缺少 `type` 字段。调用 `skill.EnsureOKFType(path)`（单个文件）或 `skill.Manager.EnsureAllOKFCompliant()`（批量）自动添加 `type: skill`——这些是库函数，当前无 CLI 子命令（见 §8）。
 
 **Q: 自定义 frontmatter 字段会丢失吗？**
 A: 不会。`Frontmatter.Extra` 使用 `yaml:",inline"` 标签，所有未知字段自动收集到 `Extra map`，写入时通过 `yaml.Marshal` 原样输出——这就是 OKF 规范的消费者容错要求。
@@ -752,4 +761,4 @@ A: 配置 `okf.injector_enabled: true` + `memoryflow.enabled: true`，`Knowledge
 
 ---
 
-> **版本**: 0.1 | **最后更新**: 2026-08-11 | **源码**: `internal/okf/` · `internal/knowledge/okf.go` · `internal/cortex/okf_*.go` · `internal/skill/` · `internal/evolution/okf.go` · `internal/ard/okf.go`
+> **版本**: 0.1 | **最后更新**: 2026-08-23 | **源码**: `internal/okf/` · `internal/knowledge/okf.go` · `internal/cortex/okf_*.go` · `internal/skill/` · `internal/evolution/okf.go` · `internal/ard/okf.go`

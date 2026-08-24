@@ -189,9 +189,9 @@ type TrustVerifier struct {
 // NewTrustVerifier creates a new trust verifier.
 func NewTrustVerifier() *TrustVerifier {
 	return &TrustVerifier{
-		trustedIdentities:   make(map[string]bool),
+		trustedIdentities:    make(map[string]bool),
 		requiredAttestations: []AttestationType{},
-		verifySignatures:    true,
+		verifySignatures:     true,
 	}
 }
 
@@ -338,14 +338,14 @@ func (v *TrustVerifier) calculateTrustScore(manifest *TrustedManifest) float64 {
 
 // TrustVerificationResult represents the result of trust verification.
 type TrustVerificationResult struct {
-	Manifest          *TrustedManifest
-	Valid             bool
-	IdentityTrusted   bool
-	TrustScore        float64
+	Manifest           *TrustedManifest
+	Valid              bool
+	IdentityTrusted    bool
+	TrustScore         float64
 	AttestationResults []*AttestationVerificationResult
-	Errors            []string
-	Warnings          []string
-	VerifiedAt        time.Time
+	Errors             []string
+	Warnings           []string
+	VerifiedAt         time.Time
 }
 
 // AttestationVerificationResult represents the result of attestation verification.
@@ -373,7 +373,7 @@ func NewComplianceChecker() *ComplianceChecker {
 	return &ComplianceChecker{
 		requiredCertifications: make(map[AttestationType]bool),
 		allowedIdentityTypes:   make(map[IdentityType]bool),
-		minTrustScore:         0.5,
+		minTrustScore:          0.5,
 	}
 }
 
@@ -395,8 +395,8 @@ func (c *ComplianceChecker) AddAllowedIdentityType(idType IdentityType) {
 // CheckCompliance checks compliance for a trust manifest.
 func (c *ComplianceChecker) CheckCompliance(manifest *TrustedManifest) *ComplianceResult {
 	result := &ComplianceResult{
-		CheckedAt:   time.Now(),
-		Violations: []ComplianceViolation{},
+		CheckedAt:      time.Now(),
+		Violations:     []ComplianceViolation{},
 		Certifications: []string{},
 	}
 
@@ -522,9 +522,9 @@ type SignatureVerifier struct {
 // NewSignatureVerifier creates a new signature verifier.
 func NewSignatureVerifier() *SignatureVerifier {
 	return &SignatureVerifier{
-		trustedCerts:       x509.NewCertPool(),
-		intermediateCerts:  x509.NewCertPool(),
-		trustedKeys:        make(map[string]crypto.PublicKey),
+		trustedCerts:      x509.NewCertPool(),
+		intermediateCerts: x509.NewCertPool(),
+		trustedKeys:       make(map[string]crypto.PublicKey),
 	}
 }
 
@@ -906,23 +906,23 @@ type TrustPolicyConfig struct {
 func DefaultTrustPolicies() []*TrustPolicyConfig {
 	return []*TrustPolicyConfig{
 		{
-			Name:                "strict",
-			Description:         "Strict trust policy requiring multiple attestations",
-			MinTrustScore:       0.8,
+			Name:                 "strict",
+			Description:          "Strict trust policy requiring multiple attestations",
+			MinTrustScore:        0.8,
 			RequiredAttestations: []AttestationType{AttestationTypeSOC2Type2},
 			AllowedIdentityTypes: []IdentityType{IdentityTypeSPIFFE, IdentityTypeDID},
 		},
 		{
-			Name:                "standard",
-			Description:         "Standard trust policy",
-			MinTrustScore:       0.5,
+			Name:                 "standard",
+			Description:          "Standard trust policy",
+			MinTrustScore:        0.5,
 			RequiredAttestations: []AttestationType{AttestationTypeSOC2Type1},
 			AllowedIdentityTypes: []IdentityType{IdentityTypeSPIFFE, IdentityTypeDID, IdentityTypeX509},
 		},
 		{
-			Name:              "permissive",
-			Description:       "Permissive trust policy with minimal requirements",
-			MinTrustScore:     0.3,
+			Name:                 "permissive",
+			Description:          "Permissive trust policy with minimal requirements",
+			MinTrustScore:        0.3,
 			AllowedIdentityTypes: []IdentityType{IdentityTypeSPIFFE, IdentityTypeDID, IdentityTypeX509, IdentityTypeDNS},
 		},
 	}

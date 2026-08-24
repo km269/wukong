@@ -22,23 +22,22 @@ import (
 )
 
 type aggregateSearchTool struct {
-	duckduckgoClient *httpclient.Client
-	searxngClient    *httpclient.Client
-	tavilyClient     *httpclient.Client
-	googleClient     *httpclient.Client
-	bingClient       *httpclient.Client
-	fetchClient      *httpclient.Client
-	searxngURL       string
-	searxngAPIKey    string
-	tavilyAPIKey     string
-	googleAPIKey     string
-	googleCSEID      string
-	bingAPIKey       string
-	enabledBackends  []string
-	maxFetchResults  int
-	browser          *browser.Controller // optional: browser automation for page fetching
-	cortexStore      *cortex.CortexStore // optional: internal index search
-	userID           string              // user ID for cortex store queries
+	// searchClient is shared by all search backends and the page
+	// fetcher — one connection pool and one rate limiter instead of
+	// six. Per-backend timeouts are applied per-request via
+	// DoWithTimeout.
+	searchClient    *httpclient.Client
+	searxngURL      string
+	searxngAPIKey   string
+	tavilyAPIKey    string
+	googleAPIKey    string
+	googleCSEID     string
+	bingAPIKey      string
+	enabledBackends []string
+	maxFetchResults int
+	browser         *browser.Controller // optional: browser automation for page fetching
+	cortexStore     *cortex.CortexStore // optional: internal index search
+	userID          string              // user ID for cortex store queries
 }
 
 type searchResult struct {
@@ -63,23 +62,18 @@ func NewAggregateSearchTool(
 	userID string,
 ) (tool.Tool, *aggregateSearchTool) {
 	st := &aggregateSearchTool{
-		duckduckgoClient: newSearchHTTPClient(15 * time.Second),
-		searxngClient:    newSearchHTTPClient(15 * time.Second),
-		tavilyClient:     newSearchHTTPClient(20 * time.Second),
-		googleClient:     newSearchHTTPClient(15 * time.Second),
-		bingClient:       newSearchHTTPClient(15 * time.Second),
-		fetchClient:      newSearchHTTPClient(30 * time.Second),
-		searxngURL:       searxngURL,
-		searxngAPIKey:    searxngAPIKey,
-		tavilyAPIKey:     tavilyAPIKey,
-		googleAPIKey:     googleAPIKey,
-		googleCSEID:      googleCSEID,
-		bingAPIKey:       bingAPIKey,
-		enabledBackends:  enabledBackends,
-		maxFetchResults:  3,
-		browser:          browserCtrl,
-		cortexStore:      cortexStore,
-		userID:           userID,
+		searchClient:    searchHTTPClient(),
+		searxngURL:      searxngURL,
+		searxngAPIKey:   searxngAPIKey,
+		tavilyAPIKey:    tavilyAPIKey,
+		googleAPIKey:    googleAPIKey,
+		googleCSEID:     googleCSEID,
+		bingAPIKey:      bingAPIKey,
+		enabledBackends: enabledBackends,
+		maxFetchResults: 3,
+		browser:         browserCtrl,
+		cortexStore:     cortexStore,
+		userID:          userID,
 	}
 	return function.NewFunctionTool(
 		st.search,
@@ -95,22 +89,40 @@ func NewAggregateSearchTool(
 	), st
 }
 
-// newSearchHTTPClient builds an httpclient for web search backends with
-// retry, rate limiting, and a real Chrome TLS fingerprint enabled
-// (transient failures and 5xx are retried up to MaxRetries times; requests
-// are throttled at 10/s). Using the shared connection pool keeps search
-// backends from fragmenting their own pools, and the utls fingerprint
-// avoids being blocked by TLS-fingerprinting WAFs.
-func newSearchHTTPClient(timeout time.Duration) *httpclient.Client {
-	return httpclient.New(httpclient.Options{
-		Timeout:            timeout,
-		MaxRetries:         3,
-		RetryDelay:         500 * time.Millisecond,
-		EnableRateLimit:    true,
-		RateLimitPerSecond: 10,
-		RateLimitBurst:     20,
-		TLSFingerprint:     true,
+// Per-backend request timeouts, applied per-request via DoWithTimeout
+// on the shared search client.
+const (
+	searchTimeoutAPI    = 15 * time.Second // duckduckgo / searxng / google / bing
+	searchTimeoutTavily = 20 * time.Second
+	searchTimeoutFetch  = 30 * time.Second
+)
+
+var (
+	searchClientOnce sync.Once
+	searchClientVal  *httpclient.Client
+)
+
+// searchHTTPClient returns the process-wide shared httpclient for all
+// web search backends and the page fetcher: one Transport (one
+// connection pool) and one rate limiter (10/s global) instead of one
+// per backend. Transient failures and 5xx/429 are retried up to
+// MaxRetries times with jittered backoff honoring Retry-After, and the
+// utls Chrome fingerprint avoids being blocked by TLS-fingerprinting
+// WAFs. The client Timeout is the ceiling (30s, the fetch timeout);
+// shorter per-backend budgets are set per-request.
+func searchHTTPClient() *httpclient.Client {
+	searchClientOnce.Do(func() {
+		searchClientVal = httpclient.New(httpclient.Options{
+			Timeout:            searchTimeoutFetch,
+			MaxRetries:         3,
+			RetryDelay:         500 * time.Millisecond,
+			EnableRateLimit:    true,
+			RateLimitPerSecond: 10,
+			RateLimitBurst:     20,
+			TLSFingerprint:     true,
+		})
 	})
+	return searchClientVal
 }
 
 // SetCortexStore allows late injection of CortexStore after the tool
@@ -382,7 +394,7 @@ func (a *aggregateSearchTool) fetchWithLocalReader(ctx context.Context, pageURL 
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9,zh-CN;q=0.8")
 
-	resp, err := a.fetchClient.Do(req)
+	resp, err := a.searchClient.DoWithTimeout(req, searchTimeoutFetch)
 	if err != nil {
 		return fetchResult{URL: pageURL, Error: fmt.Sprintf("local reader fetch: %v", err)}
 	}
@@ -432,7 +444,7 @@ func (a *aggregateSearchTool) fetchWithHTTP(ctx context.Context, pageURL string)
 			"Chrome/120.0.0.0 Safari/537.36 Wukong-Agent/1.0")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 
-	resp, err := a.fetchClient.Do(req)
+	resp, err := a.searchClient.DoWithTimeout(req, searchTimeoutFetch)
 	if err != nil {
 		return fetchResult{URL: pageURL, Error: fmt.Sprintf("fetch failed: %v", err)}
 	}
@@ -1084,7 +1096,7 @@ func (a *aggregateSearchTool) searchDuckDuckGo(ctx context.Context, query string
 		return nil, err
 	}
 
-	resp, err := a.duckduckgoClient.Do(httpReq)
+	resp, err := a.searchClient.DoWithTimeout(httpReq, searchTimeoutAPI)
 	if err != nil {
 		return nil, err
 	}
@@ -1118,7 +1130,7 @@ func (a *aggregateSearchTool) searchSearXNG(ctx context.Context, query string) (
 		httpReq.Header.Set("X-Searxng-API-Key", a.searxngAPIKey)
 	}
 
-	resp, err := a.searxngClient.Do(httpReq)
+	resp, err := a.searchClient.DoWithTimeout(httpReq, searchTimeoutAPI)
 	if err != nil {
 		return nil, err
 	}
@@ -1162,7 +1174,7 @@ func (a *aggregateSearchTool) searchTavily(ctx context.Context, query string) ([
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := a.tavilyClient.Do(httpReq)
+	resp, err := a.searchClient.DoWithTimeout(httpReq, searchTimeoutTavily)
 	if err != nil {
 		return nil, err
 	}
@@ -1303,7 +1315,7 @@ func (a *aggregateSearchTool) searchGoogle(ctx context.Context, query string) ([
 		return nil, err
 	}
 
-	resp, err := a.googleClient.Do(httpReq)
+	resp, err := a.searchClient.DoWithTimeout(httpReq, searchTimeoutAPI)
 	if err != nil {
 		return nil, err
 	}
@@ -1338,7 +1350,7 @@ func (a *aggregateSearchTool) searchBing(ctx context.Context, query string) ([]s
 	}
 	httpReq.Header.Set("Ocp-Apim-Subscription-Key", a.bingAPIKey)
 
-	resp, err := a.bingClient.Do(httpReq)
+	resp, err := a.searchClient.DoWithTimeout(httpReq, searchTimeoutAPI)
 	if err != nil {
 		return nil, err
 	}

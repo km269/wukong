@@ -197,9 +197,9 @@ func (ts *DeveloperToolSet) writeFile(
 
 // FileReplaceReq is the input for find-and-replace in a file.
 type FileReplaceReq struct {
-	Path    string `json:"path" jsonschema:"description=Path to the file to modify"`
-	OldStr  string `json:"old_str" jsonschema:"description=Exact text to find and replace"`
-	NewStr  string `json:"new_str" jsonschema:"description=Text to replace with (use empty string to delete)"`
+	Path   string `json:"path" jsonschema:"description=Path to the file to modify"`
+	OldStr string `json:"old_str" jsonschema:"description=Exact text to find and replace"`
+	NewStr string `json:"new_str" jsonschema:"description=Text to replace with (use empty string to delete)"`
 }
 
 // FileReplaceRsp is the output for find-and-replace.

@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/km269/wukong/pkg/httpclient"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
@@ -39,12 +38,12 @@ type tavilyResponse struct {
 }
 
 func NewTavilyTool(apiKey string) tool.Tool {
-	tt := &tavilyTool{
+	st := &tavilyTool{
 		apiKey:     apiKey,
-		httpClient: newSearchHTTPClient(20 * time.Second),
+		httpClient: searchHTTPClient(),
 	}
 	return function.NewFunctionTool(
-		tt.search,
+		st.search,
 		function.WithName("web_search"),
 		function.WithDescription(
 			"Search the web using Tavily AI search for relevant information. "+
@@ -113,7 +112,7 @@ func (t *tavilyTool) search(
 	httpReq.Header.Set("User-Agent", "Wukong/2.0")
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := t.httpClient.Do(httpReq)
+	resp, err := t.httpClient.DoWithTimeout(httpReq, searchTimeoutTavily)
 	if err != nil {
 		return tavilySearchRsp{
 			Success: false,

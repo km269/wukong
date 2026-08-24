@@ -179,15 +179,15 @@ func AvgLatencyMs(latenciesMs []float64) float64 {
 // StrategyMetrics holds the evaluation results for one SearchGenome
 // across a set of evaluation queries.
 type StrategyMetrics struct {
-	Genome          SearchGenome `json:"genome"`
-	NDCG20          float64      `json:"ndcg_20"`
-	NDCG10          float64      `json:"ndcg_10"`
-	MRR10           float64      `json:"mrr_10"`
-	Precision10     float64      `json:"precision_10"`
-	Recall10        float64      `json:"recall_10"`
-	ZeroResultRate  float64      `json:"zero_result_rate"`
-	AvgLatencyMs    float64      `json:"avg_latency_ms"`
-	QueryCount      int          `json:"query_count"`
+	Genome         SearchGenome `json:"genome"`
+	NDCG20         float64      `json:"ndcg_20"`
+	NDCG10         float64      `json:"ndcg_10"`
+	MRR10          float64      `json:"mrr_10"`
+	Precision10    float64      `json:"precision_10"`
+	Recall10       float64      `json:"recall_10"`
+	ZeroResultRate float64      `json:"zero_result_rate"`
+	AvgLatencyMs   float64      `json:"avg_latency_ms"`
+	QueryCount     int          `json:"query_count"`
 	// Per-query detail for Bad Case analysis.
 	PerQuery []QueryMetrics `json:"per_query,omitempty"`
 }
@@ -208,9 +208,9 @@ type QueryMetrics struct {
 // with penalties, inspired by SearchCLI's SPA robust objective:
 //
 // RobustScore = NDCG@20 + α×MRR@10
-//             - β×zero_result_rate
-//             - γ×latency_penalty
-//             - δ×query_type_variance
+//   - β×zero_result_rate
+//   - γ×latency_penalty
+//   - δ×query_type_variance
 //
 // The default weights (α=0.1, β=0.5, γ=0.001, δ=0.1) can be
 // overridden via RobustScoreParams.
@@ -238,11 +238,11 @@ func (m StrategyMetrics) RobustScore(
 
 // RobustScoreParams controls the weights in RobustScore.
 type RobustScoreParams struct {
-	Alpha            float64 // MRR weight (default 0.1)
-	Beta             float64 // zero-result penalty (default 0.5)
-	Gamma            float64 // latency penalty (default 0.001)
-	Delta            float64 // variance penalty (default 0.1)
-	LatencyBudgetMs  float64 // acceptable latency threshold (default 500ms)
+	Alpha           float64 // MRR weight (default 0.1)
+	Beta            float64 // zero-result penalty (default 0.5)
+	Gamma           float64 // latency penalty (default 0.001)
+	Delta           float64 // variance penalty (default 0.1)
+	LatencyBudgetMs float64 // acceptable latency threshold (default 500ms)
 }
 
 // WithDefaults fills in default values for zero fields.

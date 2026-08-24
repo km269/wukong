@@ -8,11 +8,11 @@ import (
 
 func TestFederationConfig(t *testing.T) {
 	config := &FederationConfig{
-		Timeout:         30 * time.Second,
-		MaxRegistries:   10,
-		MaxDepth:        3,
-		EnableReferrals: true,
-		TrustPolicy:     TrustPolicyKnown,
+		Timeout:          30 * time.Second,
+		MaxRegistries:    10,
+		MaxDepth:         3,
+		EnableReferrals:  true,
+		TrustPolicy:      TrustPolicyKnown,
 		LocalRegistryURL: "http://localhost:8080",
 	}
 

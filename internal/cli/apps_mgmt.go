@@ -774,6 +774,8 @@ func newAppsCloneCmd() *cobra.Command {
 		noSitemap        bool
 		noRobots         bool
 		crawlDelay       int
+		rateWhitelist    []string
+		noIPRateLimit    bool
 		noAntibot        bool
 		noAntibotAutoEsc bool
 		cookieFile       string
@@ -816,33 +818,38 @@ Examples:
 			fmt.Printf("Cloning %s ...\n", seedURL)
 
 			opts := apps.CloneOptions{
-				OutputDir:       outputDir,
-				MaxPages:        maxPages,
-				MaxDepth:        maxDepth,
-				Traversal:       traversal,
-				ScopePrefix:     scopePrefix,
-				ScopeAnchor:     scopeAnchor,
-				Exclude:         exclude,
-				Subdomains:      subdomains,
-				Scroll:          scroll,
-				Timeout:         timeout,
-				RenderTimeout:   renderTimeout,
-				Settle:          settle,
-				Workers:         workers,
-				AssetWorkers:    assetWorkers,
-				Force:           force,
-				Refresh:         refresh,
-				ChromePath:      chromePath,
-				CookieFile:      cookieFile,
-				ChromeProfile:   chromeProfile,
-				NoChromeProfile: noChromeProfile,
-				NoHeadless:      noHeadless,
-				NoStealth:       noStealth,
-				BrowserBackend:  browserBackend,
-				KeepMedia:       keepMedia,
-				SkipExt:         skipExt,
-				AllowDownloads:  allowDownloads,
-				AssetDomains:    assetDomains,
+				OutputDir:          outputDir,
+				MaxPages:           maxPages,
+				MaxDepth:           maxDepth,
+				Traversal:          traversal,
+				ScopePrefix:        scopePrefix,
+				ScopeAnchor:        scopeAnchor,
+				Exclude:            exclude,
+				Subdomains:         subdomains,
+				Scroll:             scroll,
+				Timeout:            timeout,
+				RenderTimeout:      renderTimeout,
+				Settle:             settle,
+				Workers:            workers,
+				AssetWorkers:       assetWorkers,
+				Force:              force,
+				Refresh:            refresh,
+				ChromePath:         chromePath,
+				CookieFile:         cookieFile,
+				ChromeProfile:      chromeProfile,
+				NoChromeProfile:    noChromeProfile,
+				NoHeadless:         noHeadless,
+				NoStealth:          noStealth,
+				BrowserBackend:     browserBackend,
+				KeepMedia:          keepMedia,
+				SkipExt:            skipExt,
+				AllowDownloads:     allowDownloads,
+				AssetDomains:       assetDomains,
+				RateLimitWhitelist: rateWhitelist,
+			}
+			if noIPRateLimit {
+				v := false
+				opts.RateLimitIPSegment = &v
 			}
 			if incremental {
 				v := true
@@ -926,6 +933,8 @@ Examples:
 	cmd.Flags().IntVarP(&workers, "workers", "w", 0, "Concurrent page renderers (default 4)")
 	cmd.Flags().BoolVar(&noRobots, "no-robots", true, "Ignore robots.txt (be nice)")
 	cmd.Flags().IntVar(&crawlDelay, "crawl-delay", 0, "Override robots.txt Crawl-delay in milliseconds")
+	cmd.Flags().StringArrayVar(&rateWhitelist, "rate-limit-whitelist", nil, "Hosts exempt from asset rate limiting (repeatable, e.g. --rate-limit-whitelist cdn.example.com --rate-limit-whitelist localhost:3000; config: apps.clone.rate_limit_whitelist)")
+	cmd.Flags().BoolVar(&noIPRateLimit, "no-ip-rate-limit", false, "Disable IP-segment penalty propagation for asset rate limiting (config: apps.clone.rate_limit_ip_segment)")
 	cmd.Flags().IntVar(&timeout, "timeout", 0, "HTTP request timeout in seconds (default 60)")
 	cmd.Flags().IntVar(&renderTimeout, "render-timeout", 0, "Page render hard timeout in seconds (default 30)")
 	cmd.Flags().IntVar(&settle, "settle", 0, "Network idle settle time in ms (default 1500)")

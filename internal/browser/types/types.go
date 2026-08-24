@@ -83,3 +83,50 @@ type BrowserBackend interface {
 	Screenshot(ctx context.Context, url string, outputPath string) (string, error)
 	Close()
 }
+
+// UARotator is an optional BrowserBackend capability: the backend
+// maintains a pool-wide user-agent profile and can rotate it mid-run.
+// The antibot engine asserts this interface when escalating to
+// aggressive mode. Both the chromedp and rod backends implement it.
+type UARotator interface {
+	RotateUA()
+}
+
+// AssetCollector is an optional BrowserBackend capability: renders
+// capture subresource response bodies from the browser network stack
+// into RenderResult.CollectedAssets. The rod backend implements it;
+// callers can probe support before relying on that field instead of
+// only checking it for nil after the fact.
+type AssetCollector interface {
+	CollectsAssets() bool
+}
+
+// Priority is a render scheduling hint used when browser workers are
+// contended: a higher value is dequeued sooner. The zero value is
+// PriorityUnset and is treated as PriorityNormal, so existing call
+// sites that never mention priority keep today's behaviour.
+type Priority int
+
+const (
+	PriorityUnset Priority = iota
+	PriorityLow
+	PriorityNormal
+	PriorityHigh
+)
+
+// Normalize maps the zero value to PriorityNormal.
+func (p Priority) Normalize() Priority {
+	if p == PriorityUnset {
+		return PriorityNormal
+	}
+	return p
+}
+
+// PriorityRenderer is an optional BrowserBackend capability: renders
+// can hint their scheduling priority. When workers are contended,
+// higher-priority renders are dequeued first, while long-waiting
+// lower-priority renders are gradually promoted (aging) so they
+// cannot starve. Both the chromedp and rod backends implement it.
+type PriorityRenderer interface {
+	RenderWithPriority(ctx context.Context, url, referer string, prio Priority) (*RenderResult, error)
+}

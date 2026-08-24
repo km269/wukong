@@ -17,10 +17,11 @@ import (
 //
 // The judge prompt asks the LLM to rate the relevance on a
 // 4-point scale:
-//   0 = irrelevant
-//   1 = marginally relevant
-//   2 = relevant
-//   3 = highly relevant
+//
+//	0 = irrelevant
+//	1 = marginally relevant
+//	2 = relevant
+//	3 = highly relevant
 type LLMJudge struct {
 	factory   *provider.Factory
 	modelName string

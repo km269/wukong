@@ -380,8 +380,8 @@ func deriveKey(sharedSecret, info []byte) ([]byte, error) {
 	hkdfReader := hkdf.New(
 		sha256.New,
 		sharedSecret,
-		nil,   // No salt
-		info,  // Application-specific context
+		nil,  // No salt
+		info, // Application-specific context
 	)
 
 	key := make([]byte, chacha20poly1305.KeySize)

@@ -10,12 +10,12 @@ import (
 
 // Options configures the retry behavior.
 type Options struct {
-	MaxAttempts int // Maximum number of attempts (default: 3)
-	InitialDelay time.Duration // Initial delay between retries (default: 1s)
-	MaxDelay time.Duration // Maximum delay between retries (default: 10s)
-	BackoffFactor float64 // Backoff multiplier (default: 2.0)
-	JitterFactor float64 // Jitter factor to randomize delays (default: 0.2)
-	Retryable func(error) bool // Function to determine if an error is retryable (default: all errors)
+	MaxAttempts   int              // Maximum number of attempts (default: 3)
+	InitialDelay  time.Duration    // Initial delay between retries (default: 1s)
+	MaxDelay      time.Duration    // Maximum delay between retries (default: 10s)
+	BackoffFactor float64          // Backoff multiplier (default: 2.0)
+	JitterFactor  float64          // Jitter factor to randomize delays (default: 0.2)
+	Retryable     func(error) bool // Function to determine if an error is retryable (default: all errors)
 }
 
 // DefaultOptions returns the default retry options.
@@ -89,17 +89,17 @@ func Do(ctx context.Context, opts Options, fn func(context.Context) error) error
 // computeDelay calculates the delay with backoff and jitter.
 func computeDelay(opts Options, attempt int) time.Duration {
 	baseDelay := float64(opts.InitialDelay) * math.Pow(opts.BackoffFactor, float64(attempt))
-	
+
 	// Cap at MaxDelay
 	if baseDelay > float64(opts.MaxDelay) {
 		baseDelay = float64(opts.MaxDelay)
 	}
-	
+
 	// Apply jitter
 	if opts.JitterFactor > 0 {
 		jitter := (rand.Float64()*2 - 1) * opts.JitterFactor // -0.2 to +0.2 by default
 		baseDelay = baseDelay * (1 + jitter)
 	}
-	
+
 	return time.Duration(baseDelay)
 }

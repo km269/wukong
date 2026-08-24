@@ -55,7 +55,7 @@ type ModelEvent struct {
 	ID        int64
 	SessionID string
 	UserID    string
-	Seq       int64  // per-session monotonic sequence
+	Seq       int64 // per-session monotonic sequence
 	EventType string
 	Source    string // for context_inject: wakeup|recall|persistent|"" otherwise
 	Payload   string

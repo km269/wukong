@@ -29,7 +29,7 @@
 
 `CoreLoop` 是 Wukong 的主交互执行循环，编排 Runner、Session、Memory、Tool 等子系统，提供上下文注入、记忆召回、安全校验与事件流输出。
 
-### CoreLoop 结构体（`loop.go:53-74`）
+### CoreLoop 结构体（`loop.go`，`type CoreLoop struct`）
 
 ```go
 type CoreLoop struct {
@@ -45,6 +45,8 @@ type CoreLoop struct {
     cortexStore    *cortex.CortexStore   // optional: HNSW vector sync
     memoryFlow     *cortex.MemoryFlowService
     graphFlow      *cortex.GraphFlowService // optional: KG auto-extract
+    modelEventLog  *wksession.ModelEventLog // 模型可见事件日志
+    hooks          *HookRegistry           // pre-step / pre-tool-execute 拦截
     closeFn        func() error
 
     mu     sync.RWMutex
@@ -54,7 +56,7 @@ type CoreLoop struct {
 }
 ```
 
-### CoreLoopConfig — 构造依赖（`loop.go:77-124`）
+### CoreLoopConfig — 构造依赖（`loop.go`，`type CoreLoopConfig struct`）
 
 ```go
 type CoreLoopConfig struct {
@@ -74,6 +76,8 @@ type CoreLoopConfig struct {
     TopOfMindInstructions string
     TelemetryShutdown func(context.Context) error
     MemoryClose, EvolutionClose, DBPoolClose func() error
+    ModelEventLog   *wksession.ModelEventLog
+    Hooks           *HookRegistry
     WorkingDir, SessionID, UserID string
 }
 ```
@@ -339,7 +343,7 @@ const (
 )
 ```
 
-### Factory（`factory.go:29-42`）
+### Factory（`factory.go`，`type Factory struct`）
 
 ```go
 type Factory struct {
@@ -460,7 +464,7 @@ type ExtensionInfo struct {
 
 **源码**: `internal/security/guard.go` · `ssrf.go` · `command_tokens.go` · `ignore.go`
 
-### Guard（`guard.go:26-37`）
+### Guard（`guard.go`，`type Guard struct`）
 
 ```go
 type Guard struct {
@@ -469,6 +473,7 @@ type Guard struct {
     approvedCommands map[string]bool
     blockedCount     atomic.Int64
     ignoreMatcher    *IgnoreMatcher
+    broker           *ApprovalBroker // 异步人工审批（human-in-the-loop），nil 时保持同步拒绝
 }
 ```
 
@@ -830,14 +835,14 @@ func (m *SummonManager) Tools() []tool.Tool
 
 ---
 
-> **版本**: v0.2.0 | **最后更新**: 2026-08-11
+> **版本**: v0.2.9 | **最后更新**: 2026-08-23
 
 ### 相关文档
 
 | 文档 | 说明 |
 |------|------|
-| [架构总览](./ARCHITECTURE.md) | 系统整体架构与模块关系 |
+| [架构总览](./ARCHITECTURE.md) | 系统整体架构与模块关系（含关键流程实现细节） |
 | [记忆系统架构](./MEMORY_ARCHITECTURE.md) | Memory/Recall/Cortex 多层记忆栈细节 |
 | [配置参考](./CONFIG.md) | `WukongConfig` 全字段说明 |
-| [技术实现](./TECHNICAL_IMPLEMENTATION.md) | 关键流程实现细节 |
+| [项目总览](../README.md) | 项目简介与快速上手 |
 | [开发者指南](./DEVELOPER_GUIDE.md) | 二次开发与扩展编写 |

@@ -153,10 +153,10 @@ func TestNewController(t *testing.T) {
 
 	// Test with custom config
 	cfg := &config.BrowserConfig{
-		Timeout:        10 * 1000000000, // 10 seconds in ns
-		BrowserType:    "chromium",
-		Headless:       true,
-		CacheDir:       ".test_cache",
+		Timeout:         10 * 1000000000, // 10 seconds in ns
+		BrowserType:     "chromium",
+		Headless:        true,
+		CacheDir:        ".test_cache",
 		MaxDownloadSize: 1024,
 	}
 	ctrl = NewController(cfg)

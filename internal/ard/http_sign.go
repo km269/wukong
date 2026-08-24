@@ -252,13 +252,13 @@ func (s *HTTPSigner) buildSigningBase(
 
 // HTTPVerifier verifies HTTP Message Signatures on incoming requests
 // using the sender's DID document. It performs:
-//   1. Resolve the DID document from the keyid
-//   2. Validate the signature parameters (time window, replay)
-//   3. Verify the Content-Digest hash
-//   4. Reconstruct the signing base and verify the Ed25519 signature
+//  1. Resolve the DID document from the keyid
+//  2. Validate the signature parameters (time window, replay)
+//  3. Verify the Content-Digest hash
+//  4. Reconstruct the signing base and verify the Ed25519 signature
 type HTTPVerifier struct {
-	httpClient *http.Client
-	seenNonces map[string]time.Time
+	httpClient  *http.Client
+	seenNonces  map[string]time.Time
 	maxNonceAge time.Duration
 }
 
@@ -430,8 +430,7 @@ func (v *HTTPVerifier) verifyContentDigest(
 			digestHeader)
 	}
 
-	digestValue := digestHeader[len("sha-256=:") :
-		len(digestHeader)-1] // Strip trailing ":"
+	digestValue := digestHeader[len("sha-256=:") : len(digestHeader)-1] // Strip trailing ":"
 
 	expectedHash, err := base64.StdEncoding.DecodeString(
 		digestValue,

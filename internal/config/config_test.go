@@ -537,4 +537,3 @@ func TestWarnings_MalformedRedisURL(t *testing.T) {
 		t.Errorf("expected redis_url warning for malformed URL, got %v", warnings)
 	}
 }
-

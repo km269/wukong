@@ -1,6 +1,6 @@
 # Wukong Web 操作深度分析
 
-> 基于对 `internal/browser/`、`internal/apps/clone/`、`internal/search/`、`internal/search/tune/`、`internal/search/vertical/`、`internal/search/chunking/`、`internal/errsignal/`、`pkg/httpclient/` 等代码的逐文件精读，产出本专项分析。所有函数签名、行号、数据结构均为真实源码。
+> 基于对 `internal/browser/`、`internal/apps/clone/`、`internal/apps/pack/`、`internal/search/`、`internal/search/tune/`、`internal/search/vertical/`、`internal/search/chunking/`、`internal/errsignal/`、`pkg/httpclient/`、`pkg/zim/` 等代码的逐文件精读，产出本专项分析。所有函数签名、行号、数据结构均为真实源码。
 
 ---
 
@@ -84,6 +84,8 @@ Wukong 的 Web 操作子系统涵盖 **浏览器自动化、网页克隆、搜�
 
 `NewBackend(backendType, opts)`（`backend.go:45`）选择后端，rod 启动失败时自动回退 chromedp。
 
+两后端共享 `internal/browser/renderkit`（2026-08-23 引入）：行为模拟/滚动/链接提取的注入 JS 与内容类型分类（`IsHTMLContentType`/`IsTextContent`）单点维护，保证两侧页面行为一致——chromedp 版内容类型判断随之从裸比较升级为大小写/参数归一化。
+
 **BackendOptions** 结构控制后端行为：Headless / Workers / Settle / RenderTimeout / Scroll / ChromeBin / ControlURL / Stealth / ProfileDir / DisableDownloads 等。
 
 ### 2.2 Worker 池管理
@@ -97,12 +99,12 @@ type Pool struct {
     queue              chan *renderJob     // 任务队列
     wg                 sync.WaitGroup      // 等待所有 worker
     behaviorSimulator  *behavior.Simulator // 行为模拟（随机滚动/mousemove）
-    escalator          *antibot.Escalator  // 反爬升级器
+    escalator          *antibot.Escalator  // 反爬升级器（5 级升级体系）
     currentUA          *antibot.UAProfile  // 当前 UA 配置
 }
 ```
 
-**renderJob** 流程（以 rod 为主线，`rodbackend/pool.go:214-663`）：
+**renderJob** 流程（以 rod 为主线，`rodbackend/pool.go:298-772`）：
 
 ```
 renderJob{url, referer, resultCh, ctx}
@@ -116,8 +118,10 @@ renderJob{url, referer, resultCh, ctx}
   ├─ 4. 行为模拟（可选）: 随机滚动 + mousemove
   ├─ 5. 滚动加载: JS 循环滚动最多 20 次
   ├─ 6. 网络事件收集: NetworkResponseReceived 记录请求ID/URL/MIME/状态
-  ├─ 7. 资产内联收集: JS fetch→arrayBuffer→btoa 串行取回
-  │      限制: 单资产 10MB, 超时 5s, 每页最多 200 个
+  ├─ 7. 资产内联收集: 页面内 JS 并发 fetch→arrayBuffer→btoa 分批取回
+  │      按 chunk=10 分批，每批一次 CDP Eval 内 Promise.all 真并发，
+  │      每个 fetch 独立 AbortController 超时
+  │      限制: 单资产 10MB, 单资产超时 5s, 每页最多 200 个
   ├─ 8. API 发现: discoverAPIs 从网络事件提取接口
   └─ 9. DOM 提取: page.HTML() + title/cookies/links
 
@@ -171,7 +175,7 @@ func FindChromePath() string  // 按 OS 候选路径 + CHROME_PATH 探测 Chrome
 
 ## 3. 克隆管线
 
-### 3.1 完整克隆管线（`enhanced_cloner.go:458-830`）
+### 3.1 完整克隆管线（`enhanced_cloner.go:507-886`）
 
 ```
 Clone(ctx, seedURL) → CloneResult
@@ -179,8 +183,12 @@ Clone(ctx, seedURL) → CloneResult
   ├─ 1. 解析 seed URL
   ├─ 2. 设置 Referer / RefererOverrides（域名级覆盖）
   ├─ 3. preflightCloudflareCheck()         ← Turnstile 预检测
-  │      ⚠️ 默认 Stealth=true 时被跳过（见 §11 P0）
+  │      GET（非 HEAD）+ 前 8KB body 判定 Turnstile 标记，
+  │      无论 Stealth 是否开启均执行；检出 Turnstile → 关闭
+  │      AntibotAutoEscalate（headless 无法解交互挑战，避免空转）
+  │      未开 Stealth 且命中 cf 头 → 预启用 Stealth
   ├─ 4. runAntibotProbe()                  ← 多维度探测
+  │      仅 AntibotEnabled && !Stealth 时执行（Stealth 已是高级别）
   │      prober.NewProber().Probe(): HTTP header / robots / WAF / rate-limit / JS chall
   ├─ 5. 建目录 pages/ assets/
   ├─ 6. 初始化:
@@ -194,7 +202,17 @@ Clone(ctx, seedURL) → CloneResult
   └─ 9. wg.Wait → frontier.save → cookies.Save → Result
 ```
 
-### 3.2 单页面处理（`processPage`，`enhanced_cloner.go:908-1257`）
+**反爬 5 级升级体系**（`internal/browser/antibot/escalator.go`，渲染错误触发逐级 Escalate）：
+
+| 级别 | 名称 | 措施 |
+|------|------|------|
+| 0 | `LevelNone` | 无反爬措施（默认行为） |
+| 1 | `LevelFlags` | 仅 Chrome 反检测 flags（无 JS 注入） |
+| 2 | `LevelStealth` | 全量 stealth JS 注入 + 全部 Chrome flags |
+| 3 | `LevelAggressive` | Stealth + 随机延迟 + UA 轮换 |
+| 4 | `LevelBackoff` | 指数退避 + 上报失败 |
+
+### 3.2 单页面处理（`processPage`，`enhanced_cloner.go:959-1322`）
 
 ```
 processPage(ctx, pageURL)
@@ -235,17 +253,24 @@ AssetDownloader.Download(url)
   │   ├─ chromedp: 导航→检查临时下载→<img>标签→JS fetch+base64→Network.loadNetworkResource
   │   └─ rod: 导航→<img> on-referer页→Network.loadNetworkResource→JS fetch→缩略图特化
   │
-  └─ Layer 4: (Wayback 兜底 — 实现完整但当前未被调用)
+  └─ Layer 4: Wayback 兜底（HTTP/浏览器均失败后）
+      页面级: archiveFallback.FetchArchivedPage
+      资产级: archiveFallback.FetchArchivedAsset
+      （Availability API → id_ 原始快照 → 16MB 上限 → 剥离工具栏）
 ```
 
-### 3.4 分页支持（6 种模式）
+### 3.4 分页支持（克隆层 3 种模式 + 游标兜底）
+
+克隆层 `detectAndGeneratePagination`（`enhanced_cloner.go:2139`）从已提取链接中检测分页模式并补全生成：
 
 | 模式 | 探测方式 | URL 生成 |
 |------|----------|----------|
-| `query_param` | page/p/Page/pn 等参数 | 按 maxPagesPerGroup=100 生成 |
-| `path_based` | `/base/page/2/` 路径模式 | 路径递增 |
-| `offset/limit` | 步长参数 | 按步长生成 |
-| `cursor/seek/token` | 仅保留已有链接 | 不自动生成 |
+| `query_param` | page/Page/p/pg/pn/page_num/pageNum/page_number 等参数 | 按 maxPagesPerGroup=100 生成 |
+| `path_based` | `/base/page/2/` 路径模式 | 路径递增（同样受 100 页上限） |
+| `offset/limit` | offset/skip/start 步长参数 | 按步长生成 |
+| `cursor/seek/token` | 非顺序游标参数 | **游标兜底**：仅保留已有链接，不自动生成 |
+
+浏览器/rodbackend 的 API 发现层（`api_discovery.go`）另有独立的分页 kind 分类，共 **5 种**：`query_param` / `offset_limit` / `cursor` / `path_based` / `none`（`detectPaginationKind` 按 URL 参数与路径结构判定，标注在 `DiscoveredAPI.PaginationKind`）。其中 `query_param` 与 `offset_limit` 可经 `GeneratePaginationURLs` 续抓后续页，`cursor`/`path_based` 仅作标注。
 
 ### 3.5 断点续抓与去重
 
@@ -270,6 +295,30 @@ packZIM(cloneDir) → zimFile
       ├─ 流式写出
       └─ 尾部 MD5 校验（ZIM v6, Kiwix 兼容）
 ```
+
+**ZIM v6 文件格式细节**（`pkg/zim/format.go`，纯 Go 实现，Kiwix 兼容）：
+
+- **Header（固定 80 字节，小端序）**：
+
+| 偏移 | 字段 | 说明 |
+|------|------|------|
+| 0–3 | Magic | `0x5a 0x49 0x4d 0x04`（"ZIM\x04"） |
+| 4–5 / 6–7 | MajorVersion / MinorVersion | 6 / 0 |
+| 8–23 | UUID | 16 字节归档标识 |
+| 24–27 / 28–31 | ArticleCount / ClusterCount | 文章/集群总数 |
+| 32 / 40 / 48 / 56 | URLPtrPos / TitlePtrPos / ClusterPtrPos / MimeListPos | 各指针表文件偏移（uint64） |
+| 64 / 68 | MainPage / LayoutPage | 文章索引，`0xFFFFFFFF` 表示无 |
+| 72–79 | ChecksumPos | 尾部 MD5 偏移（uint64） |
+
+- **文件布局**：Header → MIME List → URL Ptr → Title Ptr → Cluster Ptr → Articles → Clusters → MD5（16 字节）
+- **目录项**：每项固定头 16 字节（`articleHeaderSize`）；ArticleType 四类——Redirect(0) / LinkFree(1) / LinkTarget(2) / Article(3)；MIME 槽位哨兵 `0xffff`(redirect) / `0xfffe`(linkTarget) / `0xfffd`(deleted)，redirect 复用 cluster 槽存放目标 URL 索引
+- **CompressionType**：None(1，存储) / Zstd(5)；cluster info 字节 bit4（`extendedFlag=0x10`）置位表示集群偏移为 uint64
+- **命名空间**：Content('C') / Metadata('M') / WellKnown('W')
+- **集群（cluster）构建**（`zim.go:650`）：`maxClusterSize = 2 MiB`/集群，文本与二进制 MIME 分离成不同集群；**增量缓存**——压缩前对未压缩集群计算 SHA-256，命中即复用已压缩字节跳过 zstd；`computeUUID` 基于全部文章内容的 MD5 派生确定性 UUID，保证可重现构建
+- **读取器**（`reader.go`）：`Get(namespace, url)` 对 URL 排序目录做**二分搜索**；`blobAtIndex` 跟随重定向链最多 `maxRedirectHops = 16` 跳；集群解压结果按 cluster 索引缓存
+- **主页选择**（`findMainPage`）：root `index.html` > `index` > `main` > 首个 HTML 文章；深层页面不自动选为主页，且主页必须是内容文章（非重定向，Kiwix 要求）
+
+> `internal/apps/pack/packer.go` 支持多种输出格式：HTML（目录复制）、ZIM（路径重写 stripPrefix + 目录索引重定向 + 丰富元数据 + 48×48 favicon）、Binary（自包含可执行文件，内嵌 `---WUKONG_ZIM_BEGIN:{size}:...---` 标记）、App（macOS .app / Windows .exe / Linux AppDir）。
 
 ---
 
@@ -303,13 +352,13 @@ aggregate_search(query) → []searchResult
 
 | 提供商 | API 端点 | 需要 key? | HTTP 客户端 | 限制 |
 |--------|----------|-----------|------------|------|
-| **DuckDuckGo** | Instant Answer JSON | 否 | `newSearchHTTPClient`（utls+限流+重试） | — |
-| **SearXNG** | `/search?format=json` | 可选 | `newSearchHTTPClient` | — |
-| **Tavily** | `api.tavily.com/search` | 必填 | `newSearchHTTPClient` | — |
-| **Google** | `customsearch/v1` | 必填 | `newSearchHTTPClient` | — |
-| **Bing** | `v7.0/search` | 必填 | `newSearchHTTPClient` | — |
+| **DuckDuckGo** | Instant Answer JSON | 否 | 共享 `searchHTTPClient()`，请求级 15s | — |
+| **SearXNG** | `/search?format=json` | 可选 | 共享 `searchHTTPClient()`，请求级 15s | — |
+| **Tavily** | `api.tavily.com/search` | 必填 | 共享 `searchHTTPClient()`，请求级 20s | — |
+| **Google** | `customsearch/v1` | 必填 | 共享 `searchHTTPClient()`，请求级 15s | — |
+| **Bing** | `v7.0/search` | 必填 | 共享 `searchHTTPClient()`，请求级 15s | — |
 
-> **注意**：`newSearchHTTPClient`（`aggregate_search.go:97-113`）启用了 `TLSFingerprint: true`（utls）、`EnableRateLimit: true`（10/s）、`MaxRetries: 3`——所有搜索提供商共享一致的 Chrome 指纹与限流。
+> **注意**：`searchHTTPClient()`（`aggregate_search.go`，进程级 `sync.Once` 单例）返回所有搜索后端与页面抓取共用的一个 `httpclient.Client`——单一 `http.Transport`（连接池共享）+ 单一限流器（10/s 全局，burst 20）+ `TLSFingerprint: true`（utls Chrome 指纹）+ `MaxRetries: 3`。client `Timeout` 为上限 30s（fetch 预算），更短的后端预算按请求经 `DoWithTimeout` 设置（原为 6 个独立客户端各建 Transport，连接池分裂——2026-08-23 已合并）。
 
 ### 4.3 浏览器搜索兜底（`searchViaBrowser`）
 
@@ -549,7 +598,7 @@ Chunk(text) → []Chunk
   └─ Step 5: 赋予最终 Index + 偏移量
 ```
 
-### 7.3 EstimateTokens 估算（`chunking.go:375-400`）
+### 7.3 EstimateTokens 估算（`chunking.go:381`）
 
 ```go
 func EstimateTokens(text string) int {
@@ -719,7 +768,7 @@ transport.DialTLSContext = func(ctx, network, addr) {
 | `pkg/httpclient/httpclient.go` | 主 HTTP 客户端（`TLSFingerprint=true`） |
 | `internal/browser/proxy_pool.go:254` | 反爬代理池客户端 |
 | `internal/browser/antibot/prober/http_client.go:32` | WAF 探针客户端 |
-| `internal/extension/builtin/aggregate_search.go` | 搜索引擎客户端（`newSearchHTTPClient`） |
+| `internal/extension/builtin/aggregate_search.go` | 搜索引擎客户端（共享 `searchHTTPClient()` 单例） |
 
 ### 9.5 速率限制（`ratelimit.go`）
 
@@ -765,16 +814,24 @@ Connection                    // keep-alive
 ### 9.8 重试与错误分类
 
 ```
-shouldRetry(err, statusCode) → bool
+shouldRetry(err, statusCode) → bool          [网络错误路径]
   │
   ├─ 错误串匹配: connection refused/reset/timeout/TLS → 重试
-  ├─ 5xx → 重试
   └─ 其他 → 不重试
 
-退避: (attempt+1) × RetryDelay    ← 线性退避（无抖动）
+retryStatusDelay(resp, attempt) → (delay, ok)   [响应状态路径]
+  │
+  ├─ 429 与 5xx → 重试
+  └─ 其他 4xx → 不重试
+
+退避: max(retryBackoff, Retry-After + jitter)
+  - retryBackoff: base/2 + rand[0, base/2)，base = (attempt+1) × RetryDelay
+    ← 线性退避 + equal jitter（防惊群；期望延迟 75%×base，下界 base/2）
+  - Retry-After: 解析秒数/HTTP-date，另加 10%（上限 1s）抖动防对齐；
+    超过 client Timeout 时不重试、直接把 429/503 响应交还调用方
 ```
 
-> ⚠️ 主 httpclient 的重试是**线性退避**且**不消费 Retry-After**——`errsignal.RetryDelay` 提供了更优的指数退避+Retry-After 实现，但主 httpclient 尚未接入。
+> httpclient 的重试已于 2026-08-23 完成 equal jitter + Retry-After 消费（`retryBackoff` / `retryStatusDelay` / `parseRetryAfter`，429 原先不重试、现纳入）。`internal/errsignal.RetryDelay` 保持未接入（零调用方、硬编码 1s 起步会破坏 `Options.RetryDelay` 配置契约，且 pkg 层不宜反向依赖 internal）。
 
 ### 9.9 Metrics
 
@@ -797,25 +854,24 @@ shouldRetry(err, statusCode) → bool
 
 | 维度 | 表现 |
 |------|------|
-| **容灾能力** | 浏览器渲染→HTTP 回退→Wayback 三级容灾 + `errsignal` 信号化分类 |
-| **反爬自适应** | Stealth/Preflight/Antibot 分级升级 → Aggressive 轮换 UA+TLS |
+| **容灾能力** | 浏览器渲染→HTTP 回退→Wayback 三级容灾（页面/资产均接入） + `errsignal` 信号化分类 |
+| **反爬自适应** | 5 级升级体系（None→Flags→Stealth→Aggressive→Backoff）+ Preflight/Probe 预判，Aggressive 轮换 UA+TLS |
 | **速度优化** | 平台 API 快捷通道（Reddit/HN/GitHub/Wikipedia/arXiv）10-50× 提速 |
 | **搜索调优** | SPA 遗传算法 + 多保真度 3 阶段评估，大幅降低 LLM Judge 成本 |
 | **DNS 容错** | 系统 DNS → 公共 DNS 回退 → DNS 缓存三层保护 |
-| **DOM 质量** | 单遍 DOM 重写 + honeypot 识别 + lazy-load 解析 + 6 种分页模式 |
+| **DOM 质量** | 单遍 DOM 重写 + honeypot 识别 + lazy-load 解析 + 3 种分页模式 + 游标兜底 |
 | **稳定性** | 断点续抓 + SHA-256 硬链接去重 + ETag 增量缓存 |
+| **资产收集** | rod 页内 JS 分批并发（chunk=10 Promise.all），每资产独立超时 |
 
 ### 10.2 短板
 
 | 维度 | 现状 |
 |------|------|
-| **HTTP 重试** | 线性退避、无抖动、不消费 `Retry-After`（`errsignal` 已有更好实现但未接入） |
-| **TLS 校验** | 多处固定 `InsecureSkipVerify: true` + 浏览器 `ignore-certificate-errors` |
-| **代码重复** | chromedp/rod 双后端的 worker 池/renderJob/DownloadAsset 骨架高度同构 |
-| **资源收集** | rod 单页串行 btoa 收集最多 200 资产（每个 5s），最坏数十分钟 |
-| **Wayback 兜底** | `ArchiveFallback.FetchArchivedAsset` 实现完整但从未被调用 |
-| **内存** | ZIM 打包全量读入内存；base64 转码使内存翻倍 |
-| **限速模型** | 资产每资产统一 300-1000ms 随机延迟，而非按域名限速 |
+| **HTTP 重试** | 线性退避 + equal jitter + Retry-After 消费（已修，见 §9.8）；`errsignal.RetryDelay` 仍未接入（见 P0-1 说明） |
+| **TLS 校验** | ~~多处固定 `InsecureSkipVerify: true` + 浏览器 `ignore-certificate-errors`~~ 已收敛：HTTP 侧本就是严格默认 + 显式 opt-out（`insecure_tls`/`InsecureSkipVerify`/RootCAs bundle），2026-08-24 移除 chromedp 池基础 flag 列表中无条件的 `ignore-certificate-errors`/`ignore-ssl-errors`（此前 InsecureTLS 条件开关形同虚设，与 rod 后端不一致），双后端现统一为严格默认 + 显式 opt-out。全链 Debug 级埋点：`errsignal.Classify/RetryDelay`（错误分类/重试裁决/退避分支）、httpclient 构造期（TLS 模式 + client/dial/handshake 超时旋钮）、cloner TLS 策略与 CA 加载结果、双后端池 TLS 模式 |
+| ~~代码重复~~ | 已由 P2-1 六阶段收敛（renderkit 注入 JS/内容类型 + Dispatcher 调度骨架 + 生命周期 + 优先级/老化 + 依赖图重试 + 全局渲染预算）；剩余 rod 独有下载回退链（网络跟踪/referer 缓存/5 级回退约 900 行）属 CDP 能力差异，有意保留在适配层 |
+| **内存** | ZIM 打包全量读入内存；base64 转码使内存翻倍。缓解：全局渲染预算按 heap 水位收缩渲染并发（P2-1 阶段六），但 ZIM/base64 路径本身未改 |
+| ~~限速模型~~ | 已修（P2-2/P2-3/P2-4）：per-host token-bucket（CrawlDelay → robots → 默认 100ms，跨 host 并行）+ 429/503 动态降速 + 白名单豁免 + IP 段惩罚传播 |
 
 ---
 
@@ -823,30 +879,36 @@ shouldRetry(err, statusCode) → bool
 
 ### P0（正确性）
 
-1. **修正默认配置跳过反爬预检测**
-   `enhanced_cloner.go:2745` `if !opts.AntibotEnabled || opts.Stealth { return }`——默认 `Stealth=true` 导致 Preflight 与 Probe 均不执行。建议 Stealth=true 时仍执行**轻量 Preflight**（HEAD/前 8KB 判定 Turnstile）。
-
-2. **httpclient 重试升级为指数退避 + Retry-After**
-   当前线性退避 `(attempt+1)*RetryDelay` 且不消费 `Retry-After`。建议接入已实现的 `errsignal.RetryDelay`（指数退避 + jitter + Retry-After 解析）。
+1. **httpclient 重试消费 Retry-After** ✅ 已完成（2026-08-23）
+   `pkg/httpclient/httpclient.go`：两处重试统一走 `retryStatusDelay()`——429 与 5xx 均重试；`Retry-After` 头（秒数/HTTP-date）被解析并叠加 10% 抖动（上限 1s）防并发对齐；超过 client `Timeout` 的 `Retry-After` 不重试、直接交还响应。配套 `retryBackoff`（equal jitter）与 8 个单测/集成测试。`errsignal.RetryDelay` 维持未接入（见 §9.8 说明）。
 
 ### P1（体验与效率）
 
-3. **统一 web 工具集 httpclient**
-   当前 `newSearchHTTPClient` 已统一搜索提供商客户端，但各提供商仍各自创建实例。建议共享单一客户端避免连接池分裂。
-
-4. **rod 资产收集改并发**
-   `rodbackend/pool.go:479-550` 串行 btoa 回传 200 资产（最坏 200×5s）。建议并发（限 5）或用 `Network.getResponseBody` 流式读取。
-
-5. **接入 Wayback 资产兜底**
-   `ArchiveFallback.FetchArchivedAsset` 完整实现但从未被调用。建议在资产下载最终失败分支接入。
+2. **统一 web 工具集 httpclient** ✅ 已完成（2026-08-23）
+   `aggregate_search.go` 的 6 个独立客户端（duckduckgo/searxng/google/bing 15s、tavily 20s、fetch 30s）合并为进程级单例 `searchHTTPClient()`——单一 `http.Transport` 连接池 + 单一 10/s 限流器；每后端超时改经新增的 `httpclient.Client.DoWithTimeout`（context 截止 + body 关闭释放定时器）按请求设置，语义不变。`tavily.go`/`searxng.go` 独立工具同步接入。语义变化：限流从每后端 10/s 收紧为全局 10/s（更保守、与文档原声称一致）。
 
 ### P2（架构简化）
 
-6. **统一 chromedp/rod 双后端调度框架**
+3. **统一 chromedp/rod 双后端调度框架** ✅ 已完成（2026-08-24，六阶段）
    两套 worker 池/renderJob/RenderWithReferer/DownloadAsset 骨架逐行重复。建议提取共享接口 + 泛化调度，将 CDP 差异收敛到适配层。
+   - **阶段一已完成**：`internal/browser/renderkit` 归一两后端逐字重复的注入 JS 与内容类型判断（约 150 行去重，3 个单测）；chromedp 版内容类型判断从裸比较升级为归一化匹配。
+   - **阶段二已完成**：共享调度骨架 `renderkit.Dispatcher`（`RenderJob`/`Submit`/`Drain`/`Closed`）收敛两后端重复的队列/closed 守卫/双 select 取消/worker 循环/Close 排水（每侧约 -60 行，行为等价：workers×4 缓冲、ctx 取消丢弃结果、Drain 幂等且返回是否由本次调用排水——rod 的 `MustClose` 非幂等，清理只由排水者执行）；可选能力接口 `types.UARotator`（两后端）与 `types.AssetCollector`（rod：渲染时网络跟踪收集）形式化，`enhanced_cloner` 的匿名 `RotateUA` 断言改用命名接口，两后端补编译期断言。真实浏览器冒烟双绿（chromedp 1.94s / rod 1.44s），全量 -race 回归通过。
+   - **阶段三已完成**：浏览器池生命周期绑定调用方 context——`New(ctx, opts)`（两后端同构）以 `lifeCtx` 派生浏览器 allocator/launcher，监听 goroutine 在 ctx 取消时自动排水并释放浏览器进程（此前任务 ctx 泄漏浏览器须等进程退出）。显式 `Close` 与自动 `Close` 经 `Drain()` 返回值单执行者守卫互斥（chromedp 的 cancel 闭包消费一次性信号量、rod 的 `MustClose` 非幂等，二次调用必死锁/panic）。工厂 `NewBackend`/`NewBackendFromConfig` 增加 ctx 转发；长生命周期组件（Controller）传 `Background` 自管 Close，任务型消费方（enhanced_cloner/downloader）传任务 ctx——取消任务即回收浏览器。附带修复 rod 既有生产 bug：无 `<title>` 页面（极简页/错误页）使 `Element("title")` 无限等待挂死渲染，现以 2s 超时限界（生命周期测试页刻意无 title 兼作回归用例）。生命周期测试 4 项全绿（chromedp 3 项无浏览器即可运行，rod 真机 1 项），全量 -race 回归通过。
+   - **阶段四已完成**：基于资源优先级的动态调度——`Dispatcher` 从纯 FIFO 升级为优先级调度：`types.Priority`（Low/Normal/High，零值视作 Normal 保持旧调用语义）+ 可选能力接口 `types.PriorityRenderer`（`RenderWithPriority`，两后端实现并加编译期断言）；worker 争用时高优先级渲染插队，同级 FIFO，且每等待一个老化间隔（默认 5s）有效优先级升一级——饿死的低优先级任务最终反超新提交的普通任务，严格优先级的饥饿问题由老化动态提升消除。背压语义不变（4×workers 有界准入，经信号量通道实现保持 ctx 可取消；队列扫描 O(n) 于有界容量上取最优，规避了键值随老化变化的堆一致性陷阱）。调用点分级：种子页/Turnstile 自动解题（挑战令牌短时效）/downloader 用户请求页 = High，SPA 补救性重渲染（页面已渲染过一次的机会性质量提升）= Low，其余 = Normal。新增 3 个调度单测（插队+同级 FIFO、老化反超、满队背压+ctx 取消），renderkit 8 测试 ×5 轮 -race 稳定通过，双后端全量 -race 回归通过。
+   - **阶段五已完成**：基于任务依赖图的拓扑调度——新增 `clone/taskGraph`（`Declare`/`Resolve`/`Submit`：声明式节点由外部事件 Resolve，提交式节点依赖齐后自动运行 fn；失败经 `depErr` 传给依赖方但 fn 仍运行以保证清理路径与计数释放；DFS 环检测与重复键在建边时拒绝）。反爬重试链改造为图节点：`schedulePageRetry`/`scheduleAssetRetry` 把退避窗口与重派生声明为 `backoff→retry` 依赖边，页面 worker 立即返回而非 `time.Sleep` 占住槽位度过整个冷却期（资产路径同构）。附带修复两个既有生产 bug：①页面重试经 `enqueuePageWithReferer` 被 frontier 去重静默丢弃（失败尝试已占住 seen 槽，全仓库无一处为重试清 seen——重派现直发 worker 池绕过去重，次数由 escalator `MaxRetries` 按 URL 封顶）；②ctx 取消后 `wg.Wait` 永久挂死（worker 提前 `return` 使缓冲区剩余 job 计数泄漏、DFS 栈滞留、BFS 满队逃逸路径多处泄漏）——worker 取消后持续排水释放计数、`discardPageStack` 置 `dispatcherDead` 关闭迟到压栈的 TOCTOU 窗口、`enqueuePageWithReferer` 增加 ctx 取消守卫。重试渲染并入 High 优先级（种子页同因：退避刚结束应立即渲染）。taskgraph 7 单测 ×3 轮 -race、clone ×3 轮 -race、browser 全家 -race 回归通过。
+   - **阶段六已完成**：基于全局资源水位的全局调度器——此前架构是"每任务一池、池间零协调"（常驻 Controller 池 + 每个 clone/download 任务各一个 Chrome 进程池），进程内渲染并发总量 = Σ 各池 Workers，无上限也无资源信号反馈。新增 `renderkit.GlobalBudget` 进程级渲染槽位预算：所有池（双后端经共享 `Dispatcher` 骨架单点接入——worker 在运行 job 前取全局槽位、运行后归还，未安装预算时零开销直通）共享一个准入上限，进程内同时运行的渲染总数被封顶；资源水位自适应：内置 heap 监测器（默认 2s 采样 `HeapInuse` 相对 `GOMEMLIMIT` 软限制，未设置时回退 4GiB 标尺）将占用率映射为三档压力（≥70% 高压 / ≥85% 严重），压力使有效预算收缩为上限的 1/2、1/4（下限 1，不抢占已持有槽位，随在途渲染自然收敛），回落到高水位以下恢复全额。等待实现为 broadcast channel（close+重建）而非 `sync.Cond`，保证 `Acquire` 可被 ctx 取消（取消的等待者不占槽位）；预算阻塞传导为全链背压：全局槽位满 → worker 挂起不取新 job → 池内队列满 → 提交方 sem 满 → `Submit` 阻塞（ctx 可取消）→ 上游停止生产。单例经 `EnsureGlobalBudget` 幂等安装（首次调用者定容，`browser.NewBackend` 统一入口接入；config 键 `browser.global_render_slots`：0=自动 max(4, NumCPU)，负值显式禁用）。与阶段四正交：优先级决定池内"谁先跑"，全局预算决定全进程"同时跑多少"。renderkit 15 测试 ×3 轮 -race、browser 全家（含双后端真机冒烟）-race、clone -race、config 回归通过。
 
-7. **资产按域名 token-bucket 限速**
-   当前每资产统一 300+rand(0,700)ms 延迟。建议改为按 host 限速（`pkg/httpclient` RateLimiter 已支持），仅对探测出限流的 host 降速。
+4. **资产按域名 token-bucket 限速** ✅ 已完成（2026-08-23）
+   Per-host token-bucket 早已落地（`waitAssetRateLimit`/`hostLimiter`：CrawlDelay → robots crawl-delay → 默认 100ms/host，跨 host 并行；`300+rand(0,700)ms` 仅剩 URL 不可解析时的兜底）。本轮补齐"仅对探测出限流的 host 降速"：`RateLimiter.SlowDown`（每次 429/503 将该 host interval ×2，封顶 30s，本轮内不恢复），`processAsset` 在 `DownloadError.StatusCode` 为 429/503 时调用 `penalizeHost`（403 属 WAF 拦截、不惩罚，走浏览器回退）。
+
+5. **IP 段动态限速惩罚传播** ✅ 已完成（2026-08-23）
+   补齐 CDN 别名场景：`cdn1`/`cdn2` 常解析到同一 /24，per-host 桶各自限速但目标服务器承受叠加流量，且单 host 惩罚不会扩散到同段兄弟。实现（`clone/ip_penalty.go`）：惩罚时解析违规 host 的 IP（复用 `httpclient.DNSCache`，5min TTL）→ 按 CIDR 前缀（默认 v4 /24、v6 /64，可配）记录段级最小间隔；同段其他 host 下次 `waitAssetRateLimit` 时经 `RateLimiter.RaiseTo` 抬升到该地板（只升不降、不额外乘 2）。默认开启（`apps.clone.rate_limit_ip_segment: true`，`--no-ip-rate-limit` 关闭）；正常路径零 DNS 开销——段存储为空时 `segmentFloor` 直接返回 0 不触发解析。
+
+### 已解决（2026-08-23 复核）
+
+- ~~修正默认配置跳过反爬预检测~~（原 P0）：`preflightCloudflareCheck`（`enhanced_cloner.go:2850`）现在无条件调用（仅 `AntibotEnabled=false` 短路），GET + 前 8KB body 判定 Turnstile，**无论 Stealth 是否开启均执行**；检出 Turnstile 时关闭 `AntibotAutoEscalate` 避免空转。`runAntibotProbe` 仍仅在 `AntibotEnabled && !Stealth` 时执行（Stealth 已是较高级别，属合理分层）。
+- ~~rod 资产收集改并发~~（原 P1）：`rodbackend/pool.go:562-659` 已改为 chunk=10 分批、每批单次 CDP Eval 内 `Promise.all` 真并发 fetch，每个 fetch 独立 `AbortController` 超时。
+- ~~接入 Wayback 兜底~~（原 P1）：页面级 `FetchArchivedPage`（`enhanced_cloner.go:1068`）与资产级 `FetchArchivedAsset`（`enhanced_cloner.go:1833`）均已接入最终失败分支。
 
 ### 调优旋钮
 
@@ -905,9 +967,8 @@ httpclient:
 | [CLONE_GUIDE.md](./CLONE_GUIDE.md) | 网站克隆技术指南 |
 | [ANTIBOT_GUIDE.md](./ANTIBOT_GUIDE.md) | 反反爬技术详解 |
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | 系统架构全景 |
-| [TECHNICAL_IMPLEMENTATION.md](./TECHNICAL_IMPLEMENTATION.md) | 技术实现详解 |
 | [CONFIG.md](./CONFIG.md) | 配置手册 |
 
 ---
 
-> **版本**: v0.2.0 | **最后更新**: 2026-08-11 | **范围**: browser / apps(clone) / search(tune/vertical/chunking) / errsignal / pkg/httpclient
+> **版本**: v0.3.0 | **最后更新**: 2026-08-23 | **范围**: browser / apps(clone,pack) / search(tune/vertical/chunking) / errsignal / pkg/httpclient / pkg/zim

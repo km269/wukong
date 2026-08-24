@@ -26,7 +26,7 @@ import (
 // existing description formats (A2A AgentCard, ACP AgentCard,
 // ARD CatalogEntry) into a single, standards-compliant document.
 type ADPBuilder struct {
-	config    *ADPBuildConfig
+	config     *ADPBuildConfig
 	signingKey ed25519.PrivateKey
 }
 
@@ -74,14 +74,14 @@ func (b *ADPBuilder) Build() *ADPDocument {
 	doc := &ADPDocument{
 		ProtocolType:    ANPProtocolType,
 		ProtocolVersion: ANPProtocolVersion,
-		Type:           "AgentDescription",
-		URL:            fmt.Sprintf("%s/agents/%s/ad.json", baseURL, urlize(b.config.AgentName)),
-		Name:           b.config.AgentName,
-		DID:            b.config.DID,
-		Description:    b.config.AgentDescription,
-		Version:        b.config.AgentVersion,
-		Capabilities:   b.config.Capabilities,
-		Tags:           b.config.Tags,
+		Type:            "AgentDescription",
+		URL:             fmt.Sprintf("%s/agents/%s/ad.json", baseURL, urlize(b.config.AgentName)),
+		Name:            b.config.AgentName,
+		DID:             b.config.DID,
+		Description:     b.config.AgentDescription,
+		Version:         b.config.AgentVersion,
+		Capabilities:    b.config.Capabilities,
+		Tags:            b.config.Tags,
 	}
 
 	// Owner information

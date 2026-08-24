@@ -30,10 +30,10 @@ func CreateBuiltinToolSet(
 		sb := cfg.Security.Sandbox
 		shell := capability.NewSandboxShellServiceWithLimits(
 			sandbox.ResourceLimits{
-				MaxCPUSeconds:   sb.Limits.MaxCPUSeconds,
-				MaxMemoryBytes:  sb.Limits.MaxMemoryBytes,
-				MaxFileBytes:    sb.Limits.MaxFileBytes,
-				MaxProcesses:    sb.Limits.MaxProcesses,
+				MaxCPUSeconds:  sb.Limits.MaxCPUSeconds,
+				MaxMemoryBytes: sb.Limits.MaxMemoryBytes,
+				MaxFileBytes:   sb.Limits.MaxFileBytes,
+				MaxProcesses:   sb.Limits.MaxProcesses,
 			},
 			sb.KillOnParentExit,
 		)

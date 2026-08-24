@@ -104,7 +104,7 @@ func TestACPServer_ApprovalsList_NoSink_ReportsDisabled(t *testing.T) {
 	}
 	var body struct {
 		Approvals []ApprovalRequestDTO `json:"approvals"`
-		Enabled   bool                `json:"enabled"`
+		Enabled   bool                 `json:"enabled"`
 	}
 	_ = json.NewDecoder(w.Body).Decode(&body)
 	if body.Enabled {

@@ -10,20 +10,20 @@ func TestSearchMetrics_RecordAndSnapshot(t *testing.T) {
 
 	// Record a hybrid search with RRF + reranker.
 	m.Record(SearchEvent{
-		Mode:          ModeHybrid,
-		Duration:      50 * time.Millisecond,
-		ResultCount:   10,
-		QueryLen:      20,
-		UsedRRF:       true,
-		UsedReranker:  true,
+		Mode:           ModeHybrid,
+		Duration:       50 * time.Millisecond,
+		ResultCount:    10,
+		QueryLen:       20,
+		UsedRRF:        true,
+		UsedReranker:   true,
 		PreRerankCount: 30,
 	})
 	// Record a lexical search.
 	m.Record(SearchEvent{
-		Mode:         ModeLexical,
-		Duration:     5 * time.Millisecond,
-		ResultCount:  5,
-		QueryLen:     10,
+		Mode:        ModeLexical,
+		Duration:    5 * time.Millisecond,
+		ResultCount: 5,
+		QueryLen:    10,
 	})
 	// Record a vertical search.
 	m.Record(SearchEvent{
@@ -128,10 +128,10 @@ func TestSearchMetrics_Empty(t *testing.T) {
 func TestSnapshot_String(t *testing.T) {
 	m := New()
 	m.Record(SearchEvent{
-		Mode:         ModeHybrid,
-		Duration:     50 * time.Millisecond,
-		ResultCount:  10,
-		UsedRRF:      true,
+		Mode:        ModeHybrid,
+		Duration:    50 * time.Millisecond,
+		ResultCount: 10,
+		UsedRRF:     true,
 	})
 	snap := m.Snapshot()
 	s := snap.String()
@@ -160,9 +160,9 @@ func TestLatencyBucketIndex(t *testing.T) {
 		{499 * time.Millisecond, 3},
 		{500 * time.Millisecond, 4}, // 500ms is NOT < 500ms
 		{999 * time.Millisecond, 4},
-		{1 * time.Second, 5},        // 1s is NOT < 1s
+		{1 * time.Second, 5}, // 1s is NOT < 1s
 		{4 * time.Second, 5},
-		{5 * time.Second, 6},        // 5s is NOT < 5s
+		{5 * time.Second, 6}, // 5s is NOT < 5s
 		{10 * time.Second, 6},
 	}
 	for _, c := range cases {

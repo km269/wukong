@@ -110,16 +110,31 @@ type EnhancedClonerOptions struct {
 	// AssetWorkers is the number of concurrent asset downloaders.
 	AssetWorkers int
 
-	// BrowserPages is the Chrome tab pool size (0 = same as Workers).
-	// Separate from Workers to allow different rendering concurrency
-	// vs browser resource usage.
-	BrowserPages int
-
 	// RespectRobots controls whether to obey robots.txt rules.
 	RespectRobots bool
 
 	// CrawlDelay overrides the robots.txt crawl-delay.
 	CrawlDelay time.Duration
+
+	// RateLimitWhitelist lists hosts exempt from asset rate limiting
+	// — trusted domains you control (your CDN, intranet, local dev
+	// servers). Whitelisted hosts skip the per-host token bucket and
+	// are immune to 429/503 dynamic slowdown. Entries are matched
+	// case-insensitively against the URL host; an entry without a
+	// port also matches any port (e.g. "localhost" matches
+	// "localhost:3000").
+	RateLimitWhitelist []string
+
+	// RateLimitIPSegment propagates 429/503 penalties across hosts
+	// sharing an IP segment (CDN aliases). Penalty-only: DNS is
+	// consulted after a penalty lands, never on the happy path.
+	// Default true.
+	RateLimitIPSegment bool
+
+	// RateLimitIPPrefixV4 / RateLimitIPPrefixV6 set the CIDR prefix
+	// length used to group IPs into segments (defaults 24 and 64).
+	RateLimitIPPrefixV4 int
+	RateLimitIPPrefixV6 int
 
 	// NoSitemap disables sitemap-based URL discovery.
 	NoSitemap bool
@@ -293,7 +308,6 @@ func DefaultEnhancedOptions() EnhancedClonerOptions {
 		OutputDir:           outputDir,
 		Workers:             4,
 		AssetWorkers:        12,
-		BrowserPages:        6,
 		Timeout:             120 * time.Second,
 		RenderTimeout:       120 * time.Second,
 		Settle:              5000 * time.Millisecond,
@@ -308,6 +322,9 @@ func DefaultEnhancedOptions() EnhancedClonerOptions {
 		MaxAssetBytes:       50 * 1024 * 1024, // 50 MB.
 		AntibotEnabled:      true,
 		AntibotAutoEscalate: true,
+		RateLimitIPSegment:  true, // Default: propagate 429/503 penalties across IP segments.
+		RateLimitIPPrefixV4: 24,
+		RateLimitIPPrefixV6: 64,
 		Incremental:         true,
 		CacheMaxAge:         24 * time.Hour,
 		Headless:            true, // Default: headless Chrome.
@@ -365,6 +382,15 @@ type EnhancedCloner struct {
 	assetRateLimiters map[string]*RateLimiter
 	assetRateMu       sync.Mutex
 
+	// Set of lowercased whitelisted hosts (with and without port) that
+	// are fully exempt from asset rate limiting. Built once from
+	// opts.RateLimitWhitelist; nil/empty means no exemption.
+	rateWhitelist map[string]struct{}
+
+	// IP-segment penalty propagation (nil when RateLimitIPSegment is
+	// disabled). See ip_penalty.go.
+	ipPenalties *ipPenaltyStore
+
 	// Anti-bot detection and auto-escalation engine.
 	antibot *antibot.Engine
 
@@ -392,6 +418,15 @@ type EnhancedCloner struct {
 	pageMu         sync.Mutex
 	pageReady      chan struct{} // Signal when new pages are available.
 	dispatcherStop chan struct{} // Signal to stop the dispatcher.
+	// dispatcherDead (guarded by pageMu): the DFS dispatcher has
+	// swept the stack and exited; new pushes must drop themselves or
+	// their wg count leaks with nobody left to dispatch them.
+	dispatcherDead bool
+
+	// Dependency-graph scheduling for retries: backoff windows and
+	// re-dispatched attempts are graph nodes, so a worker never sits
+	// idle in time.Sleep while a retry cools down.
+	taskGraph *taskGraph
 
 	// Downloaded assets registry.
 	downloadedAssets map[string]*downloadedAsset
@@ -469,6 +504,7 @@ func NewEnhancedCloner(opts EnhancedClonerOptions) *EnhancedCloner {
 		pageReady:        make(chan struct{}, 1),
 		dispatcherStop:   make(chan struct{}),
 		pageStack:        make([]pageJob, 0),
+		taskGraph:        newTaskGraph(),
 		archiveFallback:  NewArchiveFallback(opts.ArchiveFallback),
 	}
 }
@@ -477,8 +513,20 @@ func NewEnhancedCloner(opts EnhancedClonerOptions) *EnhancedCloner {
 // TLS verification is ON by default. Set InsecureTLS to disable verification
 // (opt-out for intranet/.mil certs), or set TLSCACertPath to a PEM CA bundle
 // (e.g. the DoD Root CA package) so .mil/.gov certificates verify against it
-// while checks stay enabled.
+// while checks stay enabled. The effective policy is logged at debug level —
+// handshake-stage failures masquerade as connection timeouts, so knowing
+// which mode was actually in force is triage step one.
 func (ec *EnhancedCloner) tlsConfigForClone() *tls.Config {
+	cfg := ec.buildTLSConfigForClone()
+	logutil.Debug("clone TLS policy",
+		slog.Bool("insecure_skip_verify", cfg.InsecureSkipVerify),
+		slog.String("ca_bundle", ec.opts.TLSCACertPath),
+		slog.Bool("ca_bundle_loaded", cfg.RootCAs != nil),
+	)
+	return cfg
+}
+
+func (ec *EnhancedCloner) buildTLSConfigForClone() *tls.Config {
 	cfg := &tls.Config{
 		InsecureSkipVerify: ec.opts.InsecureTLS, //nolint:gosec // opt-in
 	}
@@ -667,6 +715,10 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 
 	// Per-host asset rate limiters are created lazily on first use.
 	ec.assetRateLimiters = make(map[string]*RateLimiter)
+	ec.rateWhitelist = buildRateWhitelist(ec.opts.RateLimitWhitelist)
+	if ec.opts.RateLimitIPSegment {
+		ec.ipPenalties = newIPPenaltyStore(ec.opts.RateLimitIPPrefixV4, ec.opts.RateLimitIPPrefixV6)
+	}
 
 	// Resume from previous state.
 	if ec.opts.EnableResume && !ec.opts.Refresh {
@@ -691,7 +743,10 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 	if util.DebugEnabled {
 		logutil.Debug("Creating browser backend...")
 	}
-	browserBackend, err := browser.NewBackend(ec.opts.BrowserBackend, browser.BackendOptions{
+	// The browser pool's lifetime is bound to the clone context:
+	// cancelling ctx drains the pool and releases Chrome, on top of the
+	// explicit defer Close below.
+	browserBackend, err := browser.NewBackend(ctx, ec.opts.BrowserBackend, browser.BackendOptions{
 		Headless:         ec.opts.Headless,
 		Workers:          ec.opts.Workers,
 		Settle:           ec.opts.Settle,
@@ -887,11 +942,14 @@ func (ec *EnhancedCloner) Clone(ctx context.Context, seedURL string) (*Result, e
 // pageWorker processes pages from the page job channel.
 func (ec *EnhancedCloner) pageWorker(ctx context.Context, id int) {
 	for job := range ec.pageJobs {
-		// Check for cancellation BEFORE processing.
+		// Check for cancellation BEFORE processing. On cancel keep
+		// draining (each drained job's wg count must be released or
+		// wg.Wait below never returns), instead of abandoning the
+		// buffered jobs.
 		select {
 		case <-ctx.Done():
 			ec.wg.Done()
-			return
+			continue
 		default:
 		}
 
@@ -919,10 +977,14 @@ func (ec *EnhancedCloner) pageWorker(ctx context.Context, id int) {
 // assetWorker processes asset downloads from the asset job channel.
 func (ec *EnhancedCloner) assetWorker(ctx context.Context, id int) {
 	for job := range ec.assetJobs {
+		// Check for cancellation BEFORE processing. On cancel keep
+		// draining (each drained job's wg count must be released or
+		// wg.Wait never returns; retry re-sends also rely on workers
+		// still consuming), instead of abandoning the buffered jobs.
 		select {
 		case <-ctx.Done():
 			ec.wg.Done()
-			return
+			continue
 		default:
 		}
 
@@ -951,6 +1013,18 @@ func (ec *EnhancedCloner) enqueueAssetNonBlocking(assetURL string) {
 // ---------------------------------------------------------------------------
 // Page processing.
 // ---------------------------------------------------------------------------
+
+// renderWithPriority submits a render through the browser pool with a
+// scheduling priority (types.PriorityRenderer). Backends without the
+// capability fall back to the plain render path — priority only
+// affects dequeue order when workers are contended, never the render
+// itself.
+func (ec *EnhancedCloner) renderWithPriority(ctx context.Context, pageURL, referer string, prio types.Priority) (*types.RenderResult, error) {
+	if pr, ok := ec.browserPool.(types.PriorityRenderer); ok {
+		return pr.RenderWithPriority(ctx, pageURL, referer, prio)
+	}
+	return ec.browserPool.RenderWithReferer(ctx, pageURL, referer)
+}
 
 // processPage renders and saves a single page.
 // Uses a single-pass DOM walk (sink callback) to simultaneously rewrite links
@@ -1005,11 +1079,20 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 		return ec.processPageContent(ctx, pageURL, depth, htmlStr, inScope)
 	}
 
-	// Render page in headless Chrome.
+	// Render page in headless Chrome. The seed page is the one the
+	// user is actively waiting on — schedule it ahead of background
+	// sub-page renders when workers are contended.
 	if util.DebugEnabled {
 		logutil.Debug("rendering...", slog.String("url", pageURL))
 	}
-	renderResult, err := ec.browserPool.RenderWithReferer(ctx, pageURL, referer)
+	renderPrio := types.PriorityNormal
+	// Seed page: the user is actively waiting on it. Retry attempts:
+	// the site just cooled down for this URL — render promptly or the
+	// backoff window is wasted.
+	if pageURL == ec.seedURL || ec.antibot.Escalator.RetryCount(pageURL) > 0 {
+		renderPrio = types.PriorityHigh
+	}
+	renderResult, err := ec.renderWithPriority(ctx, pageURL, referer, renderPrio)
 	if err != nil {
 		// Non-HTML resource? Route to asset downloader instead of failing.
 		if _, ok := errors.AsType[*types.ErrNotHTML](err); ok {
@@ -1025,15 +1108,14 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 			logutil.Warn("anti-bot event", slog.String("message", msg))
 			ec.applyAntiBotLevel()
 			if retry {
-				select {
-				case <-time.After(delay):
-					// Re-enqueue for retry with escalated level.
-					ec.enqueuePageWithReferer(pageURL, depth, referer, inScope)
-					return result
-				case <-ctx.Done():
-					result.Error = "cancelled during anti-bot backoff"
-					return result
-				}
+				// Re-enqueue after the backoff elapses: the worker
+				// returns immediately instead of sleeping through the
+				// delay, and the re-dispatch bypasses the frontier
+				// dedup (the failed attempt already holds the seen
+				// slot, so enqueuePageWithReferer would drop it).
+				ec.schedulePageRetry(pageJob{url: pageURL, depth: depth, referer: referer, inScope: inScope}, delay)
+				result.Error = "anti-bot retry scheduled"
+				return result
 			}
 		}
 
@@ -1122,7 +1204,9 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 			if !ec.opts.Headless && ec.opts.Stealth {
 				logutil.Warn("Turnstile detected — attempting auto-solve (non-headless+stealth, extended settle)")
 				ec.browserPool.SetSettle(10 * time.Second)
-				rr2, rErr := ec.browserPool.RenderWithReferer(ctx, pageURL, referer)
+				// High priority: challenge tokens are short-lived, so
+				// the solve re-render must not sit behind queued pages.
+				rr2, rErr := ec.renderWithPriority(ctx, pageURL, referer, types.PriorityHigh)
 				ec.browserPool.SetSettle(ec.opts.Settle)
 				if rErr == nil {
 					ab2, _ := ec.antibot.CheckResponse(
@@ -1150,14 +1234,9 @@ func (ec *EnhancedCloner) processPage(ctx context.Context, pageURL string, depth
 
 		if retry {
 			logutil.Warn("anti-bot event", slog.String("message", msg))
-			select {
-			case <-time.After(delay):
-				ec.enqueuePageWithReferer(pageURL, depth, referer, inScope)
-				return result
-			case <-ctx.Done():
-				result.Error = "cancelled during anti-bot backoff"
-				return result
-			}
+			ec.schedulePageRetry(pageJob{url: pageURL, depth: depth, referer: referer, inScope: inScope}, delay)
+			result.Error = "anti-bot retry scheduled"
+			return result
 		}
 		// If not retrying, continue but record the detection.
 		result.Error = "anti-bot page detected: " + abDesc
@@ -1680,7 +1759,72 @@ func (ec *EnhancedCloner) waitAssetRateLimit(ctx context.Context, assetURL strin
 		}
 	}
 
+	if ec.hostRateExempt(host) {
+		// Whitelisted host: fully exempt, no token bucket.
+		return nil
+	}
+
+	rl := ec.hostLimiter(host)
+	// Propagate IP-segment penalties: hosts sharing a penalized server
+	// (CDN aliases in the same /24 or /64) inherit its minimum
+	// interval. No-op (and DNS-free) until a penalty exists.
+	if ec.ipPenalties != nil {
+		if floor := ec.ipPenalties.segmentFloor(host); floor > 0 {
+			rl.RaiseTo(floor)
+		}
+	}
+	return rl.Wait(ctx)
+}
+
+// hostRateExempt reports whether a host (as it appears in a URL,
+// possibly with a port) is whitelisted for rate-limit exemption.
+func (ec *EnhancedCloner) hostRateExempt(host string) bool {
+	if len(ec.rateWhitelist) == 0 {
+		return false
+	}
+	h := strings.ToLower(host)
+	if _, ok := ec.rateWhitelist[h]; ok {
+		return true
+	}
+	// An entry without a port matches any port on the same hostname.
+	if hp, _, err := net.SplitHostPort(h); err == nil {
+		_, ok := ec.rateWhitelist[hp]
+		return ok
+	}
+	return false
+}
+
+// buildRateWhitelist normalizes whitelist entries into a lookup set:
+// lowercased, trimmed. Entries are matched exactly — an entry with a
+// port only exempts that port ("localhost:3000" ≠ "localhost:8080"),
+// an entry without a port exempts any port ("localhost" matches
+// "localhost:3000"). Returns nil when nothing usable remains, which
+// disables exemption entirely.
+func buildRateWhitelist(entries []string) map[string]struct{} {
+	if len(entries) == 0 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(entries))
+	for _, e := range entries {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e == "" {
+			continue
+		}
+		set[e] = struct{}{}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
+// hostLimiter returns the rate limiter for a host, creating it on first
+// use. The bucket interval comes from CrawlDelay (or robots.txt
+// crawl-delay) when available, otherwise a conservative default
+// (100ms — 10 assets/second per host).
+func (ec *EnhancedCloner) hostLimiter(host string) *RateLimiter {
 	ec.assetRateMu.Lock()
+	defer ec.assetRateMu.Unlock()
 	rl, ok := ec.assetRateLimiters[host]
 	if !ok {
 		var interval time.Duration
@@ -1689,14 +1833,41 @@ func (ec *EnhancedCloner) waitAssetRateLimit(ctx context.Context, assetURL strin
 		} else if ec.robots != nil && ec.robots.CrawlDelayDuration() > 0 {
 			interval = ec.robots.CrawlDelayDuration()
 		} else {
-			interval = 100 * time.Millisecond // 10 assets/second per host.
+			interval = 100 * time.Millisecond
 		}
 		rl = NewRateLimiter(interval)
 		ec.assetRateLimiters[host] = rl
 	}
-	ec.assetRateMu.Unlock()
+	return rl
+}
 
-	return rl.Wait(ctx)
+// penalizeHost widens a host's rate-limit bucket after the server
+// signaled rate limiting (429/503). Each strike doubles the interval,
+// capped at 30s; the slower pace sticks for the rest of the run —
+// polite crawlers stay slow once a host has complained.
+func (ec *EnhancedCloner) penalizeHost(assetURL string, statusCode int) {
+	u, err := url.Parse(assetURL)
+	if err != nil || u.Host == "" {
+		return
+	}
+	if ec.hostRateExempt(u.Host) {
+		// Whitelisted hosts never get penalized.
+		return
+	}
+	newInterval := ec.hostLimiter(u.Host).SlowDown(2, 30*time.Second)
+	logutil.Warn("host signaled rate limit — slowing down assets for this host",
+		slog.String("host", u.Host),
+		slog.Int("status", statusCode),
+		slog.Duration("min_interval", newInterval),
+	)
+
+	// Propagate the penalty to the host's IP segment so sibling hosts
+	// on the same server (CDN aliases) inherit the slower pace.
+	if ec.ipPenalties != nil {
+		if host := u.Hostname(); host != "" {
+			ec.ipPenalties.penalize(host, newInterval)
+		}
+	}
 }
 
 // processAsset downloads and saves a single asset, rewriting CSS references.
@@ -1753,6 +1924,13 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 			case "dns", "network":
 				shouldFallback = true
 			case "http_status":
+				// Rate-limit signals (429, 503) widen this host's
+				// rate-limit bucket so subsequent assets from the
+				// same host back off. 403 is a WAF block, not rate
+				// limiting — no penalty, browser fallback instead.
+				if de.StatusCode == 429 || de.StatusCode == 503 {
+					ec.penalizeHost(assetURL, de.StatusCode)
+				}
 				if de.StatusCode == 403 {
 					shouldFallback = true
 				} else if de.StatusCode != 404 {
@@ -1819,9 +1997,10 @@ func (ec *EnhancedCloner) processAsset(ctx context.Context, assetURL string) err
 				ec.applyAntiBotLevel()
 				logutil.Warn("asset anti-bot escalation", slog.String("url", assetURL), slog.String("description", desc), slog.String("reason", msg))
 				if retry {
-					time.Sleep(delay)
-					ec.wg.Add(1)
-					ec.assetJobs <- assetJob{url: assetURL}
+					// Re-queue after the backoff elapses: the worker
+					// returns immediately instead of sleeping through
+					// the delay.
+					ec.scheduleAssetRetry(assetURL, delay)
 					return nil
 				}
 			}
@@ -2588,13 +2767,36 @@ func (ec *EnhancedCloner) traversalDispatcher(ctx context.Context) {
 		// Wait for pages, stop signal, or context cancellation.
 		select {
 		case <-ctx.Done():
+			// Release the wg counts of stack-resident jobs so
+			// wg.Wait can return; they will never be dispatched.
+			ec.discardPageStack()
 			return
 		case <-ec.dispatcherStop:
+			ec.discardPageStack()
 			return
 		case <-ec.pageReady:
 			// Drain the stack into the pageJobs channel (LIFO → reverse).
 			ec.drainStack(ctx)
 		}
+	}
+}
+
+// discardPageStack drops every job still on the DFS stack, releasing
+// each one's wg count: after cancellation (or a dispatcher stop with a
+// non-empty stack) these jobs can never be dispatched, and a leaked
+// count would block wg.Wait forever. It also marks the dispatcher dead
+// so late stack pushes drop themselves instead of leaking.
+func (ec *EnhancedCloner) discardPageStack() {
+	ec.pageMu.Lock()
+	ec.dispatcherDead = true
+	dropped := 0
+	for len(ec.pageStack) > 0 {
+		ec.pageStack = ec.pageStack[:len(ec.pageStack)-1]
+		dropped++
+	}
+	ec.pageMu.Unlock()
+	for i := 0; i < dropped; i++ {
+		ec.wg.Done()
 	}
 }
 
@@ -2615,6 +2817,9 @@ func (ec *EnhancedCloner) drainStack(ctx context.Context) {
 		select {
 		case ec.pageJobs <- job:
 		case <-ctx.Done():
+			// The popped job will never be sent; release its count.
+			ec.wg.Done()
+			ec.discardPageStack()
 			return
 		}
 	}
@@ -2779,14 +2984,37 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 
 	ec.wg.Add(1)
 
+	// Cancelled mid-enqueue? Release the count instead of dispatching
+	// work the workers would only drain away.
+	if ec.ctx.Err() != nil {
+		ec.wg.Done()
+		return
+	}
+
 	if util.DebugEnabled {
 		logutil.Debug("enqueued page (depth=):", slog.Int("depth", depth), slog.String("url", canonURL))
 	}
 
+	ec.dispatchPageJob(pageJob{url: canonURL, depth: depth, referer: referer, inScope: inScope})
+}
+
+// dispatchPageJob hands a page job to the worker pool: FIFO channel
+// for BFS, LIFO stack for DFS. The caller must have accounted for the
+// job with wg.Add(1) beforehand; the worker (or escape goroutine)
+// that processes it calls the matching wg.Done.
+func (ec *EnhancedCloner) dispatchPageJob(job pageJob) {
 	// BFS vs DFS: enqueue to channel (FIFO) or push to stack (LIFO).
 	if ec.opts.Traversal == TraversalDFS {
 		ec.pageMu.Lock()
-		ec.pageStack = append(ec.pageStack, pageJob{url: canonURL, depth: depth, referer: referer, inScope: inScope})
+		if ec.dispatcherDead {
+			// Dispatcher already swept the stack and exited; nobody
+			// would ever dispatch this job. Drop it here so its wg
+			// count does not leak.
+			ec.pageMu.Unlock()
+			ec.wg.Done()
+			return
+		}
+		ec.pageStack = append(ec.pageStack, job)
 		ec.pageMu.Unlock()
 		// Signal dispatcher that new pages are available.
 		select {
@@ -2796,7 +3024,6 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 	} else {
 		// Non-blocking send: if channel is full, process in a goroutine
 		// to avoid deadlock when all workers are busy discovering new pages.
-		job := pageJob{url: canonURL, depth: depth, referer: referer, inScope: inScope}
 		select {
 		case ec.pageJobs <- job:
 		default:
@@ -2816,6 +3043,94 @@ func (ec *EnhancedCloner) enqueuePageWithReferer(pageURL string, depth int, refe
 				ec.wg.Done()
 			}(job)
 		}
+	}
+}
+
+// schedulePageRetry re-queues a page once its anti-bot backoff elapses.
+//
+// The retry is a task-graph node depending on a backoff node: the
+// page worker returns immediately instead of sleeping through the
+// delay (previously the backoff occupied a worker slot for its whole
+// duration), and the re-dispatch bypasses the frontier dedup — the
+// failed attempt already holds the seen slot, so routing through
+// enqueuePageWithReferer silently dropped every page retry. Retries
+// stay bounded per URL by the antibot escalator's MaxRetries.
+func (ec *EnhancedCloner) schedulePageRetry(job pageJob, delay time.Duration) {
+	key := PageKey(ec.host, job.url)
+	attempt := ec.antibot.Escalator.RetryCount(job.url)
+	backoffKey := fmt.Sprintf("backoff:page:%s:%d", key, attempt)
+	retryKey := fmt.Sprintf("retry:page:%s:%d", key, attempt)
+
+	// Hold a count across the backoff window and the retried attempt;
+	// the retried job's worker (or escape goroutine) releases it.
+	ec.wg.Add(1)
+
+	if err := ec.taskGraph.Declare(backoffKey); err != nil {
+		ec.wg.Done()
+		logutil.Warn("page retry: graph declare failed", slog.String("url", job.url), slog.Any("error", err))
+		return
+	}
+	// Resolve the backoff when the timer fires, or immediately with
+	// the cancel error so the retry fn can release its wg count.
+	go func() {
+		select {
+		case <-time.After(delay):
+			ec.taskGraph.Resolve(backoffKey, nil)
+		case <-ec.ctx.Done():
+			ec.taskGraph.Resolve(backoffKey, ec.ctx.Err())
+		}
+	}()
+
+	if err := ec.taskGraph.Submit(retryKey, func(depErr error) error {
+		if depErr != nil {
+			// Cancelled during backoff.
+			ec.wg.Done()
+			return depErr
+		}
+		ec.dispatchPageJob(job)
+		return nil
+	}, backoffKey); err != nil {
+		ec.wg.Done()
+		logutil.Warn("page retry: graph submit failed", slog.String("url", job.url), slog.Any("error", err))
+	}
+}
+
+// scheduleAssetRetry re-queues an asset after its anti-bot backoff,
+// freeing the asset worker for the delay (it used to time.Sleep in
+// the worker). Same task-graph shape as page retries.
+func (ec *EnhancedCloner) scheduleAssetRetry(assetURL string, delay time.Duration) {
+	attempt := ec.antibot.Escalator.RetryCount(assetURL)
+	backoffKey := fmt.Sprintf("backoff:asset:%s:%d", assetURL, attempt)
+	retryKey := fmt.Sprintf("retry:asset:%s:%d", assetURL, attempt)
+
+	ec.wg.Add(1)
+
+	if err := ec.taskGraph.Declare(backoffKey); err != nil {
+		ec.wg.Done()
+		logutil.Warn("asset retry: graph declare failed", slog.String("url", assetURL), slog.Any("error", err))
+		return
+	}
+	go func() {
+		select {
+		case <-time.After(delay):
+			ec.taskGraph.Resolve(backoffKey, nil)
+		case <-ec.ctx.Done():
+			ec.taskGraph.Resolve(backoffKey, ec.ctx.Err())
+		}
+	}()
+
+	if err := ec.taskGraph.Submit(retryKey, func(depErr error) error {
+		if depErr != nil {
+			ec.wg.Done()
+			return depErr
+		}
+		// Blocking send: workers drain the channel even on cancel, so
+		// this always completes (matching the previous inline retry).
+		ec.assetJobs <- assetJob{url: assetURL}
+		return nil
+	}, backoffKey); err != nil {
+		ec.wg.Done()
+		logutil.Warn("asset retry: graph submit failed", slog.String("url", assetURL), slog.Any("error", err))
 	}
 }
 
@@ -2979,7 +3294,7 @@ func (ec *EnhancedCloner) applyAntiBotLevel() {
 	if level >= antibot.LevelAggressive {
 		rotatedUA := ec.antibot.Escalator.RotateUserAgent()
 		ec.assetDownloader.UserAgent = rotatedUA.UserAgent
-		if pool, ok := ec.browserPool.(interface{ RotateUA() }); ok {
+		if pool, ok := ec.browserPool.(types.UARotator); ok {
 			pool.RotateUA()
 		}
 		logutil.Info("UA rotated for aggressive mode")

@@ -43,9 +43,9 @@ import (
 func TestE2E_Limits_Windows_JobObjectChainDoesNotBreakCmd(t *testing.T) {
 	s := NewSandboxShellServiceWithLimits(
 		sandbox.ResourceLimits{
-			MaxCPUSeconds:   30, // 30s — never trips for echo
-			MaxMemoryBytes:  1 << 30, // 1 GiB — never trips for cmd
-			MaxProcesses:    64, // generous — never trips
+			MaxCPUSeconds:  30,      // 30s — never trips for echo
+			MaxMemoryBytes: 1 << 30, // 1 GiB — never trips for cmd
+			MaxProcesses:   64,      // generous — never trips
 		},
 		true, // KillOnParentExit — also exercises assign path
 	)

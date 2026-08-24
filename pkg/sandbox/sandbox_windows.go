@@ -36,8 +36,8 @@ func probeWindows() ProbeResult {
 }
 
 var (
-	lowIL    *windows.SID
-	lowILErr error
+	lowIL     *windows.SID
+	lowILErr  error
 	lowILOnce sync.Once
 )
 

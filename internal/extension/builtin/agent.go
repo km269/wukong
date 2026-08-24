@@ -11,9 +11,9 @@ import (
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/agent/llmagent"
-	agenttool "trpc.group/trpc-go/trpc-agent-go/tool/agent"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
+	agenttool "trpc.group/trpc-go/trpc-agent-go/tool/agent"
 )
 
 // AgentToolSet provides wrapped sub-agents as tools.

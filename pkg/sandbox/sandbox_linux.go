@@ -82,9 +82,9 @@ type landlockPathBeneathAttr struct {
 }
 
 type helperConfig struct {
-	WritableDirs     []string        `json:"w,omitempty"`
-	Limits           ResourceLimits  `json:"l,omitempty"`
-	KillOnParentExit bool            `json:"k,omitempty"`
+	WritableDirs     []string       `json:"w,omitempty"`
+	Limits           ResourceLimits `json:"l,omitempty"`
+	KillOnParentExit bool           `json:"k,omitempty"`
 }
 
 func abi() int {
@@ -144,7 +144,7 @@ func probeLinux() ProbeResult {
 func applySandbox(cmd *exec.Cmd, ctx *sandboxCtx) error {
 	cfg := helperConfig{
 		WritableDirs:     ctx.writable,
-		Limits:            ctx.limits,
+		Limits:           ctx.limits,
 		KillOnParentExit: ctx.killOnParentExit,
 	}
 	cfgJSON, err := json.Marshal(cfg)

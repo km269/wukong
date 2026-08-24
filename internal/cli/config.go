@@ -74,29 +74,41 @@ func runConfigValidate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Load configuration
+	// Load configuration and run the full validation rules —
+	// the same path as startup (bootstrapSession →
+	// loader.LoadAndValidate), so todo/mcp_server/sandbox/port
+	// conflict and all other fatal checks in validate.go apply
+	// here too.
 	loader, err := config.NewLoader(configPath)
 	if err != nil {
 		fmt.Printf("✗ failed to create config loader: %v\n", err)
 		return fmt.Errorf("config load: %w", err)
 	}
 
-	wukongCfg, err := loader.Load()
+	wukongCfg, err := loader.LoadAndValidate()
 	if err != nil {
-		fmt.Printf("✗ configuration parse error: %v\n", err)
-		return fmt.Errorf("config parse: %w", err)
+		fmt.Printf("✗ validation failed: %v\n", err)
+		return err // already wrapped with "config validation:" by LoadAndValidate
 	}
 
-	errors := runFullValidation(wukongCfg)
+	// Surface non-fatal warnings the same way startup does
+	// (these do not block, but indicate suboptimal or risky
+	// configuration).
+	warnings := wukongCfg.Warnings()
+	if wukongCfg.DefaultProvider == "" {
+		warnings = append(warnings,
+			"default_provider is not set — "+
+				"use --provider flag or set in config.yaml")
+	}
 
 	fmt.Println()
 
-	if len(errors) > 0 {
-		fmt.Printf("✗ validation failed with %d issue(s):\n", len(errors))
-		for i, e := range errors {
-			fmt.Printf("  %d. %s\n", i+1, e)
+	if len(warnings) > 0 {
+		fmt.Printf("⚠ configuration is valid with %d warning(s):\n", len(warnings))
+		for i, w := range warnings {
+			fmt.Printf("  %d. %s\n", i+1, w)
 		}
-		return fmt.Errorf("configuration validation failed: %d issue(s)", len(errors))
+		return nil
 	}
 
 	fmt.Println("✓ configuration is valid")

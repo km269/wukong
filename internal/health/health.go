@@ -40,11 +40,11 @@ type ComponentHealth struct {
 
 // CheckResult is the overall health check result.
 type CheckResult struct {
-	Status     Status             `json:"status"`
-	Version    string             `json:"version"`
-	Uptime     string             `json:"uptime"`
-	Components []ComponentHealth  `json:"components"`
-	Timestamp  time.Time          `json:"timestamp"`
+	Status     Status            `json:"status"`
+	Version    string            `json:"version"`
+	Uptime     string            `json:"uptime"`
+	Components []ComponentHealth `json:"components"`
+	Timestamp  time.Time         `json:"timestamp"`
 }
 
 // Checker is a function that performs a health check on a component.

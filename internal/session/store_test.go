@@ -9,9 +9,9 @@ import (
 
 func TestNewSessionService_MemoryBackend(t *testing.T) {
 	cfg := &config.SessionConfig{
-		Backend:       "memory",
-		EventLimit:    100,
-		TTL:           0,
+		Backend:    "memory",
+		EventLimit: 100,
+		TTL:        0,
 	}
 	svc, err := NewSessionService(cfg, nil)
 	if err != nil {
@@ -94,9 +94,9 @@ func TestNewSessionService_SQLiteWithPool(t *testing.T) {
 
 func TestNewSessionService_WithTTL(t *testing.T) {
 	cfg := &config.SessionConfig{
-		Backend:       "memory",
-		EventLimit:    200,
-		TTL:           3600 * 1000000000, // 1 hour in ns
+		Backend:    "memory",
+		EventLimit: 200,
+		TTL:        3600 * 1000000000, // 1 hour in ns
 	}
 	svc, err := NewSessionService(cfg, nil)
 	if err != nil {

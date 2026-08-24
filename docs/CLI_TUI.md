@@ -47,13 +47,14 @@ internal/cli/                               # CLI 命令包（29 源文件 + shu
   ├── session.go                           # 会话命令 + bootstrapSession() 启动引擎
   ├── run.go                               # 单发/对话模式 + resolveInput()
   ├── server.go                            # 无头服务器模式
-  ├── config.go                            # config validate/show（12 项校验）
+  ├── config.go                            # config validate/show（完整校验走 LoadAndValidate）
   ├── configure.go                         # 交互式 5 步配置向导
   ├── init.go                              # 项目初始化
   ├── health.go                            # 健康检查 + collectSystemInfo()
   ├── env.go                               # 环境信息 + buildEnvInfo()
   ├── version.go                           # 版本输出
   ├── extension.go                         # MCP 扩展管理
+  ├── approval_adapter.go                  # ACP 人工审批适配（security.ApprovalBroker ↔ server.ApprovalSink）
   ├── shutdown.go                          # 统一幂等关闭（sync.Once + 15s 看门狗）
   ├── *_mgmt.go                            # 各子系统管理命令（11 个文件）
   └── tui/                                 # Bubble Tea TUI 子包（3 源文件）
@@ -116,7 +117,7 @@ func main() {
 
 ### 2.2 根命令 (root.go)
 
-根命令定义在 [root.go](file:///e:/myVibeCoding/km269/wukong/internal/cli/root.go)：
+根命令定义在 [root.go](../internal/cli/root.go)：
 
 ```go
 func newRootCmd() *cobra.Command {
@@ -200,7 +201,7 @@ wukong
 ├── recipe                     # 配方管理
 ├── knowledge                  # 知识库管理
 ├── ard                        # ARD 资源发现（status/catalog）
-├── evolution                  # 进化引擎（status/log/reset）
+├── evolution                  # 进化引擎（status/history/versions/rollback/diff/log）
 ├── cortex                     # CortexDB 管理（status）
 ├── todo                       # 任务管理
 ├── docs                       # 打开文档（浏览器）
@@ -233,7 +234,7 @@ wukong
 
 ### 4.1 `run` — 单发/对话模式
 
-定义在 [run.go](file:///e:/myVibeCoding/km269/wukong/internal/cli/run.go)，用于终端管道集成和多轮 Shell 对话。
+定义在 [run.go](../internal/cli/run.go)，用于终端管道集成和多轮 Shell 对话。
 
 **标志表：**
 
@@ -269,7 +270,7 @@ wukong
 
 ### 4.2 `session` — 交互会话（默认模式）
 
-定义在 [session.go](file:///e:/myVibeCoding/km269/wukong/internal/cli/session.go)，是 `wukong` 的默认行为。
+定义在 [session.go](../internal/cli/session.go)，是 `wukong` 的默认行为。
 
 **标志表：**
 
@@ -298,7 +299,7 @@ wukong session [flags]              # 启动 TUI
 
 ### 4.3 `server` — 无头服务器模式
 
-定义在 [server.go](file:///e:/myVibeCoding/km269/wukong/internal/cli/server.go)，启动所有协议端点，适合 API 集成和远程调用。
+定义在 [server.go](../internal/cli/server.go)，启动所有协议端点，适合 API 集成和远程调用。
 
 - 暴露端点：A2A、ACP、AG-UI、ACP-MCP、MCP Server
 - 健康检查 HTTP 端口 `:8086`：`/healthz`（综合）、`/readyz`（就绪）、`/livez`（存活）
@@ -307,28 +308,17 @@ wukong session [flags]              # 启动 TUI
 
 ### 4.4 `config` — 配置管理
 
-定义在 [config.go](file:///e:/myVibeCoding/km269/wukong/internal/cli/config.go)。
+定义在 [config.go](../internal/cli/config.go)。
 
-**`config validate` — 12 项校验（`runFullValidation()`）：**
+**`config validate` — 与启动路径相同的完整校验：**
 
-| # | 校验项 | 失败后果 |
-|---|--------|----------|
-| 1 | `default_provider` 必须设置 | 错误 |
-| 2 | default_provider 必须存在于 providers 列表 | 错误 |
-| 3 | Provider 必须有 model 配置 | 警告 |
-| 4 | 云端 Provider 必须有 API Key | 警告 |
-| 5 | Provider type 必须有效（7 种：openai/anthropic/google/deepseek/ollama/lmstudio/vllm + acp） | 错误 |
-| 6 | Planner 类型校验（builtin/react） | 警告 |
-| 7 | lightweight_provider 回退链检查 | 警告 |
-| 8 | Session backend 校验（sqlite/memory/redis） | 错误 |
-| 9 | Memory backend 校验（sqlite/redis） | 错误 |
-| 10 | Permission mode 校验（auto/smart/manual/chat_only） | 错误 |
-| 11 | Workflow mode 校验（10 种模式） | 错误 |
-| 12 | Artifact backend 校验（inmemory/cos） | 错误 |
+调用 `loader.LoadAndValidate()`（与 `bootstrapSession()` 同一入口），执行 `internal/config/validate.go` 的全部致命规则（todo/mcp_server/sandbox/端口冲突等，完整清单见 [CONFIG.md §3](./CONFIG.md#3-配置验证)），随后列出全部非致命警告（`Warnings()` + default_provider 缺失提示）。致命错误退出码 1；仅有警告时退出码 0。
+
+> 另有 12 项轻量校验函数 `runFullValidation()`（provider/planner/后端/permission_mode/workflow.mode/artifact），仅供 `bench` 与 `health` 命令做咨询性检查使用。
 
 ### 4.5 `configure` — 交互式配置向导
 
-定义在 [configure.go](file:///e:/myVibeCoding/km269/wukong/internal/cli/configure.go)，引导用户完成 5 步配置：
+定义在 [configure.go](../internal/cli/configure.go)，引导用户完成 5 步配置：
 
 1. **Provider** — 选择默认 LLM 提供商
 2. **Providers** — 配置多个 Provider 详情
@@ -338,7 +328,7 @@ wukong session [flags]              # 启动 TUI
 
 ### 4.6 `init` — 项目初始化
 
-定义在 [init.go](file:///e:/myVibeCoding/km269/wukong/internal/cli/init.go)，创建项目目录结构：
+定义在 [init.go](../internal/cli/init.go)，创建项目目录结构：
 
 ```
 .wukong/
@@ -354,12 +344,12 @@ config.yaml                   # 示例配置（仅在不存在时创建）
 
 ### 4.7 `health` 与 `env`
 
-- `health [--json]`（[health.go](file:///e:/myVibeCoding/km269/wukong/internal/cli/health.go)）：`collectSystemInfo()` 收集系统信息，`printHealthTable()` 或 `printHealthJSON()` 输出。
-- `env [--json]`（[env.go](file:///e:/myVibeCoding/km269/wukong/internal/cli/env.go)）：`buildEnvInfo()` 构建环境信息。
+- `health [--json]`（[health.go](../internal/cli/health.go)）：`collectSystemInfo()` 收集系统信息，`printHealthTable()` 或 `printHealthJSON()` 输出。
+- `env [--json]`（[env.go](../internal/cli/env.go)）：`buildEnvInfo()` 构建环境信息。
 
 ### 4.8 `apps` — 应用管理
 
-定义在 [apps_mgmt.go](file:///e:/myVibeCoding/km269/wukong/internal/cli/apps_mgmt.go)，**11 个子命令**：
+定义在 [apps_mgmt.go](../internal/cli/apps_mgmt.go)，**11 个子命令**：
 
 ```
 wukong apps
@@ -380,20 +370,25 @@ wukong apps
 
 | 命令 | 对应文件 | 子命令 |
 |------|----------|--------|
-| `evolution` | evolution_mgmt.go | status [--json] / log [--json] / reset |
+| `evolution` | evolution_mgmt.go | status / history \<skill-name\> [--limit] / versions \<skill-name\> / rollback \<skill-name\> \<version\> [--force] / diff \<skill-name\> \<v1\> [v2] / log \<skill-name\> [--limit] |
 | `ard` | ard_mgmt.go | status / catalog |
 | `cortex` | cortex_mgmt.go | status |
 | `skill` | skill_mgmt.go | list / show |
-| `memory` | memory_mgmt.go | 记忆 CRUD |
+| `memory` | memory_mgmt.go | list / search / delete / clear |
+| `provider` | provider_mgmt.go | list / test |
+| `recipe` | recipe_mgmt.go | list / show / validate |
+| `knowledge` | knowledge_mgmt.go | status |
+| `todo` | todo_mgmt.go | status |
+| `project` | project.go | clear（清空全部已追踪项目记录；父命令为交互式项目选择） |
 | `search tune` | search_tune.go | validate / plan / run / report / compare |
 
-**evolution status 输出字段：** `enabled`、`cooldown_period`、`max_patches_per_day`、`min_confidence`、`max_patch_size`、`export_json`、`total_patches_applied`、`total_skills_evolved`、`last_evolution_time`。
+**evolution status 输出分组：** `Status`、`[Analysis]`（auto_patch / min_confidence / analysis_timeout / analysis_provider / analysis_model）、`[Rate Limiting]`（cooldown_period / max_patches_per_day）、`[Version Control]`（max_versions_kept / max_patch_size）、`[Integration]`（export_json）、`[Problem Types Detected]`。
 
 ---
 
 ## 5. Bootstrap 启动引擎
 
-`bootstrapSession()` 是所有交互模式（`session`、`server`、`run`）共享的启动引擎，位于 [session.go](file:///e:/myVibeCoding/km269/wukong/internal/cli/session.go)，约 **1400 行**。
+`bootstrapSession()` 是所有交互模式（`session`、`server`、`run`）共享的启动引擎，位于 [session.go](../internal/cli/session.go)，约 **1400 行**。
 
 ### 5.1 签名
 
@@ -521,7 +516,7 @@ applyOverrides(wukongCfg, providerName, modelName, temperature, maxTokens, noStr
 
 ## 6. TUI 架构（Bubble Tea）
 
-TUI 位于 [internal/cli/tui/](file:///e:/myVibeCoding/km269/wukong/internal/cli/tui/)，采用 Elm 架构（Model-View-Update）。
+TUI 位于 [internal/cli/tui/](../internal/cli/tui/)，采用 Elm 架构（Model-View-Update）。
 
 ### 6.1 Elm 架构
 
@@ -542,7 +537,7 @@ TUI 位于 [internal/cli/tui/](file:///e:/myVibeCoding/km269/wukong/internal/cli
 
 ### 6.2 Model 结构（model.go）
 
-定义在 [model.go](file:///e:/myVibeCoding/km269/wukong/internal/cli/tui/model.go)，约 **46 个字段**：
+定义在 [model.go](../internal/cli/tui/model.go)，约 **46 个字段**：
 
 ```go
 type Model struct {
@@ -682,7 +677,7 @@ m.viewport.Height = availableHeight
 
 ### 6.5 配色方案与多主题（view.go）
 
-定义在 [view.go](file:///e:/myVibeCoding/km269/wukong/internal/cli/tui/view.go)。
+定义在 [view.go](../internal/cli/tui/view.go)。
 
 **ThemeType 枚举：**
 
@@ -786,7 +781,7 @@ func StartTUI(cfg *config.WukongConfig, loop *agent.CoreLoop,
 
 ### 7.1 架构概览
 
-TUI 的流式传输通过 **Goroutine + Channel** 桥接模式实现，定义在 [update.go](file:///e:/myVibeCoding/km269/wukong/internal/cli/tui/update.go)：
+TUI 的流式传输通过 **Goroutine + Channel** 桥接模式实现，定义在 [update.go](../internal/cli/tui/update.go)：
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -936,7 +931,7 @@ case streamEndMsg:
 
 ### 8.1 run 命令输入优先级
 
-`resolveInput()`（[run.go](file:///e:/myVibeCoding/km269/wukong/internal/cli/run.go)）按优先级确定 prompt 文本：
+`resolveInput()`（[run.go](../internal/cli/run.go)）按优先级确定 prompt 文本：
 
 ```
 1. --message / -m 标志         （最高优先级）
@@ -988,7 +983,7 @@ func resolveInput(flagMsg string, args []string) string {
 
 ## 9. 优雅关闭与看门狗
 
-所有模式退出时委托 `shutdownBootstrap()`（[shutdown.go](file:///e:/myVibeCoding/km269/wukong/internal/cli/shutdown.go)），由 `sync.Once` 保护（幂等）。
+所有模式退出时委托 `shutdownBootstrap()`（[shutdown.go](../internal/cli/shutdown.go)），由 `sync.Once` 保护（幂等）。
 
 ### 9.1 15 秒硬看门狗
 
@@ -1025,20 +1020,23 @@ best-effort：个别错误被记录但不中断序列。
 
 **CoreLoop.Close() 内部清理链：**
 
+`Close()` 先以各 5s 超时（`waitWithTimeout`）等待 `runWg`（进行中 RunStream 的同步后置写入）与 `bgWg`（后台协程）退出，再执行 `closeFn`（[loop.go](../internal/agent/loop.go)）：
+
 ```
-EvolutionClose()  → 停止进化引擎 Worker
-MemoryClose()     → 停止记忆 auto-extract Worker
-runner.Stop()     → 停止 Agent Runner
-session flush     → 刷新会话写入
-TelemetryShutdown → flush + 关闭 OpenTelemetry
-DBPoolClose       → 关闭共享数据库连接池（WAL checkpoint）
+runner.Close()           → 停止 Agent Runner（最先，阻止新任务产生）
+EvolutionClose()         → 停止进化引擎后台分析 Worker
+MemoryClose()            → 停止记忆提取 Worker（等待 in-flight 任务，最长 5s）
+SessionService.Close()   → 停止会话摘要 Worker、释放会话资源
+GraphFlowService.Close() → 停止知识图谱抽取引擎
+TelemetryShutdown        → flush + 关闭 OpenTelemetry / Langfuse（10s 超时）
+DBPoolClose              → 最后关闭共享数据库连接池（PRAGMA wal_checkpoint(TRUNCATE)）
 ```
 
 ---
 
 ## 10. 版本与构建信息
 
-版本信息定义在 [internal/util/version.go](file:///e:/myVibeCoding/km269/wukong/internal/util/version.go)，通过 ldflags 在构建时注入：
+版本信息定义在 [internal/util/version.go](../internal/util/version.go)，通过 ldflags 在构建时注入：
 
 ```go
 package util
@@ -1050,7 +1048,7 @@ var (
 )
 ```
 
-Makefile 中的 ldflags（[Makefile](file:///e:/myVibeCoding/km269/wukong/Makefile)）：
+Makefile 中的 ldflags（[Makefile](../Makefile)）：
 
 ```makefile
 LDFLAGS := -s -w \
@@ -1099,4 +1097,4 @@ EvolutionTracker 作为 Runner 级别插件，通过事件监听异步捕获执�
 
 ---
 
-> **版本**: v0.2.9 | **最后更新**: 2026-08-11 | **CLI 源文件**: 29 + TUI 3 = 32 | **顶层命令**: 30
+> **版本**: v0.2.9 | **最后更新**: 2026-08-23 | **CLI 源文件**: 29 + TUI 3 = 32 | **顶层命令**: 30

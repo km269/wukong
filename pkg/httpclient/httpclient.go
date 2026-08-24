@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -164,6 +167,28 @@ func New(opts Options) *Client {
 		}
 		transport.TLSClientConfig = tlsCfg
 	}
+
+	// Construction-time TLS policy + timeout summary: the knobs that
+	// govern whether a slow handshake counts as a "connection timeout"
+	// (client timeout vs dial timeout vs TLS handshake timeout), so
+	// log-only triage of hanging requests starts from known values.
+	tlsMode := "verify"
+	if opts.InsecureSkipVerify {
+		tlsMode = "insecure"
+	}
+	if opts.RootCAsPath != "" {
+		tlsMode += "+custom_ca"
+	}
+	logutil.Debug("[httpclient] client configured",
+		slog.String("tls_mode", tlsMode),
+		slog.String("root_cas", opts.RootCAsPath),
+		slog.Duration("client_timeout", opts.Timeout),
+		slog.Duration("dial_timeout", 30*time.Second),
+		slog.Duration("tls_handshake_timeout", opts.TLSHandshakeTimeout),
+		slog.Int("max_retries", opts.MaxRetries),
+		slog.Duration("retry_delay", opts.RetryDelay),
+		slog.Bool("force_ipv4", opts.ForceIPv4),
+	)
 
 	// buildDialer constructs a net.Dialer with standard settings.
 	buildDialer := func() *net.Dialer {
@@ -467,21 +492,22 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		c.metrics.successCount++
 		c.mu.Unlock()
 
-		if resp.StatusCode >= 500 && attempt < c.opts.MaxRetries {
-			resp.Body.Close()
-			c.mu.Lock()
-			c.metrics.totalRetries++
-			c.metrics.serverErrors++
-			c.mu.Unlock()
-			delay := time.Duration(attempt+1) * c.opts.RetryDelay
-			logutil.Warn("[httpclient] server error, retrying",
-				slog.Int("status", resp.StatusCode),
-				slog.Int("attempt", attempt+1),
-				slog.String("url", req.URL.String()),
-				slog.Duration("delay", delay),
-			)
-			time.Sleep(delay)
-			continue
+		if attempt < c.opts.MaxRetries {
+			if delay, retry := c.retryStatusDelay(resp, attempt); retry {
+				resp.Body.Close()
+				c.mu.Lock()
+				c.metrics.totalRetries++
+				c.metrics.serverErrors++
+				c.mu.Unlock()
+				logutil.Warn("[httpclient] server error, retrying",
+					slog.Int("status", resp.StatusCode),
+					slog.Int("attempt", attempt+1),
+					slog.String("url", req.URL.String()),
+					slog.Duration("delay", delay),
+				)
+				time.Sleep(delay)
+				continue
+			}
 		}
 
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
@@ -513,6 +539,39 @@ func (c *Client) Get(url string) (*http.Response, error) {
 		return nil, err
 	}
 	return c.Do(req)
+}
+
+// DoWithTimeout performs req using the shared connection pool but with
+// a per-request timeout applied via context deadline. The deadline is
+// advisory for the body read: the transport returns as soon as the
+// headers arrive, and the response body is wired to abort if read
+// after the deadline passes. The context is released when the body is
+// closed.
+func (c *Client) DoWithTimeout(req *http.Request, timeout time.Duration) (*http.Response, error) {
+	if timeout <= 0 || timeout >= c.Timeout {
+		return c.Do(req)
+	}
+	ctx, cancel := context.WithTimeout(req.Context(), timeout)
+	resp, err := c.Do(req.WithContext(ctx))
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
+	return resp, nil
+}
+
+// cancelOnCloseBody releases the per-request context timer when the
+// body is closed, so short-timeout requests cannot leak timers.
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (b *cancelOnCloseBody) Close() error {
+	b.once.Do(b.cancel)
+	return b.ReadCloser.Close()
 }
 
 func (c *Client) GetWithContext(ctx context.Context, url string) (*http.Response, error) {
@@ -565,6 +624,83 @@ func (c *Client) shouldRetry(err error) bool {
 		strings.Contains(errStr, "reset by peer") ||
 		strings.Contains(errStr, "broken pipe") ||
 		strings.Contains(errStr, "i/o timeout")
+}
+
+// retryBackoff returns the delay before retry attempt (0-based) with
+// equal jitter applied to the linear base ((attempt+1) * RetryDelay).
+// Without jitter, concurrent clients that fail simultaneously would
+// retry at exactly the same instants — a thundering herd against an
+// already-struggling server. Equal jitter (delay = base/2 +
+// rand[0, base/2)) keeps the expected delay at 75% of the linear base
+// while spreading retries across the interval, and never delays less
+// than base/2.
+func (c *Client) retryBackoff(attempt int) time.Duration {
+	base := time.Duration(attempt+1) * c.opts.RetryDelay
+	half := base / 2
+	if half <= 0 {
+		return base
+	}
+	return half + time.Duration(rand.Int64N(int64(half)))
+}
+
+// retryStatusDelay decides whether an HTTP response warrants a retry
+// and returns the delay to wait. It retries 429 and 5xx responses,
+// honoring a Retry-After header when the server provides one (with a
+// small jitter on top so concurrent clients that received the same
+// value do not re-align on one instant). A Retry-After longer than
+// the client's own timeout returns ok=false: blocking that long is
+// pointless, so the response is surfaced to the caller instead.
+func (c *Client) retryStatusDelay(resp *http.Response, attempt int) (time.Duration, bool) {
+	if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
+		return 0, false
+	}
+
+	delay := c.retryBackoff(attempt)
+	if ra := parseRetryAfter(resp.Header.Get("Retry-After")); ra > 0 {
+		if ra > c.opts.Timeout {
+			return 0, false
+		}
+		if withJitter := ra + retryAfterJitter(ra); withJitter > delay {
+			delay = withJitter
+		}
+	}
+	return delay, true
+}
+
+// retryAfterJitter spreads concurrent clients that received the same
+// Retry-After value: 10% of the wait, capped at 1s so short waits
+// stay short. Never negative; 0 for tiny values.
+func retryAfterJitter(ra time.Duration) time.Duration {
+	jitterCap := ra / 10
+	if jitterCap > time.Second {
+		jitterCap = time.Second
+	}
+	if jitterCap <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int64N(int64(jitterCap)))
+}
+
+// parseRetryAfter parses a Retry-After response header. The value may
+// be delay-seconds ("120") or an HTTP-date ("Wed, 21 Oct 2015
+// 07:28:00 GMT"). Returns 0 when absent, in the past, or unparseable.
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs <= 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 func (c *Client) categorizeError(err error) ErrorCategory {

@@ -270,7 +270,7 @@ func newExtensionListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List all registered extensions",
 		Long:  `List all registered MCP extensions with their status and details.`,
-		RunE: runExtensionList,
+		RunE:  runExtensionList,
 	}
 	return cmd
 }

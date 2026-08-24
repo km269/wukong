@@ -131,8 +131,8 @@ func TestGetDefaultGenerationConfig(t *testing.T) {
 func TestGetDefaultGenerationConfig_ZeroValues(t *testing.T) {
 	cfg := &config.AgentConfig{
 		Streaming:   false,
-		MaxTokens:   0,     // zero means not set
-		Temperature: 0.0,   // zero means not set
+		MaxTokens:   0,   // zero means not set
+		Temperature: 0.0, // zero means not set
 	}
 
 	gc := GetDefaultGenerationConfig(cfg)

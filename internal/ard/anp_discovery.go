@@ -3,8 +3,9 @@
 // and other ANP-compatible tooling.
 //
 // Endpoints:
-//   GET /.well-known/agent-descriptions — CollectionPage with all agents
-//   GET /agents/{name}/ad.json           — Per-agent ADP document
+//
+//	GET /.well-known/agent-descriptions — CollectionPage with all agents
+//	GET /agents/{name}/ad.json           — Per-agent ADP document
 package ard
 
 import (
@@ -195,8 +196,8 @@ func (h *ANPDiscoveryHandler) buildCollectionPage(
 		agentName := urlize(entry.DisplayName)
 
 		item := CollectionItem{
-			Type:    "ad:AgentDescription",
-			Name:    entry.DisplayName,
+			Type: "ad:AgentDescription",
+			Name: entry.DisplayName,
 			ID: fmt.Sprintf(
 				"%s/agents/%s/ad.json",
 				h.baseURL, agentName,
@@ -260,7 +261,7 @@ func (h *ANPDiscoveryHandler) adpFromCatalogEntry(
 	doc := &ADPDocument{
 		ProtocolType:    ANPProtocolType,
 		ProtocolVersion: ANPProtocolVersion,
-		Type:           "AgentDescription",
+		Type:            "AgentDescription",
 		URL: fmt.Sprintf(
 			"%s/agents/%s/ad.json",
 			h.baseURL, urlize(entry.DisplayName),

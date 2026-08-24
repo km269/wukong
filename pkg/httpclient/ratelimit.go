@@ -10,11 +10,11 @@ import (
 )
 
 type RateLimiter struct {
-	mu          sync.Mutex
-	tokens      float64
-	maxTokens   float64
-	refillRate  float64
-	lastRefill  time.Time
+	mu           sync.Mutex
+	tokens       float64
+	maxTokens    float64
+	refillRate   float64
+	lastRefill   time.Time
 	blockedHosts map[string]time.Time
 }
 

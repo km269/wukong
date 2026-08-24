@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/km269/wukong/pkg/httpclient"
 	"trpc.group/trpc-go/trpc-agent-go/tool"
@@ -41,7 +40,7 @@ func NewSearXNGTool(baseURL string, apiKey string) tool.Tool {
 	st := &searxngTool{
 		baseURL:    baseURL,
 		apiKey:     apiKey,
-		httpClient: newSearchHTTPClient(15 * time.Second),
+		httpClient: searchHTTPClient(),
 	}
 	return function.NewFunctionTool(
 		st.search,
@@ -93,7 +92,7 @@ func (s *searxngTool) search(
 		httpReq.Header.Set("X-Searxng-API-Key", s.apiKey)
 	}
 
-	resp, err := s.httpClient.Do(httpReq)
+	resp, err := s.httpClient.DoWithTimeout(httpReq, searchTimeoutAPI)
 	if err != nil {
 		return searxngSearchRsp{
 			Success: false,

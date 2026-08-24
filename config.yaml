@@ -430,7 +430,6 @@ apps:
     scope_prefix: ""
     workers: 4
     asset_workers: 8
-    browser_pages: 4
     timeout: 60                    # seconds — page navigation deadline
     render_timeout: 30             # seconds — single render wait
     settle: 1500                   # milliseconds — network idle wait
@@ -440,6 +439,10 @@ apps:
     max_asset_bytes: 52428800
     respect_robots: true
     crawl_delay: 0                 # milliseconds — delay between requests
+    rate_limit_whitelist: []       # hosts exempt from asset rate limiting (trusted CDN/intranet/dev servers; skip per-host token bucket + 429/503 slowdown; portless entry matches any port)
+    rate_limit_ip_segment: true    # propagate 429/503 penalties across hosts sharing an IP segment (CDN aliases); DNS consulted only after a penalty
+    rate_limit_ip_prefix_v4: 24    # IPv4 segment prefix length
+    rate_limit_ip_prefix_v6: 64    # IPv6 segment prefix length
     no_sitemap: false
     dedup_content: true
     mobile_readable: true

@@ -29,10 +29,10 @@
 
 | 依赖 | 最低版本 | 说明 |
 |------|----------|------|
-| **Go** | **1.26** | 编译与测试必需（见 [go.mod](file:///e:/myVibeCoding/km269/wukong/go.mod) 第 3 行） |
+| **Go** | **1.26** | 编译与测试必需（见 [go.mod](../go.mod) 第 3 行） |
 | Git | 任意 | 版本控制 |
 | golangci-lint | latest | 代码静态检查（`make lint`） |
-| Task（可选） | v3 | 任务运行器，[Taskfile.yaml](file:///e:/myVibeCoding/km269/wukong/Taskfile.yaml) |
+| Task（可选） | v3 | 任务运行器，[Taskfile.yaml](../Taskfile.yaml) |
 | Chrome / Chromium | 任意 | **可选**，仅 `computer_controller` 浏览器功能需要 |
 
 ### 1.2 模块信息
@@ -42,7 +42,7 @@ module github.com/km269/wukong
 go 1.26
 ```
 
-[go.mod](file:///e:/myVibeCoding/km269/wukong/go.mod) 包含 **29 个直接依赖**，核心框架为：
+[go.mod](../go.mod) 包含 **29 个直接依赖**，核心框架为：
 
 | 框架 | 版本 | 用途 |
 |------|------|------|
@@ -85,7 +85,7 @@ wukong/
 │   ├── zim-check/                    #   ZIM 归档校验工具
 │   └── zim-ls/                       #   ZIM 归档列出工具
 │
-├── internal/                         # 私有业务逻辑（35+ 子系统）
+├── internal/                         # 私有业务逻辑（33 个包）
 │   ├── agent/                        # ★ Agent 核心循环与编排
 │   ├── apps/                         # 应用克隆/打包/MCP 应用
 │   ├── ard/                          # Agent 注册发现
@@ -95,6 +95,7 @@ wukong/
 │   │   └── tui/                      #   Bubble Tea 终端 UI
 │   ├── codemode/                     # JS 代码执行沙箱
 │   ├── config/                       # 配置加载、类型定义、校验
+│   ├── cors/                         # CORS 中间件
 │   ├── cortex/                       # 向量/图谱记忆（CortexDB）
 │   ├── errsignal/                    # 错误信号处理
 │   ├── eval/                         # 评测框架
@@ -157,7 +158,7 @@ wukong/
 
 ### 3.1 Composition Root
 
-`internal/cli/` 是**唯一的 Composition Root**。[session.go](file:///e:/myVibeCoding/km269/wukong/internal/cli/session.go) 的 `bootstrapSession()` 函数（~1400 行）按顺序创建并串联所有组件：
+`internal/cli/` 是**唯一的 Composition Root**。[session.go](../internal/cli/session.go) 的 `bootstrapSession()` 函数（~1400 行）按顺序创建并串联所有组件：
 
 ```
 配置加载 → 遥测 → 数据库 → 记忆 → 会话 → Provider 工厂
@@ -221,7 +222,7 @@ Wukong **不定义自己的** Agent / Model / Tool 接口，复用 tRPC-Agent-Go
 
 ### 4.1 CoreLoop 四阶段
 
-CoreLoop 定义在 [loop.go](file:///e:/myVibeCoding/km269/wukong/internal/agent/loop.go)，每次 `Run` 调用经历：
+CoreLoop 定义在 [loop.go](../internal/agent/loop.go)，每次 `Run` 调用经历：
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -345,11 +346,11 @@ func (ts *MyToolSet) Tools(_ context.Context) []tool.Tool { return ts.tools }
 func (ts *MyToolSet) Close() error                         { return nil }
 ```
 
-> 参考 [developer.go](file:///e:/myVibeCoding/km269/wukong/internal/extension/builtin/developer.go)，该文件用 `function.NewFunctionTool` 注册了 6 个开发工具。
+> 参考 [developer.go](../internal/extension/builtin/developer.go)，该文件用 `function.NewFunctionTool` 注册了 6 个开发工具。
 
 #### 步骤 2：在 factory.go 注册
 
-在 [factory.go](file:///e:/myVibeCoding/km269/wukong/internal/extension/factory.go) 的 `CreateBuiltinToolSet` switch 中添加 case：
+在 [factory.go](../internal/extension/factory.go) 的 `CreateBuiltinToolSet` switch 中添加 case：
 
 ```go
 func CreateBuiltinToolSet(name string, cfg *config.WukongConfig) (tool.ToolSet, error) {
@@ -365,7 +366,7 @@ func CreateBuiltinToolSet(name string, cfg *config.WukongConfig) (tool.ToolSet, 
 
 #### 步骤 3：在 registry.go 注册
 
-在 [registry.go](file:///e:/myVibeCoding/km269/wukong/internal/extension/builtin/registry.go) 的 `RegisterBuiltins` 中添加：
+在 [registry.go](../internal/extension/builtin/registry.go) 的 `RegisterBuiltins` 中添加：
 
 ```go
 func RegisterBuiltins(cfg *config.WukongConfig) {
@@ -388,7 +389,7 @@ case "agent_tools", "apps", "code_mode", "top_of_mind":
     return nil, nil
 ```
 
-对应地，在 [session.go](file:///e:/myVibeCoding/km269/wukong/internal/cli/session.go) 的 `bootstrapSession()` 中创建并注入：
+对应地，在 [session.go](../internal/cli/session.go) 的 `bootstrapSession()` 中创建并注入：
 
 ```go
 // session.go bootstrapSession() 片段
@@ -407,7 +408,7 @@ if wukongCfg.Apps.Enabled {
 
 ### 5.2 当前内置工具集
 
-[registry.go](file:///e:/myVibeCoding/km269/wukong/internal/extension/builtin/registry.go) 注册了 **12 个**内置扩展：
+[registry.go](../internal/extension/builtin/registry.go) 注册了 **12 个**内置扩展：
 
 | 名称 | 工厂返回 | 需运行时注入 | 说明 |
 |------|----------|-------------|------|
@@ -493,7 +494,7 @@ timeout: 120s            # 最大执行时间
 
 ### 6.2 RecipeConfig 字段
 
-定义在 [recipe.go](file:///e:/myVibeCoding/km269/wukong/internal/agent/recipe.go) 的 `RecipeConfig` 结构体：
+定义在 [recipe.go](../internal/agent/recipe.go) 的 `RecipeConfig` 结构体：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -510,10 +511,10 @@ timeout: 120s            # 最大执行时间
 
 ### 6.3 自动加载与热重载
 
-Recipe 由 [recipe.go](file:///e:/myVibeCoding/km269/wukong/internal/agent/recipe.go) 的 `RecipeToolSet` 管理：
+Recipe 由 [recipe.go](../internal/agent/recipe.go) 的 `RecipeToolSet` 管理：
 
 - **自动发现**：启动时扫描 `.wukong/recipes/*.yaml`，注册为可调用的 Agent 工具
-- **热重载**：通过 [recipe_advance.go](file:///e:/myVibeCoding/km269/wukong/internal/agent/recipe_advance.go) 的 `hotReloader` 实现，使用 `fsnotify.Watcher` 监听目录变化
+- **热重载**：通过 [recipe_advance.go](../internal/agent/recipe_advance.go) 的 `hotReloader` 实现，使用 `fsnotify.Watcher` 监听目录变化
 - **事件监听**：Create / Write / Remove / Rename 事件触发自动重载
 
 ```go
@@ -582,7 +583,7 @@ model: deepseek-chat
 
 ### 7.3 加载机制
 
-定义在 [manager.go](file:///e:/myVibeCoding/km269/wukong/internal/skill/manager.go)：
+定义在 [manager.go](../internal/skill/manager.go)：
 
 ```go
 // SkillsDir 返回技能目录，默认 .wukong/skills
@@ -601,7 +602,7 @@ func (m *Manager) Initialize() error {
 
 ### 7.4 技能进化
 
-当 `evolution.enabled: true` 时，Evolution 引擎会分析技能执行轨迹，自动生成改进补丁并应用到 SKILL.md 文件。详见 [evolution](file:///e:/myVibeCoding/km269/wukong/internal/evolution/) 包。
+当 `evolution.enabled: true` 时，Evolution 引擎会分析技能执行轨迹，自动生成改进补丁并应用到 SKILL.md 文件。详见 [evolution](../internal/evolution/) 包。
 
 ---
 
@@ -636,7 +637,7 @@ default_provider: my-local-llm
 
 ### 8.2 特殊协议：修改 factory.go
 
-只有需要非 OpenAI 兼容协议时，才需要改 [factory.go](file:///e:/myVibeCoding/km269/wukong/internal/provider/factory.go)：
+只有需要非 OpenAI 兼容协议时，才需要改 [factory.go](../internal/provider/factory.go)：
 
 ```go
 func (f *Factory) CreateModel(name string) (model.Model, error) {
@@ -684,7 +685,7 @@ func newFooCmd() *cobra.Command {
 }
 ```
 
-**步骤 2**：在 [root.go](file:///e:/myVibeCoding/km269/wukong/internal/cli/root.go) 的 `newRootCmd()` 中注册：
+**步骤 2**：在 [root.go](../internal/cli/root.go) 的 `newRootCmd()` 中注册：
 
 ```go
 cmd.AddCommand(newFooCmd())
@@ -700,7 +701,7 @@ cmd.AddCommand(newFooCmd())
 
 ## 10. 添加编排模式
 
-多模式编排定义在 [workflow.go](file:///e:/myVibeCoding/km269/wukong/internal/agent/workflow.go)。已支持 **10 种模式**：
+多模式编排定义在 [workflow.go](../internal/agent/workflow.go)。已支持 **10 种模式**：
 
 | 模式 | 常量 | 说明 |
 |------|------|------|
@@ -745,7 +746,7 @@ func (b *WorkflowBuilder) Build(ctx context.Context, wfCfg *OrchestrationConfig)
 
 ### 11.2 CI 测试范围
 
-CI（见 [ci.yml](file:///e:/myVibeCoding/km269/wukong/.github/workflows/ci.yml)）执行：
+CI（见 [ci.yml](../.github/workflows/ci.yml)）执行：
 
 ```bash
 go test -short -race -count=1 ./internal/... ./pkg/...
@@ -808,7 +809,7 @@ func TestGuard_CheckToolPermission(t *testing.T) {
 
 ### 12.1 日志系统
 
-日志基于 Go `slog`，封装在 [logger.go](file:///e:/myVibeCoding/km269/wukong/internal/util/logger.go)。
+日志基于 Go `slog`，封装在 [logger.go](../internal/util/logger.go)。
 
 | 全局 Flag | 短选项 | 生效函数 | 效果 |
 |-----------|--------|----------|------|
@@ -846,48 +847,43 @@ dlv debug ./cmd/wukong -- session
 
 ### 12.4 遥测
 
-OpenTelemetry 分布式追踪通过 [telemetry/](file:///e:/myVibeCoding/km269/wukong/internal/telemetry/) 包实现。配置 `telemetry.enabled: true` 后，Agent 执行链路会自动上报到 OTLP 端点（gRPC 或 HTTP）。
+OpenTelemetry 分布式追踪通过 [telemetry/](../internal/telemetry/) 包实现。配置 `telemetry.enabled: true` 后，Agent 执行链路会自动上报到 OTLP 端点（gRPC 或 HTTP）。
 
 ---
 
 ## 13. 配置系统
 
-### 13.1 配置层次
+> **完整配置参考**（7 级加载优先级、环境变量展开、40+ 配置段逐项说明、校验规则）见 [CONFIG.md](./CONFIG.md)，本章不再重复。本节仅覆盖开发者视角：类型文件的组织方式与新增配置项的流程。
 
-配置优先级（从高到低）：
+### 13.1 类型文件组织
 
-```
-1. CLI 标志（--provider, --model, --temperature 等）
-2. 环境变量（WUKONG_ 前缀）
-3. --config 指定的配置文件
-4. 自动发现的 config.yaml（当前目录 → ~/.config/wukong/）
-5. 内置默认值
-```
+配置类型定义在 `internal/config/` 下，按子系统拆分为 10 个 `types_*.go`，根结构体 `WukongConfig` 汇总于 [config.go](../internal/config/config.go)：
 
-### 13.2 配置文件
+| 文件 | 主要类型 |
+|------|----------|
+| `types_agent.go` | Agent、Security（含 Sandbox / SandboxLimits 进程级资源限额） |
+| `types_provider.go` | Provider、Extension、ToolPermission |
+| `types_storage.go` | Session、Memory、Todo、Recall |
+| `types_cortex.go` | Cortex、Chunking、VerticalRouting、SearchStrategy、MemoryFlow、GraphFlow、ImportFlow、Revision |
+| `types_apps.go` | Apps、CloneDefaults、PackDefaults |
+| `types_browser.go` | Browser、Proxy、Search（DuckDuckGo / SearXNG / Tavily / Google / Bing） |
+| `types_server.go` | A2AServer、AGUI、ACPServer、ACPMCP、MCPServer |
+| `types_features.go` | Visualiser、Tutorial、TopOfMind、CodeMode |
+| `types_observability.go` | Telemetry、Observability、Eval、EvalMetric、Artifact |
+| `types_orchestration.go` | ARD、Summon、A2ARemote、ANP、Skill、Evolution、Knowledge、OKF、Dify、Workflow、SubAgent、TeamMember |
 
-主配置文件为项目根目录的 `config.yaml`。使用 `--config` / `-c` 指定自定义路径。
+其余文件职责：`config.go`（`WukongConfig` 根结构体 + `Loader`）、`defaults.go`（`setDefaults()` 注册全部内置默认值，按子系统拆分为 `setXxxDefaults()`）、`validate.go`（`Validate()` 致命校验 + `Warnings()` 非致命警告）。
 
-### 13.3 配置类型
+配套测试：`config_test.go`（加载与校验）、`sandbox_config_test.go` / `sandbox_validate_test.go`（`Security.Sandbox` 资源限额的默认零值与显式值校验）。
 
-配置类型定义在 `internal/config/` 下，按功能拆分：
+### 13.2 如何新增配置项
 
-| 文件 | 类型 |
-|------|------|
-| `types_agent.go` | Agent、Planner、Workflow |
-| `types_provider.go` | Provider、Model |
-| `types_storage.go` | Session、Memory、Recall |
-| `types_cortex.go` | Cortex、MemoryFlow、GraphFlow |
-| `types_apps.go` | Apps、CodeMode |
-| `types_browser.go` | Browser |
-| `types_server.go` | ACP、MCP Server |
-| `types_features.go` | Tutorial、Visualiser |
-| `types_observability.go` | Telemetry |
-| `types_orchestration.go` | Orchestration |
-
-### 13.4 配置校验
-
-`config validate` 命令执行 12 项校验（见 [config.go](file:///e:/myVibeCoding/km269/wukong/internal/cli/config.go) 的 `runFullValidation()`）。配置加载时的 `LoadAndValidate()` 会拒绝致命错误，非致命问题通过 `cfg.Warnings()` 输出。
+1. 在对应子系统的 `types_*.go` 中定义结构体，字段加 `mapstructure` 标签（YAML 键名）
+2. 在 [config.go](../internal/config/config.go) 的 `WukongConfig` 中添加字段（对应 YAML 配置段）
+3. 在 [defaults.go](../internal/config/defaults.go) 中新增 `setXxxDefaults()` 注册默认值，并在 `setDefaults()` 调用链中挂接
+4. 如需校验，在 [validate.go](../internal/config/validate.go) 中添加致命校验（`Validate`）或非致命警告（`Warnings`）
+5. 更新 [CONFIG.md](./CONFIG.md) 对应配置段
+6. 运行 `wukong config validate` 验证（与启动路径一致，调用 `loader.LoadAndValidate()` 执行 `validate.go` 全部规则）
 
 ---
 
@@ -895,7 +891,7 @@ OpenTelemetry 分布式追踪通过 [telemetry/](file:///e:/myVibeCoding/km269/w
 
 ### 14.1 Makefile target
 
-[Makefile](file:///e:/myVibeCoding/km269/wukong/Makefile) 提供以下 target：
+[Makefile](../Makefile) 提供以下 target：
 
 ```bash
 make build         # 当前平台构建 → build/wukong
@@ -926,11 +922,11 @@ LDFLAGS := -s -w \
     -X github.com/km269/wukong/internal/cli.BuildDate=$(BUILD_DATE)
 ```
 
-默认版本信息定义在 [version.go](file:///e:/myVibeCoding/km269/wukong/internal/util/version.go)：`Version = "0.2.9"`。
+默认版本信息定义在 [version.go](../internal/util/version.go)：`Version = "0.2.9"`。
 
 ### 14.3 Taskfile.yaml
 
-[Taskfile.yaml](file:///e:/myVibeCoding/km269/wukong/Taskfile.yaml) 镜像了全部 Makefile target，使用 [Task](https://taskfile.dev/) 运行器：
+[Taskfile.yaml](../Taskfile.yaml) 镜像了全部 Makefile target，使用 [Task](https://taskfile.dev/) 运行器：
 
 ```bash
 task build
@@ -940,7 +936,7 @@ task lint
 
 ### 14.4 GoReleaser
 
-[.goreleaser.yaml](file:///e:/myVibeCoding/km269/wukong/.goreleaser.yaml) 配置自动化发布，支持跨平台二进制和打包格式（tar.gz / zip）。
+[.goreleaser.yaml](../.goreleaser.yaml) 配置自动化发布，支持跨平台二进制和打包格式（tar.gz / zip）。
 
 ### 14.5 GitHub Actions CI/CD
 
@@ -951,7 +947,7 @@ task lint
 
 ### 14.6 Docker
 
-[Dockerfile](file:///e:/myVibeCoding/km269/wukong/Dockerfile) 支持容器化部署：
+[Dockerfile](../Dockerfile) 支持容器化部署：
 
 ```bash
 make docker-build    # 或
@@ -993,13 +989,13 @@ docs(agent): correct CoreLoop.Run signature in developer guide
 
 | 文档 | 内容 |
 |------|------|
-| [ARCHITECTURE.md](file:///e:/myVibeCoding/km269/wukong/docs/ARCHITECTURE.md) | 系统整体架构设计 |
-| [CLI_TUI.md](file:///e:/myVibeCoding/km269/wukong/docs/CLI_TUI.md) | 命令行与 TUI 架构 |
-| [CONFIG.md](file:///e:/myVibeCoding/km269/wukong/docs/CONFIG.md) | 完整配置项参考 |
-| [API_REFERENCE.md](file:///e:/myVibeCoding/km269/wukong/docs/API_REFERENCE.md) | HTTP API 参考 |
-| [MEMORY_ARCHITECTURE.md](file:///e:/myVibeCoding/km269/wukong/docs/MEMORY_ARCHITECTURE.md) | 记忆系统架构 |
-| [DEPLOYMENT.md](file:///e:/myVibeCoding/km269/wukong/docs/DEPLOYMENT.md) | 部署指南 |
+| [ARCHITECTURE.md](./ARCHITECTURE.md) | 系统整体架构设计 |
+| [CLI_TUI.md](./CLI_TUI.md) | 命令行与 TUI 架构 |
+| [CONFIG.md](./CONFIG.md) | 完整配置项参考 |
+| [API_REFERENCE.md](./API_REFERENCE.md) | HTTP API 参考 |
+| [MEMORY_ARCHITECTURE.md](./MEMORY_ARCHITECTURE.md) | 记忆系统架构 |
+| [DEPLOYMENT.md](./DEPLOYMENT.md) | 部署指南 |
 
 ---
 
-> **版本**: v0.2.9 | **最后更新**: 2026-08-11 | **Go**: 1.26 | **直接依赖**: 29 | **测试文件**: 73+
+> **版本**: v0.2.9 | **最后更新**: 2026-08-23 | **Go**: 1.26 | **直接依赖**: 29 | **测试文件**: 73+

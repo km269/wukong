@@ -19,6 +19,7 @@ import (
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/km269/wukong/internal/browser/antibot"
 	"github.com/km269/wukong/internal/browser/behavior"
+	"github.com/km269/wukong/internal/browser/renderkit"
 	"github.com/km269/wukong/internal/browser/stealth"
 	"github.com/km269/wukong/internal/browser/types"
 	"github.com/km269/wukong/pkg/logutil"
@@ -46,10 +47,9 @@ type Options struct {
 type Pool struct {
 	opts               Options
 	browser            *rod.Browser
+	lifeCancel         context.CancelFunc
 	workers            []*worker
-	queue              chan *renderJob
-	wg                 sync.WaitGroup
-	closed             bool
+	disp               *renderkit.Dispatcher
 	mu                 sync.Mutex
 	behaviorSimEnabled bool
 	behaviorSimulator  *behavior.Simulator
@@ -61,24 +61,29 @@ type Pool struct {
 	refererPages map[string]*rod.Page
 }
 
+// Compile-time capability assertions.
+var (
+	_ types.BrowserBackend   = (*Pool)(nil)
+	_ types.UARotator        = (*Pool)(nil)
+	_ types.AssetCollector   = (*Pool)(nil)
+	_ types.PriorityRenderer = (*Pool)(nil)
+)
+
 type worker struct {
 	idx  int
 	page *rod.Page
 }
 
-type renderJob struct {
-	url      string
-	referer  string
-	resultCh chan<- renderResultOrErr
-	ctx      context.Context
-}
-
-type renderResultOrErr struct {
-	Result *types.RenderResult
-	Err    error
-}
-
-func New(opts Options) (*Pool, error) {
+// New creates a rod-backed browser pool whose lifetime is bound to
+// ctx: when ctx is cancelled (parent task done, Ctrl-C, timeout) the
+// pool drains in-flight renders and closes the rod browser
+// automatically, so a caller that forgets Close() cannot leak browser
+// processes. Close() remains the explicit cleanup path; it is
+// idempotent and also releases the internal lifecycle goroutine.
+func New(ctx context.Context, opts Options) (*Pool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if opts.Workers <= 0 {
 		opts.Workers = 4
 	}
@@ -115,6 +120,9 @@ func New(opts Options) (*Pool, error) {
 		// Otherwise Chrome performs strict (default) verification.
 		if opts.InsecureTLS {
 			l = l.Set("ignore-certificate-errors", "")
+			logutil.Debug("[rod] browser TLS: certificate verification disabled (insecure_tls)")
+		} else {
+			logutil.Debug("[rod] browser TLS: strict certificate verification")
 		}
 		// Disable Safe Browsing to prevent ERR_BLOCKED_BY_CLIENT
 		// when navigating directly to binary resources (images, etc.).
@@ -178,13 +186,16 @@ func New(opts Options) (*Pool, error) {
 
 	browserInstance := rod.New().ControlURL(controlURL).MustConnect()
 
+	lifeCtx, lifeCancel := context.WithCancel(ctx)
+
 	escalator := antibot.NewEscalator(antibot.DefaultEscalatorConfig())
 	currentUA := escalator.GetRandomDesktopUA()
 
 	p := &Pool{
 		opts:              opts,
 		browser:           browserInstance,
-		queue:             make(chan *renderJob, opts.Workers*4),
+		lifeCancel:        lifeCancel,
+		disp:              renderkit.NewDispatcher(opts.Workers),
 		behaviorSimulator: behavior.New(behavior.DefaultConfig()),
 		escalator:         escalator,
 		currentUA:         currentUA,
@@ -193,9 +204,19 @@ func New(opts Options) (*Pool, error) {
 
 	for i := 0; i < opts.Workers; i++ {
 		p.workers = append(p.workers, &worker{idx: i})
-		p.wg.Add(1)
-		go p.workerLoop(p.workers[i])
 	}
+	p.disp.Start(opts.Workers, func(idx int, job *renderkit.RenderJob) {
+		p.renderJob(p.workers[idx], job)
+	})
+
+	// Bind the pool lifetime to ctx: cancellation drains the pool and
+	// closes the rod browser. Close() cancels lifeCtx first, so after
+	// an explicit Close the goroutine's re-entrant Close call hits the
+	// Drain() guard and is a no-op.
+	go func() {
+		<-lifeCtx.Done()
+		p.Close()
+	}()
 
 	return p, nil
 }
@@ -212,6 +233,12 @@ func (p *Pool) RotateUA() {
 	p.currentUA = p.escalator.RotateUserAgent()
 }
 
+// CollectsAssets reports the render-time network tracking capability:
+// every render captures subresource response bodies into
+// RenderResult.CollectedAssets (and XHR/fetch endpoints into
+// DiscoveredAPIs).
+func (p *Pool) CollectsAssets() bool { return true }
+
 // Screenshot navigates to url in a fresh tab and captures a real pixel
 // screenshot as PNG, written to outputPath. It applies the same UA override,
 // stealth injection and settle-wait as Render so the captured page matches
@@ -220,7 +247,7 @@ func (p *Pool) Screenshot(
 	ctx context.Context, url string, outputPath string,
 ) (string, error) {
 	p.mu.Lock()
-	if p.closed {
+	if p.disp.Closed() {
 		p.mu.Unlock()
 		return "", fmt.Errorf("pool closed")
 	}
@@ -288,15 +315,8 @@ func (p *Pool) Screenshot(
 	return outputPath, nil
 }
 
-func (p *Pool) workerLoop(w *worker) {
-	defer p.wg.Done()
-	for job := range p.queue {
-		p.renderJob(w, job)
-	}
-}
-
-func (p *Pool) renderJob(w *worker, job *renderJob) {
-	ctx, cancel := context.WithTimeout(job.ctx, p.opts.RenderTimeout)
+func (p *Pool) renderJob(w *worker, job *renderkit.RenderJob) {
+	ctx, cancel := context.WithTimeout(job.Ctx, p.opts.RenderTimeout)
 	defer cancel()
 
 	var page *rod.Page
@@ -308,7 +328,7 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 		var err error
 		page, err = p.browser.Page(proto.TargetCreateTarget{})
 		if err != nil {
-			job.resultCh <- renderResultOrErr{Err: fmt.Errorf("create page: %w", err)}
+			job.ResultCh <- renderkit.RenderResultOrErr{Err: fmt.Errorf("create page: %w", err)}
 			return
 		}
 		if p.opts.Stealth {
@@ -390,13 +410,13 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 		Headers: headers,
 	}.Call(page)
 
-	if err := page.Navigate(job.url); err != nil {
-		job.resultCh <- renderResultOrErr{Err: fmt.Errorf("navigate: %w", err)}
+	if err := page.Navigate(job.URL); err != nil {
+		job.ResultCh <- renderkit.RenderResultOrErr{Err: fmt.Errorf("navigate: %w", err)}
 		return
 	}
 
 	if err := page.WaitLoad(); err != nil {
-		job.resultCh <- renderResultOrErr{Err: fmt.Errorf("wait load: %w", err)}
+		job.ResultCh <- renderkit.RenderResultOrErr{Err: fmt.Errorf("wait load: %w", err)}
 		return
 	}
 
@@ -407,59 +427,12 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 	// 如果启用了行为模拟
 	if p.behaviorSimEnabled {
 		// 模拟自然的滚动和鼠标移动
-		page.Eval(`
-			(async () => {
-				// 随机滚动一小段距离
-				const randomScroll = () => {
-					const delta = Math.floor(Math.random() * 200) - 100;
-					window.scrollBy(0, delta);
-					return new Promise(r => setTimeout(r, 200 + Math.random() * 300));
-				};
-				await randomScroll();
-			})()
-		`)
-
-		// 鼠标移动到随机位置
-		page.Eval(`
-			(async () => {
-				// 模拟鼠标移动到随机位置
-				const randomX = Math.random() * window.innerWidth;
-				const randomY = Math.random() * window.innerHeight;
-				// 触发鼠标移动事件
-				const mouseEvent = new MouseEvent('mousemove', {
-					clientX: randomX,
-					clientY: randomY,
-					bubbles: true
-				});
-				document.dispatchEvent(mouseEvent);
-				// 模拟鼠标停留一会儿
-				await new Promise(r => setTimeout(r, 150 + Math.random() * 350));
-			})()
-		`)
+		page.Eval(renderkit.BehaviorSimScrollJS)
+		page.Eval(renderkit.BehaviorSimMouseJS)
 	}
 
 	if p.opts.Scroll {
-		page.Eval(`
-			(async () => {
-				const scrollHeight = document.documentElement.scrollHeight;
-				const viewportHeight = window.innerHeight;
-				let currentScroll = 0;
-				const maxIterations = 20;
-				let iterations = 0;
-				
-				while (currentScroll < scrollHeight - viewportHeight && iterations < maxIterations) {
-					window.scrollBy(0, viewportHeight);
-					currentScroll += viewportHeight;
-					iterations++;
-					await new Promise(r => setTimeout(r, 300 + Math.random() * 500));
-				}
-				
-				if (currentScroll < scrollHeight - viewportHeight) {
-					window.scrollTo(0, scrollHeight);
-					await new Promise(r => setTimeout(r, 500));
-				}
-			})()
-		`)
+		page.Eval(renderkit.ScrollJS)
 		if p.opts.Settle > 0 {
 			page.WaitRequestIdle(p.opts.Settle, nil, nil, nil)
 		}
@@ -470,7 +443,7 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 		finalURL = finalURLResult.Value.String()
 	}
 	if finalURL == "" {
-		finalURL = job.url
+		finalURL = job.URL
 	}
 
 	contentTypeResult, err := page.Eval(`() => document.contentType`)
@@ -478,8 +451,8 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 		contentType = contentTypeResult.Value.String()
 	}
 
-	if contentType != "" && !isHTMLContentType(contentType) {
-		job.resultCh <- renderResultOrErr{Err: &types.ErrNotHTML{URL: job.url, ContentType: contentType}}
+	if contentType != "" && !renderkit.IsHTMLContentType(contentType) {
+		job.ResultCh <- renderkit.RenderResultOrErr{Err: &types.ErrNotHTML{URL: job.URL, ContentType: contentType}}
 		return
 	}
 
@@ -510,7 +483,7 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 				break
 			}
 			// Skip the main document
-			if t.url == finalURL || t.url == job.url {
+			if t.url == finalURL || t.url == job.URL {
 				continue
 			}
 			// Only collect successful responses
@@ -678,39 +651,14 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 
 	html, err := page.HTML()
 	if err != nil {
-		job.resultCh <- renderResultOrErr{Err: fmt.Errorf("get HTML: %w", err)}
+		job.ResultCh <- renderkit.RenderResultOrErr{Err: fmt.Errorf("get HTML: %w", err)}
 		return
 	}
 
 	// Extract all links from the rendered DOM using JavaScript.
 	// This captures dynamically generated links that static HTML parsing may miss.
 	var extractedLinks []string
-	linksVal, evalErr := page.Eval(`() => {
-		const links = new Set();
-		// Get all anchor tags
-		document.querySelectorAll('a[href]').forEach(a => {
-			const href = a.getAttribute('href');
-			if (href && !href.startsWith('#') && !href.startsWith('javascript:') && 
-				!href.startsWith('mailto:') && !href.startsWith('tel:')) {
-				links.add(a.href);
-			}
-		});
-		// Get all area tags (image maps)
-		document.querySelectorAll('area[href]').forEach(area => {
-			const href = area.getAttribute('href');
-			if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
-				links.add(area.href);
-			}
-		});
-		// Get iframe and frame sources
-		document.querySelectorAll('iframe[src], frame[src]').forEach(f => {
-			const src = f.getAttribute('src');
-			if (src && !src.startsWith('javascript:')) {
-				links.add(f.src);
-			}
-		});
-		return JSON.stringify(Array.from(links));
-	}`)
+	linksVal, evalErr := page.Eval(renderkit.CollectLinksJSONJS)
 	if evalErr != nil {
 		logutil.Debug("eval links failed", slog.Any("error", evalErr))
 	} else if linksVal != nil && !linksVal.Value.Nil() {
@@ -733,7 +681,10 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 	logutil.Debug("extracted links from page", slog.Int("count", len(extractedLinks)))
 
 	var title string
-	titleEl, err := page.Element("title")
+	// Bound the element wait: pages without a <title> (minimal pages,
+	// error pages) would otherwise block Element() forever and hang the
+	// render until the caller's context expires.
+	titleEl, err := page.Timeout(2 * time.Second).Element("title")
 	if err == nil {
 		title, err = titleEl.Text()
 		if err != nil {
@@ -752,19 +703,19 @@ func (p *Pool) renderJob(w *worker, job *renderJob) {
 	}
 
 	if finalURL == "" {
-		finalURL = job.url
+		finalURL = job.URL
 	}
 
 	// Stop listening for network events
 	// wait() - disabled for debugging
 
-	job.resultCh <- renderResultOrErr{Result: &types.RenderResult{
+	job.ResultCh <- renderkit.RenderResultOrErr{Result: &types.RenderResult{
 		HTML:                html,
 		URL:                 finalURL,
 		Title:               title,
 		ContentType:         contentType,
 		CloudflareClearance: cfClearance,
-		Referer:             job.referer,
+		Referer:             job.Referer,
 		CollectedAssets:     collectedAssets,
 		ExtractedLinks:      extractedLinks,
 		DiscoveredAPIs:      discoveredAPIs,
@@ -776,26 +727,15 @@ func (p *Pool) Render(ctx context.Context, url string) (*types.RenderResult, err
 }
 
 func (p *Pool) RenderWithReferer(ctx context.Context, url, referer string) (*types.RenderResult, error) {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		return nil, fmt.Errorf("pool closed")
-	}
-	p.mu.Unlock()
+	return p.disp.Submit(ctx, url, referer)
+}
 
-	resultCh := make(chan renderResultOrErr, 1)
-	select {
-	case p.queue <- &renderJob{url: url, referer: referer, resultCh: resultCh, ctx: ctx}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-
-	select {
-	case res := <-resultCh:
-		return res.Result, res.Err
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+// RenderWithPriority implements types.PriorityRenderer: when browser
+// workers are contended, a higher-priority render is dequeued before
+// queued normal work (long-waiting jobs are aged up so they cannot
+// starve). See renderkit.Dispatcher.
+func (p *Pool) RenderWithPriority(ctx context.Context, url, referer string, prio types.Priority) (*types.RenderResult, error) {
+	return p.disp.SubmitWithPriority(ctx, url, referer, prio)
 }
 
 func (p *Pool) SetSettle(d time.Duration) {
@@ -843,7 +783,7 @@ func (p *Pool) SetBehaviorSimulation(enabled bool) {
 //  4. JavaScript fetch() (only works if server sends proper CORS headers)
 func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer string) (*types.AssetDownloadResult, error) {
 	p.mu.Lock()
-	if p.closed {
+	if p.disp.Closed() {
 		p.mu.Unlock()
 		return nil, fmt.Errorf("pool closed")
 	}
@@ -1143,7 +1083,7 @@ func (p *Pool) downloadAssetViaNavigation(page *rod.Page, assetURL, referer stri
 					}, nil
 				}
 			}
-		} else if s != "" && contentType != "" && isTextContent(contentType) {
+		} else if s != "" && contentType != "" && renderkit.IsTextContent(contentType) {
 			// Text content (CSS, JS, etc.)
 			return &types.AssetDownloadResult{
 				URL:         assetURL,
@@ -1705,16 +1645,14 @@ func (p *Pool) downloadAssetViaFetch(page *rod.Page, assetURL, referer string) (
 }
 
 func (p *Pool) Close() {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
+	// Drain the shared dispatcher first: close the job queue, wait for
+	// in-flight renders, and reject new submits. Only the caller that
+	// performed the drain runs the cleanup below — browser.MustClose is
+	// not idempotent, and workers have all exited by the time Drain
+	// returns true.
+	if !p.disp.Drain() {
 		return
 	}
-	p.closed = true
-	p.mu.Unlock()
-
-	close(p.queue)
-	p.wg.Wait()
 
 	for _, w := range p.workers {
 		if w.page != nil {
@@ -1733,6 +1671,12 @@ func (p *Pool) Close() {
 	p.refererMu.Unlock()
 
 	p.browser.MustClose()
+
+	// Release the lifecycle goroutine. It wakes up and re-enters Close,
+	// where Drain() reports already-drained and the call returns.
+	if p.lifeCancel != nil {
+		p.lifeCancel()
+	}
 }
 
 // getOrCreateRefererPage returns a cached referer page or creates a new one.
@@ -1862,17 +1806,6 @@ func (p *Pool) injectRefererCookies(targetPage *rod.Page, referer string) {
 	}
 }
 
-func isHTMLContentType(ct string) bool {
-	ct = strings.ToLower(strings.TrimSpace(ct))
-	if ct == "" {
-		return true
-	}
-	if i := strings.Index(ct, ";"); i >= 0 {
-		ct = ct[:i]
-	}
-	return ct == "text/html" || ct == "application/xhtml+xml"
-}
-
 // normalizeURL normalizes a URL for comparison purposes by parsing and
 // re-encoding it. This handles differences in percent-encoding (e.g. %20 vs space)
 // that can cause direct string comparison to fail.
@@ -1882,21 +1815,6 @@ func normalizeURL(u string) string {
 		return u
 	}
 	return parsed.String()
-}
-
-// isTextContent returns true if the MIME type represents a text-based resource
-// that can be read as plain text (CSS, JavaScript, JSON, etc.).
-func isTextContent(mimeType string) bool {
-	mt := strings.ToLower(strings.TrimSpace(mimeType))
-	if i := strings.Index(mt, ";"); i >= 0 {
-		mt = mt[:i]
-	}
-	return strings.HasPrefix(mt, "text/") ||
-		strings.HasPrefix(mt, "application/javascript") ||
-		strings.HasPrefix(mt, "application/json") ||
-		strings.HasPrefix(mt, "application/xml") ||
-		strings.HasPrefix(mt, "application/xhtml+xml") ||
-		strings.HasPrefix(mt, "image/svg+xml")
 }
 
 // isImageURL returns true if the URL likely points to an image resource

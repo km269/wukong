@@ -107,10 +107,10 @@ func TestValidate_SandboxLimits_GenerousValuesPass(t *testing.T) {
 			Sandbox: SandboxConfig{
 				KillOnParentExit: true,
 				Limits: SandboxLimitsConfig{
-					MaxCPUSeconds:   30,
-					MaxMemoryBytes:  1 << 30, // 1 GiB
-					MaxFileBytes:    1 << 24, // 16 MiB
-					MaxProcesses:    4,
+					MaxCPUSeconds:  30,
+					MaxMemoryBytes: 1 << 30, // 1 GiB
+					MaxFileBytes:   1 << 24, // 16 MiB
+					MaxProcesses:   4,
 				},
 			},
 		},
@@ -285,7 +285,7 @@ func TestWarnings_SandboxLimits_PlatformCoverage(t *testing.T) {
 			Security: SecurityConfig{
 				Sandbox: SandboxConfig{
 					Limits: SandboxLimitsConfig{
-						MaxFileBytes: 1 << 20, // enforced by RLIMIT_FSIZE
+						MaxFileBytes:   1 << 20, // enforced by RLIMIT_FSIZE
 						MaxMemoryBytes: 1 << 24,
 					},
 				},

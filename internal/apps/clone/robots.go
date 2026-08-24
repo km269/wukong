@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/temoto/robotstxt"
@@ -132,7 +133,7 @@ type sitemapEntry struct {
 
 // urlset represents a URL set in a sitemap XML.
 type urlset struct {
-	XMLName xml.Name    `xml:"urlset"`
+	XMLName xml.Name     `xml:"urlset"`
 	URLs    []sitemapURL `xml:"url"`
 }
 
@@ -229,20 +230,67 @@ func isIndexURL(u string) bool {
 
 // RateLimiter provides token-bucket rate limiting for HTTP requests.
 type RateLimiter struct {
-	limiter *rate.Limiter
+	mu       sync.Mutex
+	limiter  *rate.Limiter
+	interval time.Duration // current effective minimum interval
 }
 
 // NewRateLimiter creates a rate limiter with the specified interval.
 // For example, NewRateLimiter(time.Second) allows 1 request per second.
 func NewRateLimiter(interval time.Duration) *RateLimiter {
 	return &RateLimiter{
-		limiter: rate.NewLimiter(rate.Every(interval), 1),
+		limiter:  rate.NewLimiter(rate.Every(interval), 1),
+		interval: interval,
 	}
 }
 
 // Wait blocks until a request can be made, or the context is cancelled.
 func (rl *RateLimiter) Wait(ctx context.Context) error {
 	return rl.limiter.Wait(ctx)
+}
+
+// Interval returns the current effective minimum interval between
+// requests (affected by SlowDown).
+func (rl *RateLimiter) Interval() time.Duration {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return rl.interval
+}
+
+// SlowDown penalizes the limiter after the server signaled rate
+// limiting (429/503): the current interval is multiplied by factor
+// and capped at max. Repeated strikes keep backing off
+// multiplicatively. Returns the new interval. The interval never
+// drops below the value the limiter was created with — only SlowDown
+// ever widens it.
+func (rl *RateLimiter) SlowDown(factor float64, max time.Duration) time.Duration {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	next := time.Duration(float64(rl.interval) * factor)
+	if next > max {
+		next = max
+	}
+	if next <= rl.interval {
+		return rl.interval
+	}
+	rl.interval = next
+	rl.limiter.SetLimit(rate.Every(next))
+	return next
+}
+
+// RaiseTo lifts the interval to at least floor (no-op when the current
+// interval already meets it). Used to propagate IP-segment penalties
+// to hosts sharing a penalized server: the host's own bucket inherits
+// the segment's minimum interval without an additional multiplication.
+func (rl *RateLimiter) RaiseTo(floor time.Duration) time.Duration {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if floor <= rl.interval {
+		return rl.interval
+	}
+	rl.interval = floor
+	rl.limiter.SetLimit(rate.Every(floor))
+	return floor
 }
 
 // NewRateLimiterFromCrawlDelay creates a rate limiter from a crawl-delay value.

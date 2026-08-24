@@ -16,23 +16,24 @@ const (
 
 // BrowserConfig defines web automation and file caching settings.
 type BrowserConfig struct {
-	Enabled         bool               `mapstructure:"enabled"`
-	BrowserType     string             `mapstructure:"browser_type"`
-	Backend         BrowserBackendType `mapstructure:"backend"`
-	Headless        bool               `mapstructure:"headless"`
-	CacheDir        string             `mapstructure:"cache_dir"`
-	MaxDownloadSize int64              `mapstructure:"max_download_size"`
-	Timeout         time.Duration      `mapstructure:"timeout"`
-	BrowserPath     string             `mapstructure:"browser_path"`
-	Stealth         bool               `mapstructure:"stealth"`
-	Scroll          bool               `mapstructure:"scroll"`
-	ControlURL      string             `mapstructure:"control_url"`
-	Workers         int                `mapstructure:"workers"`
-	ProfileDir      string             `mapstructure:"profile_dir"`
-	ViewportWidth   int                `mapstructure:"viewport_width"`
-	ViewportHeight  int                `mapstructure:"viewport_height"`
-	Search          SearchConfig       `mapstructure:"search"`
-	Proxy           ProxyConfig        `mapstructure:"proxy"`
+	Enabled           bool               `mapstructure:"enabled"`
+	BrowserType       string             `mapstructure:"browser_type"`
+	Backend           BrowserBackendType `mapstructure:"backend"`
+	Headless          bool               `mapstructure:"headless"`
+	CacheDir          string             `mapstructure:"cache_dir"`
+	MaxDownloadSize   int64              `mapstructure:"max_download_size"`
+	Timeout           time.Duration      `mapstructure:"timeout"`
+	BrowserPath       string             `mapstructure:"browser_path"`
+	Stealth           bool               `mapstructure:"stealth"`
+	Scroll            bool               `mapstructure:"scroll"`
+	ControlURL        string             `mapstructure:"control_url"`
+	Workers           int                `mapstructure:"workers"`
+	GlobalRenderSlots int                `mapstructure:"global_render_slots"`
+	ProfileDir        string             `mapstructure:"profile_dir"`
+	ViewportWidth     int                `mapstructure:"viewport_width"`
+	ViewportHeight    int                `mapstructure:"viewport_height"`
+	Search            SearchConfig       `mapstructure:"search"`
+	Proxy             ProxyConfig        `mapstructure:"proxy"`
 }
 
 // ProxyConfig defines proxy settings for browser automation.

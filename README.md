@@ -2,20 +2,24 @@
 
 > 本地优先、框架组装、可深度扩展的开源 AI Agent 平台
 >
-> Go 1.26 | 30+ 内部包 | 3 公共包 | 34 配置结构体
+> Go 1.26 | 30+ 内部包 | 5 公共包 | 34 配置结构体
 > CLI: 30 顶层命令 + 60+ 子命令 | 依赖: 29 direct + 105 indirect
+
+**Wukong（悟空）** 是一个基于 Go 语言构建的新一代 AI Agent 平台，名字取自中国神话中的齐天大圣孙悟空，寓意智能、灵活与强大。它不只是一个 AI 聊天机器人，而是一个**本地优先、记忆驱动、多模式编排**的完整 AI Agent 开发框架。
 
 ---
 
 ## 目录
 
 1. [架构哲学](#架构哲学)
-2. [核心能力](#核心能力)
-3. [快速开始](#快速开始)
-4. [技术选型](#技术选型)
-5. [子系统亮点](#子系统亮点)
-6. [文档索引](#文档索引)
-7. [许可证](#许可证)
+2. [核心价值](#核心价值)
+3. [系统架构](#系统架构)
+4. [核心能力](#核心能力)
+5. [快速开始](#快速开始)
+6. [技术选型](#技术选型)
+7. [子系统亮点](#子系统亮点)
+8. [文档索引](#文档索引)
+9. [许可证](#许可证)
 
 ---
 
@@ -32,6 +36,81 @@ Wukong 的设计围绕七大核心哲学展开，每一项都指导了具体的�
 | **双向发现** | 发现别人，也被人发现 | ARD: 联邦搜索 + RegistryServer 发布 |
 | **开放互通** | 标准化协议促进生态互通 | ANP: DID 身份 + 能力协商 + E2EE 加密 |
 | **知识标准化** | 知识应有标准形状 | OKF v0.1: Markdown + YAML frontmatter 知识包 |
+
+---
+
+## 核心价值
+
+### 1. 记忆优先的智能系统
+
+双引擎三层记忆系统，让 Agent 具备跨会话的知识积累能力：
+
+- **短期记忆**: MemoryFlow 会话级转录 + 3 层唤醒（Identity / Recalled memories / Session context）
+- **中期记忆**: CortexStore HNSW 向量 + FTS5 全文检索 + RRF/MMR 融合 + Cross-Encoder 重排
+- **长期记忆**: tRPC Memory 自动提取（AutoExtract）+ 智能清理（SmartCleanup）
+- **结构化记忆**: GraphFlow 知识图谱构建（SPARQL 查询）
+
+### 2. 多 Agent 编排原生支持
+
+10 种原生编排模式，支持从单体 Agent 到复杂团队协作的工作流自动化：
+
+- `single`: 单体 Agent
+- `chain`: 规划者 → 执行者 → 审查者
+- `parallel`: 多 Agent 并发执行
+- `cycle`: 迭代优化循环
+- `graph`: 条件路由 DAG
+- `team_coordinator`: Leader 委派模式
+- `team_swarm`: 自动 transfer 模式
+- `claude_code` / `codex` / `dify`: Claude Code CLI / OpenAI Codex / Dify 平台集成
+
+### 3. 技能自我进化
+
+LLM 驱动的闭环自我学习机制（置信度门控 + 冷却周期 + 每日限制 + 安全验证），让 Agent 能够从失败中学习并持续改进。
+
+### 4. 双向发现与开放互通
+
+ARD 协议实现 Agent 的双向发现（联邦搜索 + RegistryServer 发布），原生支持 MCP、A2A、ANP 等开放协议，DID 身份 + HTTP 签名 + E2EE 加密保障安全互通。
+
+### 5. 深度安全防御
+
+5 层纵深防御体系：
+
+- Guard 安全检查器（4 种权限模式 + Token 级命令分析）
+- JS 沙箱隔离（goja）
+- OS 沙箱（Landlock / Seatbelt / Low IL）
+- `.wukongignore` 文件黑名单
+- SSRF 防护 + API Key 时序安全
+
+---
+
+## 系统架构
+
+```
+用户输入 → 接入层 (CLI/TUI/Gateway) → CoreLoop 编排引擎
+                                           ↓
+                        ┌──────────────────┴──────────────────┐
+                        │                                      │
+                    Prepare 阶段                          Execute 阶段
+                  (4重上下文注入)                        (任务执行)
+                        │                                      │
+                  • ContextRevision                      • Runner
+                  • MemoryFlow.WakeUp                    • LLM 调用
+                  • Cortex/Recall 搜索                   • 工具调用
+                  • Memory 记忆注入                      • 安全检查
+                        │                                      │
+                        └──────────────────┬──────────────────┘
+                                           ↓
+                                     Finalize 阶段
+                                     (结果处理)
+                                           │
+                                     • 消息存储
+                                     • 事实晋升
+                                     • 知识图谱抽取
+                                     • 进化记录
+                                           ↓
+                                     Return 阶段
+                                     (返回结果)
+```
 
 ---
 
@@ -85,7 +164,7 @@ Wukong 的设计围绕七大核心哲学展开，每一项都指导了具体的�
 | **内置扩展** | 17 个: developer / computer_controller / memory / auto_visualiser / tutorial / top_of_mind / code_mode / apps / web / aggregate_search / agent_tools / ard / cortex / bing / google / searxng / tavily |
 | **MCP 扩展** | MCP Broker + 独立 MCP Server (:3401) + ACP-MCP Bridge (:3400) |
 | **多协议端点** | 7 个: A2A (:9090) / ACP (:9091) / AG-UI SSE (:8080) / ACP-MCP (:3400) / MCP Server (:3401) / ANP (:9092) / Gateway (飞书 WS) |
-| **消息网关** | Gateway 插件式 Channel 架构: 飞书/企微 (内部 goroutine，无独立 HTTP 端口) |
+| **消息网关** | Gateway 插件式 Channel 架构: 飞书 WebSocket 长连接 (内部 goroutine，无独立 HTTP 端口) |
 | **Agent 互通** | ANP 协议栈: DID 身份 + 能力协商 + E2EE 加密 + HTTP 签名 |
 | **双向发现** | ARD: 联邦搜索 + 本地 Catalog + RegistryServer 发布 |
 
@@ -150,12 +229,16 @@ wukong apps pack example.com --format zim --compress
 # 查看进化引擎状态
 wukong evolution status
 
-# 查看进化日志
-wukong evolution log
-wukong evolution log --json
+# 查看技能进化历史与版本列表
+wukong evolution history <skill-name>
+wukong evolution versions <skill-name>
 
-# 重置进化历史
-wukong evolution reset
+# 对比两个版本差异 / 回滚到历史版本
+wukong evolution diff <skill-name> <version1> <version2>
+wukong evolution rollback <skill-name> <version>
+
+# 查看技能进化日志 (log.json)
+wukong evolution log <skill-name>
 ```
 
 ### 服务模式
@@ -164,8 +247,11 @@ wukong evolution reset
 # 启动无头服务器
 wukong server
 
-# 启动指定服务
-wukong server --a2a --gateway --agui
+# 指定 Provider / 模型与推理参数
+wukong server --provider deepseek --model deepseek-chat --temperature 0.7 --max-tokens 8192
+
+# 挂接到既有会话 / 指定配置文件 / 关闭流式输出
+wukong server --session-id my-server --config wukong.yaml --no-stream
 ```
 
 ---
@@ -178,7 +264,7 @@ wukong server --a2a --gateway --agui
 |------|------|------|------|
 | Agent 框架 | tRPC-Agent-Go | v1.10.0 | Agent 编排、工具调用、会话管理 |
 | MCP 协议 | tRPC-MCP-Go | v0.0.16 | Model Context Protocol |
-| A2A 协议 | tRPC-A2A-Go | v0.2.5 | Agent-to-Agent 通信 |
+| A2A 协议 | tRPC-A2A-Go (间接依赖) | v0.2.5 | Agent-to-Agent 通信，经由直接依赖间接引入 |
 | 记忆引擎 | CortexDB | v2.25.0 | HNSW 向量 + FTS5 全文 + RDF 图谱 |
 | 知识格式 | OKF | v0.1 | 开放知识格式 |
 | CLI 框架 | Cobra + Viper | v1.9.1 / v1.20.1 | 命令行 + 配置管理 |
@@ -329,12 +415,12 @@ Google OKF 规范的完整实现与 6 大系统集成：
 | **变更追踪** | `internal/evolution/` | log.md + log.json 双格式 |
 | **联邦发现** | `internal/ard/` | OKF Bundle 注册为 ARD CatalogEntry |
 
-### Gateway 多平台消息网关
+### Gateway 消息网关
 
 插件式 Channel 架构，统一入口 + 中间件栈：
 
 ```
-Platform Channels (Feishu / WeCom...)
+Platform Channels (飞书 WebSocket)
     │
     ▼
 GatewayServer (transport-agnostic)
@@ -357,10 +443,9 @@ GatewayServer (transport-agnostic)
 
 | 文档 | 说明 | 页数 |
 |------|------|------|
-| [系统架构](docs/ARCHITECTURE.md) | 20 章架构详解 · 24 ADR · 模块依赖 · 数据流 | ~1500 行 |
+| [系统架构](docs/ARCHITECTURE.md) | 系统架构与各子系统技术实现 · 24 ADR · 模块依赖 · 数据流 | ~750 行 |
 | [配置手册](docs/CONFIG.md) | 15 组配置 · 全字段说明 · 完整示例 | ~1000 行 |
 | [CLI & TUI 架构](docs/CLI_TUI.md) | 命令树 · TUI 架构 · 启动序列 · 事件管道 | ~800 行 |
-| [技术实现详解](docs/TECHNICAL_IMPLEMENTATION.md) | 核心模块实现 · 数据流 · 关键算法 | ~1200 行 |
 | [API 参考](docs/API_REFERENCE.md) | CoreLoop · Provider · Extension · Security 接口 | ~800 行 |
 | [开发者指南](docs/DEVELOPER_GUIDE.md) | 环境搭建 · 项目结构 · 常见开发任务 · 调试 | ~600 行 |
 | [部署运维](docs/DEPLOYMENT.md) | Docker · 二进制 · 配置 · 健康检查 · 故障排查 | ~800 行 |
@@ -371,7 +456,7 @@ GatewayServer (transport-agnostic)
 |------|------|
 | [网站克隆技术指南](docs/CLONE_GUIDE.md) | 克隆引擎架构 · 分页处理 · 资源下载策略 |
 | [Web 操作深度分析](docs/WEB_OPERATIONS_ANALYSIS.md) | 浏览器/克隆/反爬/检索/HTTP 全链路剖析与优化 |
-| [反反爬技术详解](docs/ANTIBOT_GUIDE.md) | 10 层反爬体系 · 5 级升级策略 · 探测技术 |
+| [反反爬技术详解](docs/ANTIBOT_GUIDE.md) | 5 级反爬升级体系 · WAF 签名库 · 探测技术 |
 | [记忆系统架构](docs/MEMORY_ARCHITECTURE.md) | 三层记忆 · CortexDB 技术 · 智能清理算法 |
 | [OKF 知识格式](docs/OKF_GUIDE.md) | OKF v0.1 规范 · Bundle 结构 · 6 大集成 |
 

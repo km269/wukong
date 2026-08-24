@@ -177,9 +177,9 @@ func (s *A2AServer) Stop(ctx context.Context) error {
 // A2AAgent wraps a remote A2A agent as a local agent.Agent that can
 // be used as a sub-agent or tool. Uses tRPC-Agent-Go's a2aagent package.
 type A2AAgent struct {
-	a2aAgent   agent.Agent
-	name       string
-	serverURL  string
+	a2aAgent  agent.Agent
+	name      string
+	serverURL string
 }
 
 // NewA2AAgent creates a client-side proxy for a remote A2A service.

@@ -137,15 +137,15 @@ func SaveEvalCases(path string, cases []EvalCase) error {
 // ValidationReport summarises the validation results for a set of
 // evaluation cases. Mirrors SearchCLI's `validate` command.
 type ValidationReport struct {
-	TotalCases      int            `json:"total_cases"`
-	ValidCases      int            `json:"valid_cases"`
-	DuplicateQueries int           `json:"duplicate_queries"`
-	EmptyQueries    int            `json:"empty_queries"`
+	TotalCases       int            `json:"total_cases"`
+	ValidCases       int            `json:"valid_cases"`
+	DuplicateQueries int            `json:"duplicate_queries"`
+	EmptyQueries     int            `json:"empty_queries"`
 	TypeDistribution map[string]int `json:"type_distribution"`
-	LabelCoverage   float64        `json:"label_coverage"` // fraction with labels
-	SourceCoverage  float64        `json:"source_coverage"` // fraction with source IDs
-	Warnings        []string       `json:"warnings,omitempty"`
-	Errors          []string       `json:"errors,omitempty"`
+	LabelCoverage    float64        `json:"label_coverage"`  // fraction with labels
+	SourceCoverage   float64        `json:"source_coverage"` // fraction with source IDs
+	Warnings         []string       `json:"warnings,omitempty"`
+	Errors           []string       `json:"errors,omitempty"`
 }
 
 // ValidateCases checks a set of evaluation cases for common issues:

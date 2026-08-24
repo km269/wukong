@@ -14,10 +14,13 @@ package errsignal
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/km269/wukong/pkg/logutil"
 )
 
 // ErrorClass is the canonical category of an error.
@@ -206,31 +209,49 @@ func ClassifyHTTP(statusCode int, body string) Classification {
 
 // RetryDelay returns the recommended delay before the next retry
 // for the given classification and attempt number (0-based).
-// Uses exponential backoff with jitter for transient errors,
-// and respects Retry-After for rate-limited responses.
+// Uses exponential backoff for transient errors, and respects
+// Retry-After for rate-limited responses.
+// Note: no jitter is applied here; callers that fan out concurrently
+// should add jitter on top (see pkg/httpclient retryBackoff).
+// The decision is logged at debug level with the branch taken, so
+// "why did the next attempt fire N seconds later" is answerable from
+// logs alone.
 func RetryDelay(c Classification, attempt int) time.Duration {
+	d, branch := retryDelay(c, attempt)
+	logutil.Debug("[errsignal] retry delay",
+		slog.String("class", c.Class.String()),
+		slog.Int("attempt", attempt),
+		slog.Int("max_retries", c.MaxRetries),
+		slog.Bool("should_retry", c.ShouldRetry),
+		slog.String("branch", branch),
+		slog.Duration("delay", d),
+	)
+	return d
+}
+
+func retryDelay(c Classification, attempt int) (time.Duration, string) {
 	if !c.ShouldRetry || attempt >= c.MaxRetries {
-		return 0
+		return 0, "skip:no-retry-or-exhausted"
 	}
 
 	switch c.Class {
 	case ClassRateLimited:
 		if c.RetryAfter > 0 {
-			return c.RetryAfter
+			return c.RetryAfter, "rate-limit:retry-after"
 		}
 		// Default backoff for rate limiting: 5s, 10s, 20s.
-		return time.Duration(5*(1<<attempt)) * time.Second
+		return time.Duration(5*(1<<attempt)) * time.Second, "rate-limit:default-backoff"
 
 	case ClassTransient, ClassUnknown:
 		// Exponential backoff: 1s, 2s, 4s, 8s...
 		base := time.Second * time.Duration(int(math.Pow(2, float64(attempt))))
 		if base > 30*time.Second {
-			base = 30 * time.Second
+			return 30 * time.Second, "transient:exponential-capped"
 		}
-		return base
+		return base, "transient:exponential"
 
 	default:
-		return 0
+		return 0, "skip:class-not-retried"
 	}
 }
 

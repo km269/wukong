@@ -1,7 +1,7 @@
 # Wukong 配置参考手册
 
 > 配置文件: `config.yaml`（项目根目录，完整模板） | 加载器: Viper + Cobra
-> 配置代码: `internal/config/`（13 文件，含 `config.go`、`defaults.go`、`validate.go` 及 9 个 `types_*.go`）
+> 配置代码: `internal/config/`（16 文件 = 3 个 `*_test.go` 测试 + 13 个核心文件：`config.go`、`defaults.go`、`validate.go` 及 10 个 `types_*.go`）
 > 配置结构: `WukongConfig` 根结构体（`config.go:97`）含 35+ 子配置段
 > 验证规则: 致命错误（`Validate()`）+ 非致命警告（`Warnings()`）| 环境变量展开: 20+ 类敏感字段
 
@@ -141,41 +141,76 @@ base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
 
 配置加载后自动执行验证（`validate.go`），分为**致命错误**（`Validate()` 返回 error）和**非致命警告**（`Warnings()` 返回 `[]string`）。
 
+> **验证时机说明**：完整规则在两条路径中执行——**启动路径**（`session`/`server`/`run` 等 → `bootstrapSession()` → `loader.LoadAndValidate()`，警告随后打印到日志）和 **`wukong config validate` 命令**（同样调用 `loader.LoadAndValidate()` 并在终端列出全部非致命警告，致命错误时退出码 1）。两条路径行为一致；`internal/cli/config.go` 中另有一个 12 项的轻量校验函数 `runFullValidation`，仅供 `bench`/`health` 命令做咨询性检查使用。
+
 ### 3.1 致命错误（Validate，阻止启动）
 
 | 检查项 | 有效值/范围 | 源码位置 |
 |--------|------------|---------|
-| `default_provider` 存在性 | 设置后必须在 `providers[]` 中存在 | `validate.go:54-62` |
-| `providers[].type` 有效性 | `openai`/`anthropic`/`google`/`deepseek`/`ollama`/`lmstudio`/`vllm`/`acp` | `validate.go:87-102` |
-| `browser.backend` | `chromedp` / `rod` | `validate.go:104-114` |
-| `workflow.mode` | 10 种有效模式（见 AI 节） | `validate.go:116-130` |
-| `agent.temperature` | [0.0, 2.0] | `validate.go:64-70` |
-| `security.permission_mode` | `auto`/`smart`/`manual`/`chat_only` | `validate.go:72-85` |
-| `agent.max_tokens` | >= 0 | `validate.go:132-138` |
-| `evolution.min_confidence` | [0.0, 1.0]（启用时） | `validate.go:140-149` |
-| `telemetry.sample_rate` | [0.0, 1.0]（启用时） | `validate.go:151-160` |
-| `anp.port` | [0, 65535]（启用时） | `validate.go:162-169` |
-| `anp.meta_protocol_enabled` + `port<=0` | 不允许 | `validate.go:170-175` |
-| `session.backend` | `sqlite`/`memory`/`redis` | `validate.go:178-187` |
-| `memory.backend` | `sqlite`/`redis` | `validate.go:189-198` |
-| `recall.search_mode` | `fts5`/`hybrid` | `validate.go`（续） |
-| `todo.backend` | `sqlite`/`memory` | `validate.go`（续） |
-| `artifact.backend` | `inmemory`/`cos` | `validate.go`（续） |
-| `revision.trim_ratio` | [0.0, 1.0] | `validate.go`（续） |
-| `memory.cleanup_*_threshold` | [0.0, 1.0]，且 target < trigger | `validate.go`（续） |
-| `apps.clone.workers` / `apps.pack.workers` | >= 1 | `validate.go`（续） |
+| `default_provider` 存在性 | 设置后必须在 `providers[]` 中存在 | `validate.go:55-63` |
+| `agent.temperature` | [0.0, 2.0] | `validate.go:65-71` |
+| `security.permission_mode` | `auto`/`smart`/`manual`/`chat_only`（空串合法，运行时回退 smart） | `validate.go:73-86` |
+| `providers[].type` 有效性 | `openai`/`anthropic`/`google`/`deepseek`/`ollama`/`lmstudio`/`vllm`/`acp` | `validate.go:88-103` |
+| `browser.backend` | `chromedp` / `rod` | `validate.go:105-115` |
+| `workflow.mode` | 10 种有效模式（见 AI 节） | `validate.go:117-131` |
+| `agent.max_tokens` | >= 0 | `validate.go:133-139` |
+| `evolution.min_confidence` | [0.0, 1.0]（启用时） | `validate.go:141-150` |
+| `telemetry.sample_rate` | [0.0, 1.0]（启用时） | `validate.go:152-161` |
+| `anp.port` | [0, 65535]（启用时） | `validate.go:163-170` |
+| `anp.meta_protocol_enabled` + `port<=0` | 不允许 | `validate.go:171-176` |
+| `session.backend` | `sqlite`/`memory`/`redis` | `validate.go:179-188` |
+| `memory.backend` | `sqlite`/`redis` | `validate.go:190-199` |
+| `memory.cleanup_*_threshold` | [0.0, 1.0]，且 target < trigger（启用 smart_cleanup 时） | `validate.go:201-225` |
+| `recall.search_mode` | `fts5`/`hybrid` | `validate.go:227-236` |
+| `artifact.backend` | `inmemory`/`cos` | `validate.go:238-247` |
+| `todo.backend` | **仅 `sqlite`**（其他值 fatal） | `validate.go:249-258` |
+| `agent.max_llm_calls` / `agent.max_tool_iterations` | >= 0 | `validate.go:260-274` |
+| `memory` 评分权重 | `recency`/`reference`/`importance`/`length` 各 [0.0, 1.0] | `validate.go:276-287` |
+| `memory.max_memories` | >= 0 | `validate.go:289-295` |
+| `revision.trim_ratio` | [0.0, 1.0] | `validate.go:297-303` |
+| `apps.clone.workers` / `apps.clone.asset_workers` | >= 1（`apps.enabled` 时） | `validate.go:305-319` |
+| `mcp_server.address` | `mcp_server.enabled` 时必填（无内置默认值） | `validate.go:321-328` |
+| `summon.max_concurrent` | >= 0（启用时） | `validate.go:330-337` |
+| `summon.a2a_remotes[].name` / `.server_url` | 必填（启用时） | `validate.go:338-348` |
+| `summon.a2a_remotes[].auth_type` | `""`/`api_key`/`jwt`/`oauth2` | `validate.go:349-358` |
+| `browser.search.searxng.url` | searxng 启用时必填 | `validate.go:364-371` |
+| `browser.search.tavily.api_key` | tavily 启用时必填 | `validate.go:372-378` |
+| `browser.search.google.api_key` + `cse_id` | google 启用时两者均必填 | `validate.go:379-387` |
+| `browser.search.bing.api_key` | bing 启用时必填 | `validate.go:388-394` |
+| `cortex.search_strategy` 权重 | `dense_weight`/`text_weight`/`mmr_lambda` 各 [0.0, 1.0]（cortex 启用且配置了 search_strategy 时） | `validate.go:398-417` |
+| `cortex.search_strategy.reranker_top_n` | <= `fts5_pool_size`（两者均 > 0 时） | `validate.go:418-426` |
+| `security.sandbox.limits.max_memory_bytes` | 非零时 >= 1 MiB（1048576） | `validate.go:429-455` |
+| `security.sandbox.limits.max_file_bytes` | 非零时 >= 512（一个标准块） | `validate.go:456-465` |
+| 服务端口冲突 | `a2a_server`/`agui`/`acp_server`/`acp_mcp`/`mcp_server`/`anp` 中任意两个已启用服务不得绑定同一端口 | `validate.go:467-505` |
 
 ### 3.2 非致命警告（Warnings，不阻止启动）
 
 | 警告项 | 说明 |
 |--------|------|
-| 无 providers 配置 | 无法进行 LLM 对话 |
+| 无 providers 配置 | 无法进行 LLM 对话（`validate.go:543-546`） |
 | `memory.auto_extract` 启用但无 `default_provider` | 记忆提取无法执行 |
 | `cortex.enabled` 但无 `embedding_model` | 向量搜索不可用 |
-| `okf.enabled` 但 `bundle_dir` 为空 | OKF 注入无效 |
-| `anp.enabled` 但 `did_domain` 为空 | DID 身份无法生成 |
+| `recall.search_mode` 为 `hybrid` 且无 `embedding_model`、无 `default_provider` | hybrid 召回缺向量能力 |
+| `agent.context_compaction` 启用且 `context_compaction_oversized_max_tokens = 0` | 仅执行 Pass 1（占位符清理），Pass 2（截断）被禁用 |
+| `okf.enabled` 但 `bundle_dir` 为空 | 回退默认目录 `.wukong/okf` |
+| `okf.injector_enabled` 但 `memoryflow.enabled = false` | 知识索引注入无效（依赖 MemoryFlow） |
+| `okf.enrichment_enabled` 但无 `default_provider` | LLM 丰富退化为确定性回退 |
+| `anp.enabled` 但 `did_domain` 为空 | DID 身份回退 `os.Hostname()` |
+| `anp.e2ee_enabled` 但 `meta_protocol_enabled = false` | E2EE 密钥交换依赖元协议能力协商，不可用 |
 | `gateway.enabled` 但无 channel 激活 | 消息网关无可用通道 |
+| `gateway.feishu.enabled` 但 `app_id` 为空 | 飞书通道可能无法认证 |
+| `mcp_server` 启用 + 非回环地址 + 空 `security.auth.type` | **Critical**：`tools/call` 无鉴权，可经 `developer_command_execute` 执行任意命令。回环地址仅认 `127.0.0.1`/`localhost`/`::1`；裸 `:port` 绑定 0.0.0.0 视为非回环 |
+| `acp_server` 启用 + 非回环地址 + 空 `security.auth.type` | **Critical**：无鉴权可绕过 agent guard 链 |
+| `revision.max_context_tokens` 超过默认 Provider 有效上下文窗口 | prompt 超过模型 `n_ctx` 时 LLM 请求返回 400 |
+| URL 格式检查（缺 scheme/host 或解析失败） | 覆盖 `session.redis_url`、`cortex.embedding_base_url`、`ard.registry_url`、`dify.base_url`、`providers[].base_url`、`summon.a2a_remotes[].server_url`（仅检查非空值） |
+| `providers[].base_url` 为空且 `type != acp` | LLM 请求将失败 |
+| 本地推理 Provider（`vllm`/`ollama`/`lmstudio`）未设 `context_window` | 使用保守默认 8000，可能过早截断或超窗口触发 400 |
+| `cortex.enabled` 但 `embedding_base_url` 为空 | 语义搜索不可用 |
 | 未解析的环境变量 `${VAR}` | 拼写错误或环境缺失（`unresolvedEnvVars`） |
+| `apps.clone` 与 `browser` 反爬字段不一致 | `stealth`/`headless`/`browser_backend` 任一分歧即告警（项目硬约束：两者反爬措施必须一致） |
+| `security.sandbox.limits.max_memory_bytes` 非零且 < 16 MiB | shell 启动内存占用因平台而异，可能误杀所有命令 |
+| `security.sandbox.limits.max_processes = 1` | shell 自身占用唯一槽位，无法 fork 管道辅助进程（`ls \| head` 等），建议 0 或 >= 2 |
+| sandbox 平台差异 | Windows 设 `max_file_bytes` 不生效（无 RLIMIT_FSIZE 等价物）；macOS 设任何非零 limit 均为 no-op（sandbox-exec 只做文件系统写保护） |
 
 ---
 
@@ -334,7 +369,7 @@ base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
 
 ## D. Security 配置
 
-**源码**: `types_agent.go:66-80`（`SecurityConfig`） | 默认值: `defaults.go:89-102`
+**源码**: `types_agent.go:66-86`（`SecurityConfig`，含 `sandbox` 字段） | 默认值: `defaults.go:89-112`
 
 ### 权限模式（PermissionMode）
 
@@ -365,6 +400,28 @@ base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
 | `guardrail_enabled` | bool | false | 是否启用 Prompt 注入检测 |
 | `ignore_file_enabled` | bool | true | 是否启用 `.wukongignore` 文件屏蔽 |
 | `ignore_file` | string | `.wukongignore` | 忽略文件名 |
+| `sandbox` | SandboxConfig | 全零 | 进程级沙箱（资源上限 + 生命周期绑定），见下节 |
+
+### Sandbox 进程级沙箱（SandboxConfig / SandboxLimitsConfig）
+
+**源码**: `types_agent.go:92-95`（`SandboxConfig`）、`types_agent.go:110-115`（`SandboxLimitsConfig`） | 默认值: `defaults.go:103-111`（全 0 = 不限制，保持遗留行为）
+
+对 developer 工具集执行的 shell 命令施加进程级资源上限与生命周期绑定：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `sandbox.kill_on_parent_exit` | bool | false | 子进程生命周期与 wukong 主进程绑定（父进程退出即终止子进程） |
+| `sandbox.limits.max_cpu_seconds` | uint64 | 0 | 每命令 CPU 时间上限（0 = 不限制）。Windows: `JOB_OBJECT_LIMIT_PROCESS_TIME`；Linux: `RLIMIT_CPU` |
+| `sandbox.limits.max_memory_bytes` | uint64 | 0 | 每命令内存上限（0 = 不限制）。Windows: `JOB_OBJECT_LIMIT_PROCESS_MEMORY`；Linux: `RLIMIT_AS` |
+| `sandbox.limits.max_file_bytes` | uint64 | 0 | 单文件写入上限（0 = 不限制）。仅 Linux（`RLIMIT_FSIZE`）；Windows 无等价物，设值仅产生警告 |
+| `sandbox.limits.max_processes` | uint64 | 0 | 每命令进程数上限（0 = 不限制）。Windows: `JOB_OBJECT_LIMIT_ACTIVE_PROCESS`；Linux: `RLIMIT_NPROC` |
+
+**校验与平台语义**：
+- 非零 `max_memory_bytes` < 1 MiB（1048576）或非零 `max_file_bytes` < 512 为**致命错误**（shell 无法启动，`validate.go:429-465`）
+- 非零 `max_memory_bytes` < 16 MiB 产生警告（各平台 shell 启动内存占用不同，可能误杀所有命令）
+- `max_processes = 1` 产生警告（shell 自身占用唯一进程槽位，无法 fork `ls | head` 等管道辅助进程）
+- macOS：`sandbox-exec` 只做文件系统写保护，不执行任何资源上限——设任何非零 limit 均为 no-op（产生警告）
+- 启用沙箱需要平台支持：Windows Job Object（无需管理员）；Linux setrlimit + Landlock（内核 5.13+）；macOS sandbox-exec（limits 不生效）
 
 ### 默认拦截的危险命令
 
@@ -383,7 +440,7 @@ blocked_commands:
 
 ## E. Session 配置
 
-**源码**: `types_storage.go:11-19`（`SessionConfig`） | 默认值: `defaults.go:108-113`
+**源码**: `types_storage.go:11-26`（`SessionConfig`） | 默认值: `defaults.go:117-128`
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -394,6 +451,7 @@ blocked_commands:
 | `enable_summary` | bool | true | 是否启用会话摘要 |
 | `summary_trigger` | int | 50 | 摘要触发事件数阈值 |
 | `redis_url` | string | - | Redis 连接 URL（支持 `${ENV}` 展开），仅 `redis` 后端 |
+| `enable_model_event_log` | bool | true | 是否启用模型可见事件日志（写入 `wukong_model_events` 表，`internal/session/eventlog.go`）。记录上下文富化（唤醒/召回/持久记忆注入）**之后**模型实际看到的消息，强制 "model-visible means logged" 不变式；区别于框架 session 服务自身的事件日志 |
 
 > 三种后端（`session/store.go:33-47`）：`sqlite`→`sessionsqlite.NewService`；`memory`→`sessioninmemory`；`redis`→本仓库 `newRedisService`。`SessionService` 嵌入 tRPC 框架 `session.Service` 接口，无自定义接口。
 
@@ -443,11 +501,11 @@ blocked_commands:
 
 ## G. Todo 配置
 
-**源码**: `types_storage.go:43-48`（`TodoConfig`） | 默认值: `defaults.go:138-141`
+**源码**: `types_storage.go:50-55`（`TodoConfig`） | 默认值: `defaults.go:153-156`
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `backend` | string | `sqlite` | 存储后端: `sqlite`/`memory` |
+| `backend` | string | `sqlite` | 存储后端：**仅支持 `sqlite`**。配置 `memory` 等其他值会触发致命错误（`validate.go:249-258`：`todo.backend %q is invalid; use sqlite`） |
 | `db_path` | string | `wukong.db` | 数据库文件路径 |
 | `enable_native_todo` | bool | true | 是否启用原生 Todo 工具 |
 | `enable_enforcer` | bool | true | 是否启用 Todo 强制执行器 |
@@ -475,7 +533,7 @@ blocked_commands:
 
 ## I. Cortex 配置
 
-**源码**: `types_cortex.go:11-36`（`CortexConfig`） | 默认值: `defaults.go:156-160`
+**源码**: `types_cortex.go:11-36`（`CortexConfig`） | 默认值: `defaults.go:170-176`
 
 ### 主配置
 
@@ -502,6 +560,7 @@ blocked_commands:
 | `recall_mode` | string | `hybrid` | 召回模式: `lexical`/`vector`/`hybrid` |
 | `dense_weight` | float64 | 0.7 | 向量检索权重 [0, 1] |
 | `text_weight` | float64 | 0.3 | 词法检索权重 [0, 1] |
+| `keyword_match_percent` | float64 | 0.0 | 关键词命中率过滤阈值 [0, 1]：0 = 不过滤；0.3 要求文档命中 30% 的查询关键词才保留（语义见 `internal/search/genome.go:42-44`） |
 | `fts5_pool_size` | int | 50 | FTS5 候选池大小（rerank 前） |
 | `max_retrieved_num` | int | 10 | 最终 Top-K |
 | `fusion_method` | string | `rrf` | 融合方法: `weighted`/`rrf`（推荐 RRF） |
@@ -606,7 +665,7 @@ blocked_commands:
 
 ## N. Browser 配置
 
-**源码**: `types_browser.go:18-36`（`BrowserConfig`） | 默认值: `defaults.go:197-218`
+**源码**: `types_browser.go:18-36`（`BrowserConfig`） | 默认值: `defaults.go:211-233`
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -638,15 +697,17 @@ blocked_commands:
 
 ### SearchConfig（`types_browser.go:49-55`）
 
-每个后端通过各自 `enabled` 字段独立激活：
+每个后端通过各自 `enabled` 字段独立激活。默认值注册于 `defaults.go:226-233`：
 
-| 后端 | 字段前缀 | 支持展开的字段 |
-|------|---------|---------------|
-| DuckDuckGo | `browser.search.duckduckgo` | `url` |
-| SearXNG | `browser.search.searxng` | `url`, `api_key` |
-| Tavily | `browser.search.tavily` | `api_key` |
-| Google | `browser.search.google` | `api_key`, `cse_id` |
-| Bing | `browser.search.bing` | `api_key` |
+| 后端 | 字段前缀 | 默认 `enabled` | 支持展开的字段 |
+|------|---------|---------------|---------------|
+| DuckDuckGo | `browser.search.duckduckgo` | **true**（`url` 默认 `https://api.duckduckgo.com/`） | `url` |
+| SearXNG | `browser.search.searxng` | false（`url` 默认 `http://localhost:8080/`） | `url`, `api_key` |
+| Tavily | `browser.search.tavily` | false | `api_key` |
+| Google | `browser.search.google` | false（无显式默认，bool 零值） | `api_key`, `cse_id` |
+| Bing | `browser.search.bing` | false（无显式默认，bool 零值） | `api_key` |
+
+> 默认仅 DuckDuckGo 启用（无需密钥）。注意 config.yaml 模板中的取值（禁用 duckduckgo、启用 searxng）是模板示例，不是内置默认。任一后端启用时其必填字段缺失为致命错误（见 §3.1）。
 
 ---
 
@@ -722,13 +783,16 @@ blocked_commands:
 | `scope_prefix` | string | - | 作用域 URL 前缀 |
 | `workers` | int | 4 | 爬取 Worker 数（>= 1） |
 | `asset_workers` | int | 8 | 资源下载 Worker 数 |
-| `browser_pages` | int | 4 | 浏览器标签池大小 |
 | `timeout` | int | 300 | 页面导航超时（**秒**） |
 | `render_timeout` | int | 120 | 单次渲染等待（**秒**） |
 | `settle` | int | 1500 | 网络空闲等待（**毫秒**） |
 | `scroll` | bool | false | 是否自动滚动 |
 | `respect_robots` | bool | true | 是否遵守 robots.txt |
 | `crawl_delay` | int | 0 | 请求间延迟（**毫秒**） |
+| `rate_limit_whitelist` | []string | [] | 资产限速豁免域名（完全信任的 CDN/内网/dev server）：跳过 per-host token bucket 且免疫 429/503 动态降速；大小写不敏感，无端口条目匹配任意端口（`localhost` ⊃ `localhost:3000`） |
+| `rate_limit_ip_segment` | bool | true | IP 段惩罚传播：429/503 惩罚时解析违规 host 的 IP，记录到段级（v4 /24、v6 /64），同段其他 host（CDN 别名）下次等待时继承该最小间隔；正常路径零 DNS 开销 |
+| `rate_limit_ip_prefix_v4` | int | 24 | IPv4 段前缀长度（0-32，越短惩罚范围越宽） |
+| `rate_limit_ip_prefix_v6` | int | 64 | IPv6 段前缀长度（0-128） |
 | `no_sitemap` | bool | false | 是否忽略 sitemap |
 | `dedup_content` | bool | true | 是否内容去重 |
 | `mobile_readable` | bool | true | 是否移动端可读 |
@@ -893,16 +957,16 @@ type ServerSecurityConfig struct {
 
 ## Y. MCP Server 配置
 
-**源码**: `types_server.go:54-59`（`MCPServerConfig`） | 默认值: `defaults.go:392-396`
+**源码**: `types_server.go:53-59`（`MCPServerConfig`） | 默认值: `defaults.go:406-411`（仅注册 security 默认，**无 address 默认**）
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `enabled` | bool | false | 是否启用独立 MCP 服务器 |
-| `address` | string | `:3401` | 监听地址 |
+| `enabled` | bool | false | 是否启用独立 MCP 服务器（将扩展暴露为 JSON-RPC 2.0 MCP Server） |
+| `address` | string | **无内置默认值** | 监听地址。启用时必填，为空直接 fatal（`validate.go:321-328`：`mcp_server.address is required when mcp_server.enabled is true`）。`:3401` 只是 `config.yaml` 模板中的示例值，不是代码默认 |
 | `security.auth.type` | string | `""` | 认证类型: `""`/`api_key`/`jwt` |
 | `security.auth.api_key` | string | - | API Key（支持 `${ENV}`） |
 
-> **安全警告**: 暴露在非回环地址时**必须**设置 `security.auth.type`，否则工具调用无鉴权。
+> **安全警告**: 暴露在非回环地址（`127.0.0.1`/`localhost`/`::1` 之外；裸 `:port` 绑定 0.0.0.0 视为非回环）时**必须**设置 `security.auth.type`，否则 `tools/call` 无鉴权、可经 `developer_command_execute` 执行任意命令（Critical 警告）。
 
 ---
 
@@ -941,7 +1005,7 @@ type ServerSecurityConfig struct {
 
 ## AA. Summon 配置
 
-**源码**: `types_orchestration.go:19-24`（`SummonConfig`） | 默认值: `defaults.go:304-306`
+**源码**: `types_orchestration.go:19-24`（`SummonConfig`） | 默认值: `defaults.go:318-321`
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
@@ -959,7 +1023,7 @@ type ServerSecurityConfig struct {
 | `name` | string | 远程 Agent 名称 |
 | `description` | string | 描述 |
 | `server_url` | string | A2A 服务器 URL |
-| `auth_type` | string | 认证类型: `apikey`/`jwt`/`oauth` |
+| `auth_type` | string | 认证类型: `""`/`api_key`/`jwt`/`oauth2`（`validate.go:349-358` 校验枚举；其他值 fatal） |
 | `api_key` | string | API Key（支持 `${ENV}`） |
 | `api_key_header` | string | API Key 请求头名称 |
 | `jwt_secret` | string | JWT 密钥（支持 `${ENV}`） |
@@ -1223,6 +1287,13 @@ security:
   block_dangerous_commands: true
   ignore_file_enabled: true
   ignore_file: .wukongignore
+  sandbox:
+    kill_on_parent_exit: false   # true = 父进程退出时终止子进程
+    limits:                      # 全 0 = 不限制（默认）
+      max_cpu_seconds: 0         # Windows: Job Object / Linux: RLIMIT_CPU
+      max_memory_bytes: 0        # 非零须 >= 1 MiB
+      max_file_bytes: 0          # 仅 Linux 生效；非零须 >= 512
+      max_processes: 0           # 建议留空或 >= 2，勿设 1
 
 # ===== Storage =====
 session:
@@ -1311,4 +1382,4 @@ apps:
 
 ---
 
-> **最后更新**: 2026-08-11
+> **最后更新**: 2026-08-23
