@@ -255,12 +255,14 @@ func TestCredentialRotator_RotateNow(t *testing.T) {
 	}
 
 	// Verify credential was updated
+	// Rotation semantics: Pending becomes Current, new Pending is generated.
+	// Since initial Pending was empty, Current becomes the newly generated value.
 	rc, err := r.GetCredential("agent1")
 	if err != nil {
 		t.Fatalf("GetCredential after rotation: %v", err)
 	}
-	if rc.Current.APIKey != "old-key" {
-		t.Errorf("expected current API key 'old-key', got %q",
+	if rc.Current.APIKey != "new-key" {
+		t.Errorf("expected current API key 'new-key' (rotated), got %q",
 			rc.Current.APIKey)
 	}
 	if rc.Pending.APIKey != "new-key" {

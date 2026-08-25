@@ -1,51 +1,68 @@
 // Package gateway provides multi-platform messaging channel support
 // for Wukong. It defines the standard Channel interface that all
-// external IM platform adapters (Feishu, WeCom, Slack, etc.) must
-// implement, along with the unified GatewayMessage type used
-// internally for routing and processing.
+// external IM platform adapters (Feishu, etc.) implement, along with
+// the unified GatewayMessage type used internally for routing and
+// processing.
+//
+// The gateway is transport-agnostic: each Channel owns its own inbound
+// transport (e.g. a platform WebSocket long-connection client) and
+// pushes normalized GatewayMessage values through a MessageHandler
+// supplied by the GatewayServer. The gateway handles the shared
+// cross-cutting concerns (deduplication, rate limiting, session
+// mapping, agent execution, reply dispatch) that are independent of
+// how a message was received.
 package gateway
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
 
 	"trpc.group/trpc-go/trpc-agent-go/event"
 )
 
+// MessageHandler is supplied by the GatewayServer and invoked by a
+// Channel for every inbound platform message. Implementations must
+// return quickly (the agent run executes asynchronously inside the
+// gateway); the return value is used only for logging/acknowledgement
+// back to the platform SDK.
+type MessageHandler func(ctx context.Context, msg *GatewayMessage)
+
 // Channel is the standard interface for all messaging platform
-// adapters. Each platform (Feishu, WeCom, Slack, etc.) registers its
-// own implementation with the ChannelRouter.
+// adapters. Each platform (Feishu, etc.) registers its own
+// implementation with the GatewayServer.
+//
+// Unlike the previous HTTP-webhook design, this interface is
+// transport-agnostic: a Channel is responsible for establishing and
+// maintaining its own inbound connection (typically an outbound
+// WebSocket long-connection to the platform) and for parsing the
+// platform-specific event format into a unified GatewayMessage. The
+// gateway then drives the shared processing pipeline.
 //
 // To add a new platform:
-//  1. Implement all 7 methods of this interface
-//  2. Register with ChannelRouter.Register()
-//  3. Add platform config to config.yaml under gateway section
+//  1. Implement this interface (establishing whatever transport the
+//     platform requires inside Start).
+//  2. Register with GatewayServer.RegisterChannel().
+//  3. Add platform config to config.yaml under the gateway section.
 type Channel interface {
 	// Name returns the unique channel identifier
-	// (e.g., "feishu", "wecom").
+	// (e.g., "feishu").
 	Name() string
 
-	// RoutePath returns the HTTP callback path prefix for this
-	// channel. The actual callback endpoint will be
-	// RoutePath() + "/callback".
-	// Example: "/feishu" registers "/feishu/callback".
-	RoutePath() string
-
-	// VerifyRequest validates the authenticity of an incoming
-	// HTTP request from the platform. Each platform has its own
-	// verification mechanism:
-	//   - Feishu: HMAC-SHA256 signature header
-	//   - WeCom: SHA1 msg_signature + AES decrypt
-	//   - Slack: Signing Secret verification
+	// Start establishes the platform connection and begins receiving
+	// messages. For each inbound message it must invoke handle with a
+	// populated *GatewayMessage. The call blocks until ctx is cancelled
+	// or a fatal connection error occurs; the platform SDK is expected
+	// to handle reconnection/heartbeat internally.
 	//
-	// Returns the verified/decrypted request body, or an error
-	// if verification fails.
-	VerifyRequest(r *http.Request) ([]byte, error)
+	// handle is the gateway-supplied MessageHandler and runs the shared
+	// pipeline (dedup → rate limit → session → agent → reply). It is
+	// safe for Start to call handle synchronously: the gateway dispatch
+	// layer runs the agent asynchronously.
+	Start(ctx context.Context, handle MessageHandler) error
 
-	// ParseMessage converts platform-specific raw message data
-	// into a unified GatewayMessage.
-	ParseMessage(body []byte) (*GatewayMessage, error)
+	// Stop gracefully closes the platform connection and releases any
+	// resources (e.g. HTTP clients, file handles). It is invoked by the
+	// gateway during shutdown.
+	Stop(ctx context.Context) error
 
 	// BuildUserID constructs a Wukong user identifier from the
 	// platform message. This is used to isolate sessions and
@@ -53,9 +70,9 @@ type Channel interface {
 	// Typical format: platformName + ":" + platformUserID.
 	BuildUserID(msg *GatewayMessage) string
 
-	// BuildSessionID constructs a Wukong session identifier from
-	// the platform message. Sessions are per-conversation or
-	// per-group-chat depending on the platform.
+	// BuildSessionID constructs a Wukong session identifier from the
+	// platform message. Sessions are per-conversation or per-group-chat
+	// depending on the platform.
 	// Typical format: platformName + "-" + conversationID.
 	BuildSessionID(msg *GatewayMessage) string
 
@@ -72,30 +89,22 @@ type Channel interface {
 	//   - ctx carries a timeout for the overall reply operation.
 	SendReply(ctx context.Context, msg *GatewayMessage,
 		events <-chan *event.Event) error
-
-	// HandlePlatformEvent processes platform-specific events
-	// that are not regular messages (e.g., URL verification,
-	// card actions, app open events).
-	//
-	// Implementations should return the raw HTTP response body
-	// for events that require an immediate response
-	// (e.g., URL challenge).
-	//
-	// For events that don't need a special response, return nil
-	// and nil to let the gateway proceed with normal processing.
-	HandlePlatformEvent(w http.ResponseWriter,
-		evt *PlatformEvent) ([]byte, error)
 }
 
 // GatewayMessage is the unified internal representation of a message
 // from any platform. Each Channel parses its platform-specific format
 // into this common type.
+//
+// All fields are tagged `json:"-"` because this type is never
+// serialized over the wire — it is a purely internal value passed
+// between the Channel and the gateway pipeline. It is therefore
+// independent of the inbound transport (HTTP webhook or WebSocket).
 type GatewayMessage struct {
-	// Platform is the platform identifier (e.g., "feishu", "wecom").
+	// Platform is the platform identifier (e.g., "feishu").
 	Platform string `json:"-"`
 
 	// PlatformUserID is the user ID on the source platform
-	// (Feishu open_id, WeCom userid, Slack user ID).
+	// (Feishu open_id, etc.).
 	PlatformUserID string `json:"-"`
 
 	// ConversationID is the conversation/chat/group ID on the
@@ -110,7 +119,8 @@ type GatewayMessage struct {
 	ContentType string `json:"-"`
 
 	// ResponseURL is an optional URL provided by the platform for
-	// sending proactive replies (used for streaming messages).
+	// sending proactive replies (used for streaming messages on
+	// platforms that support it).
 	ResponseURL string `json:"-"`
 
 	// MessageID is the platform's unique message identifier,
@@ -122,25 +132,5 @@ type GatewayMessage struct {
 
 	// RawData holds the original platform-specific message data
 	// for Channel-internal use during response construction.
-	RawData json.RawMessage `json:"-"`
-}
-
-// PlatformEvent represents a non-message platform event such as URL
-// verification challenges, card interactions, or app lifecycle events.
-type PlatformEvent struct {
-	// Platform is the platform identifier (e.g., "feishu", "wecom").
-	Platform string
-
-	// Type identifies the event kind:
-	//   - "url_verify": URL verification challenge
-	//   - "card_action": Interactive card button click
-	//   - "app_open": App opened event
-	//   - "event_callback": Generic event callback
-	Type string
-
-	// Data contains the event payload in platform-specific format.
-	Data json.RawMessage
-
-	// Metadata holds additional platform-specific key-value pairs.
-	Metadata map[string]string
+	RawData []byte `json:"-"`
 }

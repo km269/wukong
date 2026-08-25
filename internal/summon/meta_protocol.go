@@ -24,6 +24,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/km269/wukong/internal/ard"
 	"github.com/km269/wukong/internal/util"
+	"github.com/km269/wukong/pkg/httpclient"
 )
 
 // ============================================================================
@@ -35,11 +36,11 @@ import (
 // and security profiles before establishing a communication session.
 //
 // The negotiation flow:
-//   1. Client calls GetCapabilities(remoteURL) to discover remote agent
-//   2. Client selects best interface + security scheme
-//   3. Client calls Negotiate(remoteURL, params) to propose configuration
-//   4. Server accepts or rejects the proposal
-//   5. If accepted, a session is established with negotiated parameters
+//  1. Client calls GetCapabilities(remoteURL) to discover remote agent
+//  2. Client selects best interface + security scheme
+//  3. Client calls Negotiate(remoteURL, params) to propose configuration
+//  4. Server accepts or rejects the proposal
+//  5. If accepted, a session is established with negotiated parameters
 type MetaProtocol struct {
 	mu sync.RWMutex
 
@@ -55,7 +56,7 @@ type MetaProtocol struct {
 	sessions map[string]*NegotiationSession
 
 	// HTTP client for remote capability queries
-	httpClient *http.Client
+	httpClient *httpclient.Client
 }
 
 // NegotiationSession tracks an established protocol negotiation session.
@@ -128,9 +129,11 @@ func NewMetaProtocol(cfg *MetaProtocolConfig) *MetaProtocol {
 		securityDefs:        cfg.SecurityDefinitions,
 		preferredSecurity:   cfg.PreferredSecurity,
 		sessions:            make(map[string]*NegotiationSession),
-		httpClient: &http.Client{
-			Timeout: cfg.HTTPTimeout,
-		},
+		httpClient: httpclient.New(httpclient.Options{
+			Timeout:    cfg.HTTPTimeout,
+			MaxRetries: 2,
+			RetryDelay: 500 * time.Millisecond,
+		}),
 	}
 }
 
@@ -194,11 +197,11 @@ func (m *MetaProtocol) fetchCapabilities(
 
 	// Convert ADP document to capabilities result
 	return &ard.CapabilitiesResult{
-		Interfaces:           doc.Interfaces,
-		MessageProfiles:      []string{"P1", "P3"},
-		SecurityDefinitions:  doc.SecurityDefinitions,
-		ProtocolVersion:      doc.ProtocolVersion,
-		AgentDID:             doc.DID,
+		Interfaces:          doc.Interfaces,
+		MessageProfiles:     []string{"P1", "P3"},
+		SecurityDefinitions: doc.SecurityDefinitions,
+		ProtocolVersion:     doc.ProtocolVersion,
+		AgentDID:            doc.DID,
 	}, nil
 }
 
@@ -247,7 +250,7 @@ func (m *MetaProtocol) Negotiate(
 
 	// Phase 3: Send negotiation proposal via JSON-RPC
 	negotiateParams := &ard.NegotiateParams{
-		Interface:     selection.InterfaceIndex,
+		Interface:      selection.InterfaceIndex,
 		MessageProfile: selection.MessageProfile,
 		SecurityScheme: selection.SecurityScheme,
 	}
@@ -436,8 +439,9 @@ func NewMetaProtocolHandler(meta *MetaProtocol) *MetaProtocolHandler {
 
 // ServeHTTP handles incoming meta-protocol JSON-RPC requests.
 // Routes:
-//   POST /anp/meta-protocol (body: JSON-RPC 2.0)
-//   GET  /anp/capabilities     (returns local capabilities)
+//
+//	POST /anp/meta-protocol (body: JSON-RPC 2.0)
+//	GET  /anp/capabilities     (returns local capabilities)
 func (h *MetaProtocolHandler) ServeHTTP(
 	w http.ResponseWriter, r *http.Request,
 ) {
@@ -460,11 +464,11 @@ func (h *MetaProtocolHandler) handleGetCapabilities(
 	w http.ResponseWriter, r *http.Request,
 ) {
 	result := ard.CapabilitiesResult{
-		Interfaces:           h.meta.supportedInterfaces,
-		MessageProfiles:      h.meta.supportedProfiles,
-		SecurityDefinitions:  h.meta.securityDefs,
-		ProtocolVersion:      ard.ANPProtocolVersion,
-		AgentDID:             h.meta.localDID,
+		Interfaces:          h.meta.supportedInterfaces,
+		MessageProfiles:     h.meta.supportedProfiles,
+		SecurityDefinitions: h.meta.securityDefs,
+		ProtocolVersion:     ard.ANPProtocolVersion,
+		AgentDID:            h.meta.localDID,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -508,11 +512,11 @@ func (h *MetaProtocolHandler) handleJSONRPCGetCapabilities(
 	w http.ResponseWriter, id int,
 ) {
 	result := ard.CapabilitiesResult{
-		Interfaces:           h.meta.supportedInterfaces,
-		MessageProfiles:      h.meta.supportedProfiles,
-		SecurityDefinitions:  h.meta.securityDefs,
-		ProtocolVersion:      ard.ANPProtocolVersion,
-		AgentDID:             h.meta.localDID,
+		Interfaces:          h.meta.supportedInterfaces,
+		MessageProfiles:     h.meta.supportedProfiles,
+		SecurityDefinitions: h.meta.securityDefs,
+		ProtocolVersion:     ard.ANPProtocolVersion,
+		AgentDID:            h.meta.localDID,
 	}
 
 	resp := ard.CapabilitiesResponse{

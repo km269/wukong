@@ -44,19 +44,8 @@ func (m *Manager) RegisterAppAsMCPResource(appName string, description string) (
 	// 读取 HTML 内容
 	html, err := m.appsMgr.ReadAppHTML(appName)
 	if err != nil {
-		// 如果无法读取，使用占位符
-		html = fmt.Sprintf(`<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>%s</title>
-</head>
-<body>
-  <h1>%s</h1>
-  <p>%s</p>
-</body>
-</html>`, appName, appName, app.Description)
+		return nil, fmt.Errorf(
+			"read app html %q: %w", appName, err)
 	}
 
 	// 注册资源

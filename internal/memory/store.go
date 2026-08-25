@@ -41,10 +41,11 @@ const shutdownTimeout = 5 * time.Second
 // MemoryManager wraps the memory service with config-driven creation
 // and graceful shutdown support.
 type MemoryManager struct {
-	svc      memory.Service
-	cfg      *config.MemoryConfig
-	pool     *util.DatabasePool
-	ownsPool bool
+	svc             memory.Service
+	cfg             *config.MemoryConfig
+	pool            *util.DatabasePool
+	ownsPool        bool
+	metadataManager *MetadataManager
 
 	// shutdown coordination
 	active    sync.WaitGroup // tracks in-flight extraction jobs
@@ -92,6 +93,18 @@ func NewMemoryManager(
 			active:  &mm.active,
 			closing: &mm.isClosing,
 			mu:      &mm.mu,
+		}
+	}
+
+	// Initialize metadata manager for enhanced scoring and reference tracking.
+	if mm.pool != nil {
+		db, err := mm.pool.GetDB()
+		if err == nil {
+			mm.metadataManager = NewMetadataManager(db)
+			util.Logger.Info("memory: metadata manager initialized")
+		} else {
+			util.Logger.Warn("memory: failed to initialize metadata manager",
+				slog.String("error", err.Error()))
 		}
 	}
 
@@ -219,6 +232,7 @@ func (m *MemoryManager) logMemoryHealth() {
 
 // CleanMemoriesByAge removes memories older than the given TTL
 // for the specified user. Returns the number of deleted entries.
+// Uses dynamic TTL based on reference frequency when metadata manager is available.
 // Deprecated: use SmartCleanup instead for capacity-aware eviction.
 func (m *MemoryManager) CleanMemoriesByAge(
 	ctx context.Context,
@@ -230,9 +244,16 @@ func (m *MemoryManager) CleanMemoriesByAge(
 		return 0, fmt.Errorf("read for cleanup: %w", err)
 	}
 
-	cutoff := time.Now().Add(-ttl)
+	now := time.Now()
 	var deleted int
 	for _, e := range entries {
+		// Calculate dynamic TTL based on reference frequency.
+		dynamicTTL := ttl
+		if m.metadataManager != nil && m.cfg.DynamicTTL {
+			dynamicTTL = m.metadataManager.AdjustTTLByReference(ctx, e.ID, userKey.UserID, ttl)
+		}
+		cutoff := now.Add(-dynamicTTL)
+
 		if e.UpdatedAt.Before(cutoff) {
 			memKey := memory.Key{
 				AppName:  userKey.AppName,
@@ -244,28 +265,79 @@ func (m *MemoryManager) CleanMemoriesByAge(
 					"id", e.ID, "error", err.Error())
 			} else {
 				deleted++
+				if m.metadataManager != nil {
+					_ = m.metadataManager.DeleteMetadata(ctx, e.ID, userKey.UserID)
+				}
 			}
 		}
 	}
 	if deleted > 0 {
 		util.Logger.Info("memory: cleaned old memories",
 			"deleted", deleted,
-			"cutoff", cutoff.Format(time.RFC3339),
+			"base_ttl", ttl.String(),
 		)
 	}
 	return deleted, nil
+}
+
+// RecordMemoryReference increments the reference count for the given memory.
+// This should be called whenever a memory is read/recalled to track usage frequency.
+func (m *MemoryManager) RecordMemoryReference(
+	ctx context.Context,
+	userKey memory.UserKey,
+	memoryID string,
+) error {
+	if m.metadataManager == nil {
+		return nil
+	}
+	return m.metadataManager.RecordReference(ctx, memoryID, userKey.UserID)
+}
+
+// BatchRecordMemoryReferences increments the reference count for multiple memories.
+func (m *MemoryManager) BatchRecordMemoryReferences(
+	ctx context.Context,
+	userKey memory.UserKey,
+	memoryIDs []string,
+) error {
+	if m.metadataManager == nil {
+		return nil
+	}
+	return m.metadataManager.BatchRecordReferences(ctx, memoryIDs, userKey.UserID)
+}
+
+// MarkMemoryImportance sets the importance level for a memory.
+// Valid importance values: "high", "medium", "low".
+func (m *MemoryManager) MarkMemoryImportance(
+	ctx context.Context,
+	userKey memory.UserKey,
+	memoryID string,
+	importance string,
+) error {
+	if m.metadataManager == nil {
+		return nil
+	}
+	return m.metadataManager.MarkImportance(ctx, memoryID, userKey.UserID, importance)
+}
+
+// MetadataManager returns the underlying metadata manager.
+// Returns nil if not initialized.
+func (m *MemoryManager) MetadataManager() *MetadataManager {
+	return m.metadataManager
 }
 
 // SmartCleanup performs capacity-aware memory eviction with
 // importance scoring. Strategy:
 //  1. If under 80% capacity: only delete expired (>TTL).
 //  2. If over 80% capacity: evict lowest-score memories down to
-//     60% capacity, using a combined score of recency (70%) and
-//     content length (30%).
+//     60% capacity, using a combined score of:
+//     - 40% recency (freshness)
+//     - 30% reference frequency (how often the memory has been recalled)
+//     - 20% importance marking (high/medium/low)
+//     - 10% content length (substantive memories preserved)
 //  3. Returns the number of deleted entries.
 //
 // This ensures transient or short memories are evicted first,
-// while recently updated and substantive memories are preserved.
+// while recently updated and frequently referenced memories are preserved.
 func (m *MemoryManager) SmartCleanup(
 	ctx context.Context,
 	userKey memory.UserKey,
@@ -296,19 +368,53 @@ func (m *MemoryManager) SmartCleanup(
 	// Over 80% capacity: score all entries and evict lowest-scoring
 	// down to 60% of max capacity.
 	now := time.Now()
-	cutoff := now.Add(-ttl)
-	maxAge := 365 * 24 * time.Hour // reference max age for normalisation
+	maxAge := 365 * 24 * time.Hour
 	if ttl > maxAge {
 		maxAge = ttl
 	}
 
+	// Preload metadata for all entries if metadata manager is available.
+	var metadataMap map[string]*MemoryMetadata
+	if m.metadataManager != nil {
+		memoryIDs := make([]string, 0, len(entries))
+		for _, e := range entries {
+			memoryIDs = append(memoryIDs, e.ID)
+		}
+		metadataMap, _ = m.metadataManager.BatchGetMetadata(ctx, memoryIDs, userKey.UserID)
+	}
+
 	type scored struct {
-		entry *memory.Entry
-		score float64
+		entry      *memory.Entry
+		score      float64
+		recency    float64
+		reference  float64
+		importance float64
+		length     float64
 	}
 	var scoredEntries []scored
 
 	for _, e := range entries {
+		// Get metadata for this entry.
+		var md *MemoryMetadata
+		if metadataMap != nil {
+			md = metadataMap[e.ID]
+		}
+		if md == nil {
+			md = &MemoryMetadata{
+				MemoryID:       e.ID,
+				UserID:         userKey.UserID,
+				ReferenceCount: 0,
+				Importance:     ImportanceLow,
+			}
+		}
+
+		// Calculate dynamic TTL based on reference frequency.
+		dynamicTTL := ttl
+		if m.metadataManager != nil && m.cfg.DynamicTTL {
+			dynamicTTL = m.metadataManager.AdjustTTLByReference(ctx, e.ID, userKey.UserID, ttl)
+		}
+		cutoff := now.Add(-dynamicTTL)
+
 		// Always evict expired entries regardless of score.
 		if e.UpdatedAt.Before(cutoff) {
 			memKey := memory.Key{
@@ -320,15 +426,38 @@ func (m *MemoryManager) SmartCleanup(
 				util.Logger.Warn("memory: smart cleanup delete failed",
 					"id", e.ID, "error", delErr.Error())
 			}
+			if m.metadataManager != nil {
+				_ = m.metadataManager.DeleteMetadata(ctx, e.ID, userKey.UserID)
+			}
 			continue
 		}
 
-		// Compute importance score: 70% recency + 30% content length.
 		// Recency: 1.0 for just-updated, decaying linearly over maxAge.
 		age := now.Sub(e.UpdatedAt)
 		recencyScore := 1.0 - (float64(age) / float64(maxAge))
 		if recencyScore < 0 {
 			recencyScore = 0
+		}
+
+		// Reference frequency: normalised to [0, 1], max at 10 references.
+		referenceScore := float64(md.ReferenceCount) / 10.0
+		if referenceScore > 1.0 {
+			referenceScore = 1.0
+		}
+
+		// Importance marking: high=1.0, medium=0.5, low=0.2.
+		var importanceScore float64
+		if m.metadataManager != nil {
+			importanceScore = m.metadataManager.GetImportanceScore(md.Importance)
+		} else {
+			switch md.Importance {
+			case ImportanceHigh:
+				importanceScore = 1.0
+			case ImportanceMedium:
+				importanceScore = 0.5
+			default:
+				importanceScore = 0.2
+			}
 		}
 
 		// Content length: normalised to [0, 1], capped at 500 chars.
@@ -341,10 +470,18 @@ func (m *MemoryManager) SmartCleanup(
 			lengthScore = 1.0
 		}
 
-		score := recencyScore*0.7 + lengthScore*0.3
+		// Combined score using configurable weights.
+		score := recencyScore*m.cfg.RecencyWeight +
+			referenceScore*m.cfg.ReferenceWeight +
+			importanceScore*m.cfg.ImportanceWeight +
+			lengthScore*m.cfg.LengthWeight
 		scoredEntries = append(scoredEntries, scored{
-			entry: e,
-			score: score,
+			entry:      e,
+			score:      score,
+			recency:    recencyScore,
+			reference:  referenceScore,
+			importance: importanceScore,
+			length:     lengthScore,
 		})
 	}
 
@@ -368,6 +505,9 @@ func (m *MemoryManager) SmartCleanup(
 				"error", delErr.Error())
 		} else {
 			deleted++
+			if m.metadataManager != nil {
+				_ = m.metadataManager.DeleteMetadata(ctx, e.ID, userKey.UserID)
+			}
 		}
 	}
 

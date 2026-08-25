@@ -80,10 +80,10 @@ type SearchRecallReq struct {
 
 // SearchRecallRsp is the output for searching recall.
 type SearchRecallRsp struct {
-	Success bool                 `json:"success"`
+	Success bool                  `json:"success"`
 	Results []recall.SearchResult `json:"results,omitempty"`
-	Count   int                  `json:"count"`
-	Error   string               `json:"error,omitempty"`
+	Count   int                   `json:"count"`
+	Error   string                `json:"error,omitempty"`
 }
 
 func (m *RecallManager) searchRecall(
@@ -95,7 +95,7 @@ func (m *RecallManager) searchRecall(
 	if m.memoryReader != nil {
 		// Use cross-search: conversation history + tRPC memories.
 		results, err = m.store.SearchWithMemory(
-			req.Query, "", req.Limit, m.memoryReader,
+			ctx, req.Query, "", req.Limit, m.memoryReader,
 		)
 	} else {
 		// Session-scoped search bypasses cross-search.
@@ -105,7 +105,7 @@ func (m *RecallManager) searchRecall(
 			)
 		} else {
 			results, err = m.store.Search(
-				req.Query, "", req.Limit,
+				ctx, req.Query, "", req.Limit,
 			)
 		}
 	}

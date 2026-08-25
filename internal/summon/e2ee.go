@@ -194,7 +194,11 @@ func (m *E2EEMessenger) EstablishSession(
 	}
 
 	// 4. Derive encryption key via HKDF
-	encryptKey := deriveKey(sharedSecret, []byte("wukong-e2ee-v1"))
+	encryptKey, err := deriveKey(sharedSecret, []byte("wukong-e2ee-v1"))
+	if err != nil {
+		return nil, fmt.Errorf(
+			"e2ee: key derivation failed: %w", err)
+	}
 
 	// 5. Create session
 	session := &E2EESession{
@@ -372,22 +376,21 @@ func (m *E2EEMessenger) ActiveSessions() int {
 
 // deriveKey derives a 32-byte ChaCha20-Poly1305 key from a shared
 // secret using HKDF-SHA256.
-func deriveKey(sharedSecret, info []byte) []byte {
+func deriveKey(sharedSecret, info []byte) ([]byte, error) {
 	hkdfReader := hkdf.New(
 		sha256.New,
 		sharedSecret,
-		nil,   // No salt
-		info,  // Application-specific context
+		nil,  // No salt
+		info, // Application-specific context
 	)
 
 	key := make([]byte, chacha20poly1305.KeySize)
 	if _, err := hkdfReader.Read(key); err != nil {
-		// In practice, hkdf.Read never errors when reading
-		// within the hash output length.
-		panic(fmt.Sprintf("e2ee: hkdf failed: %v", err))
+		return nil, fmt.Errorf(
+			"e2ee: hkdf read failed: %w", err)
 	}
 
-	return key
+	return key, nil
 }
 
 // extractX25519Key extracts the X25519 public key (key-2)

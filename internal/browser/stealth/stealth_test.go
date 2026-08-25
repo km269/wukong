@@ -7,6 +7,7 @@ import (
 
 func TestScriptContainsKeySpoofs(t *testing.T) {
 	// Verify the stealth script contains all critical anti-detection measures.
+	// 检查项以脚本中实际使用的语法为准 (defineProperty 形式).
 	checks := []string{
 		// Primary bot detection flag.
 		"navigator.webdriver",
@@ -17,13 +18,13 @@ func TestScriptContainsKeySpoofs(t *testing.T) {
 		"loadTimes",
 		"csi",
 
-		// Plugin spoofing.
-		"navigator.plugins",
+		// Plugin spoofing (defineProperty form: navigator, 'plugins').
+		"navigator, 'plugins'",
 		"Chrome PDF Plugin",
 		"PluginArray.prototype",
 
-		// MIME type spoofing.
-		"navigator.mimeTypes",
+		// MIME type spoofing (defineProperty form).
+		"navigator, 'mimeTypes'",
 		"MimeTypeArray.prototype",
 
 		// Language spoofing.
@@ -42,26 +43,37 @@ func TestScriptContainsKeySpoofs(t *testing.T) {
 		"navigator.connection",
 		"effectiveType",
 
-		// Screen dimensions.
-		"screen.availWidth",
-		"screen.colorDepth",
+		// Screen dimensions (defineProperty form: screen, 'availWidth').
+		"screen, 'availWidth'",
+		"screen, 'colorDepth'",
 
 		// Canvas fingerprinting.
+		"_addCanvasNoise",
 		"HTMLCanvasElement.prototype.toDataURL",
-		"getImageData",
+		"HTMLCanvasElement.prototype.toBlob",
+		"CanvasRenderingContext2D.prototype.getImageData",
 		"putImageData",
 
 		// WebGL spoofing.
 		"WebGLRenderingContext.prototype.getParameter",
+		"WebGL2RenderingContext.prototype.getParameter",
 		"UNMASKED_VENDOR_WEBGL",
-		"Intel",
+		"MAX_TEXTURE_SIZE",
+		"Microsoft Corporation",
+		"getSupportedExtensions",
+		"EXT_texture_filter_anisotropic",
+
+		// AudioContext fingerprinting.
+		"AudioContext.prototype.createOscillator",
+		"AudioContext.prototype.createPeriodicWave",
+		"OfflineAudioContext",
 
 		// IntersectionObserver protection.
 		"IntersectionObserver.prototype.observe",
 
 		// Battery API spoofing.
 		"navigator.getBattery",
-		"0.76",
+		"batteryLevel",
 	}
 
 	for _, check := range checks {

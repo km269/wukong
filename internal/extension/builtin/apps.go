@@ -4,6 +4,7 @@ package builtin
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/km269/wukong/internal/apps"
 
@@ -145,6 +146,7 @@ type AppCreateReq struct {
 	Name        string `json:"name" jsonschema:"description=应用名称（用作文件名）"`
 	Description string `json:"description,omitempty" jsonschema:"description=应用描述"`
 	HTML        string `json:"html" jsonschema:"description=完整的 HTML 内容"`
+	Force       bool   `json:"force,omitempty" jsonschema:"description=是否强制覆盖已有应用"`
 }
 
 // AppCreateRsp is the output for creating an app.
@@ -158,10 +160,27 @@ type AppCreateRsp struct {
 func (ts *AppsToolSet) createApp(
 	ctx context.Context, req AppCreateReq,
 ) (AppCreateRsp, error) {
+	if req.Force {
+		if _, ok := ts.mgr.GetApp(req.Name); ok {
+			if err := ts.mgr.DeleteApp(req.Name); err != nil {
+				return AppCreateRsp{
+					Success: false,
+					Error:   fmt.Sprintf("删除现有应用失败：%v", err),
+				}, nil
+			}
+		}
+	}
+
 	app, err := ts.mgr.CreateApp(
 		req.Name, req.Description, req.HTML,
 	)
 	if err != nil {
+		if strings.Contains(err.Error(), "already exists") {
+			return AppCreateRsp{
+				Success: false,
+				Error:   fmt.Sprintf("应用 %q 已存在，请使用其他名称或设置 force: true 强制覆盖", req.Name),
+			}, nil
+		}
 		return AppCreateRsp{
 			Success: false,
 			Error:   err.Error(),
@@ -202,9 +221,9 @@ type AppGetReq struct {
 
 // AppGetRsp is the output for getting an app.
 type AppGetRsp struct {
-	Success bool         `json:"success"`
+	Success bool          `json:"success"`
 	App     *apps.AppInfo `json:"app,omitempty"`
-	Error   string       `json:"error,omitempty"`
+	Error   string        `json:"error,omitempty"`
 }
 
 func (ts *AppsToolSet) getApp(
@@ -225,8 +244,8 @@ func (ts *AppsToolSet) getApp(
 
 // AppUpdateReq is the input for updating an app.
 type AppUpdateReq struct {
-	Name        string `json:"name" jsonschema:"description=要更新的应用名称"`
-	HTML        string `json:"html" jsonschema:"description=新的 HTML 内容"`
+	Name string `json:"name" jsonschema:"description=要更新的应用名称"`
+	HTML string `json:"html" jsonschema:"description=新的 HTML 内容"`
 }
 
 // AppUpdateRsp is the output for updating an app.
@@ -284,6 +303,7 @@ type AppCreateWithTemplateReq struct {
 	Name        string `json:"name" jsonschema:"description=应用名称（用作文件名）"`
 	Description string `json:"description,omitempty" jsonschema:"description=应用描述"`
 	Template    string `json:"template" jsonschema:"description=模板类型：blank、calculator、dashboard、form、notes"`
+	Force       bool   `json:"force,omitempty" jsonschema:"description=是否强制覆盖已有应用"`
 }
 
 // AppCreateWithTemplateRsp is the output for creating an app with template.
@@ -297,9 +317,26 @@ type AppCreateWithTemplateRsp struct {
 func (ts *AppsToolSet) createAppWithTemplate(
 	ctx context.Context, req AppCreateWithTemplateReq,
 ) (AppCreateWithTemplateRsp, error) {
+	if req.Force {
+		if _, ok := ts.mgr.GetApp(req.Name); ok {
+			if err := ts.mgr.DeleteApp(req.Name); err != nil {
+				return AppCreateWithTemplateRsp{
+					Success: false,
+					Error:   fmt.Sprintf("删除现有应用失败：%v", err),
+				}, nil
+			}
+		}
+	}
+
 	templateType := apps.TemplateType(req.Template)
 	app, err := ts.mgr.CreateAppWithTemplate(req.Name, req.Description, templateType)
 	if err != nil {
+		if strings.Contains(err.Error(), "already exists") {
+			return AppCreateWithTemplateRsp{
+				Success: false,
+				Error:   fmt.Sprintf("应用 %q 已存在，请使用其他名称或设置 force: true 强制覆盖", req.Name),
+			}, nil
+		}
 		return AppCreateWithTemplateRsp{
 			Success: false,
 			Error:   err.Error(),
@@ -317,9 +354,9 @@ type AppTemplateListReq struct{}
 
 // AppTemplateListRsp is the output for listing templates.
 type AppTemplateListRsp struct {
-	Success   bool              `json:"success"`
+	Success   bool                `json:"success"`
 	Templates []apps.TemplateInfo `json:"templates,omitempty"`
-	Count     int               `json:"count"`
+	Count     int                 `json:"count"`
 }
 
 func (ts *AppsToolSet) listTemplates(
@@ -368,6 +405,7 @@ type AppImportReq struct {
 	Name        string `json:"name" jsonschema:"description=应用名称"`
 	Description string `json:"description,omitempty" jsonschema:"description=应用描述"`
 	HTML        string `json:"html" jsonschema:"description=导入的 HTML 内容"`
+	Force       bool   `json:"force,omitempty" jsonschema:"description=是否强制覆盖已有应用"`
 }
 
 // AppImportRsp is the output for importing an app.
@@ -381,8 +419,25 @@ type AppImportRsp struct {
 func (ts *AppsToolSet) importApp(
 	ctx context.Context, req AppImportReq,
 ) (AppImportRsp, error) {
+	if req.Force {
+		if _, ok := ts.mgr.GetApp(req.Name); ok {
+			if err := ts.mgr.DeleteApp(req.Name); err != nil {
+				return AppImportRsp{
+					Success: false,
+					Error:   fmt.Sprintf("删除现有应用失败：%v", err),
+				}, nil
+			}
+		}
+	}
+
 	app, err := ts.mgr.CreateAppFromImport(req.Name, req.Description, req.HTML)
 	if err != nil {
+		if strings.Contains(err.Error(), "already exists") {
+			return AppImportRsp{
+				Success: false,
+				Error:   fmt.Sprintf("应用 %q 已存在，请使用其他名称或设置 force: true 强制覆盖", req.Name),
+			}, nil
+		}
 		return AppImportRsp{
 			Success: false,
 			Error:   err.Error(),
@@ -492,12 +547,12 @@ func formatBytes(n int64) string {
 
 // AppPackReq is the input for packing an app.
 type AppPackReq struct {
-	Name        string `json:"name" jsonschema:"description=应用名称"`
-	Format      string `json:"format" jsonschema:"description=打包格式：html、zim、binary、app"`
-	OutputPath  string `json:"output_path,omitempty" jsonschema:"description=输出路径（可选）"`
-	BaseBinary  string `json:"base_binary,omitempty" jsonschema:"description=基础可执行文件路径（用于 binary/app 格式）"`
-	IconPath    string `json:"icon_path,omitempty" jsonschema:"description=图标路径（可选）"`
-	Compress    bool   `json:"compress,omitempty" jsonschema:"description=是否压缩"`
+	Name       string `json:"name" jsonschema:"description=应用名称"`
+	Format     string `json:"format" jsonschema:"description=打包格式：html、zim、binary、app"`
+	OutputPath string `json:"output_path,omitempty" jsonschema:"description=输出路径（可选）"`
+	BaseBinary string `json:"base_binary,omitempty" jsonschema:"description=基础可执行文件路径（用于 binary/app 格式）"`
+	IconPath   string `json:"icon_path,omitempty" jsonschema:"description=图标路径（可选）"`
+	Compress   bool   `json:"compress,omitempty" jsonschema:"description=是否压缩"`
 }
 
 // AppPackRsp is the output for packing an app.

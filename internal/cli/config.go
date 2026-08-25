@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -74,29 +75,41 @@ func runConfigValidate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Load configuration
+	// Load configuration and run the full validation rules —
+	// the same path as startup (bootstrapSession →
+	// loader.LoadAndValidate), so todo/mcp_server/sandbox/port
+	// conflict and all other fatal checks in validate.go apply
+	// here too.
 	loader, err := config.NewLoader(configPath)
 	if err != nil {
 		fmt.Printf("✗ failed to create config loader: %v\n", err)
 		return fmt.Errorf("config load: %w", err)
 	}
 
-	wukongCfg, err := loader.Load()
+	wukongCfg, err := loader.LoadAndValidate()
 	if err != nil {
-		fmt.Printf("✗ configuration parse error: %v\n", err)
-		return fmt.Errorf("config parse: %w", err)
+		fmt.Printf("✗ validation failed: %v\n", err)
+		return err // already wrapped with "config validation:" by LoadAndValidate
 	}
 
-	errors := runFullValidation(wukongCfg)
+	// Surface non-fatal warnings the same way startup does
+	// (these do not block, but indicate suboptimal or risky
+	// configuration).
+	warnings := wukongCfg.Warnings()
+	if wukongCfg.DefaultProvider == "" {
+		warnings = append(warnings,
+			"default_provider is not set — "+
+				"use --provider flag or set in config.yaml")
+	}
 
 	fmt.Println()
 
-	if len(errors) > 0 {
-		fmt.Printf("✗ validation failed with %d issue(s):\n", len(errors))
-		for i, e := range errors {
-			fmt.Printf("  %d. %s\n", i+1, e)
+	if len(warnings) > 0 {
+		fmt.Printf("⚠ configuration is valid with %d warning(s):\n", len(warnings))
+		for i, w := range warnings {
+			fmt.Printf("  %d. %s\n", i+1, w)
 		}
-		return fmt.Errorf("configuration validation failed: %d issue(s)", len(errors))
+		return nil
 	}
 
 	fmt.Println("✓ configuration is valid")
@@ -106,6 +119,13 @@ func runConfigValidate(cmd *cobra.Command, args []string) error {
 // runFullValidation performs comprehensive config validation and
 // returns a list of error messages. An empty list means the config
 // is valid.
+//
+// Enum and range rules are delegated to the canonical
+// config.WukongConfig.Validate() so this advisory path (used by
+// bench/health) and the startup path can never drift apart. Only
+// advisory checks that Validate() deliberately does not treat as
+// fatal (missing model, missing API key, ACP agent_url, planner,
+// lightweight_provider fallback) are implemented here.
 func runFullValidation(cfg *config.WukongConfig) []string {
 	var issues []string
 
@@ -117,42 +137,28 @@ func runFullValidation(cfg *config.WukongConfig) []string {
 		return issues // Can't validate further without provider
 	}
 
-	// 2. Default provider must exist in providers list
-	p := cfg.FindProvider(cfg.DefaultProvider)
-	if p == nil {
-		issues = append(issues,
-			fmt.Sprintf("default_provider %q not found in providers list",
-				cfg.DefaultProvider))
-		return issues
+	// 2. Delegate enum/range/fatal rules to the canonical validator.
+	if err := cfg.Validate(); err != nil {
+		issues = append(issues, err.Error())
 	}
 
-	// 3. Provider must have a model configured
-	if p.Model == "" {
+	// 3. Default provider must have a model configured
+	p := cfg.FindProvider(cfg.DefaultProvider)
+	if p != nil && p.Model == "" {
 		issues = append(issues,
 			fmt.Sprintf("provider %q has no model configured", p.Name))
 	}
 
 	// 4. API key required for cloud providers
-	if p.APIKey == "" && p.Type != "ollama" && p.Type != "lmstudio" {
+	if p != nil && p.APIKey == "" && p.Type != "ollama" && p.Type != "lmstudio" && p.Type != "vllm" {
 		issues = append(issues,
 			fmt.Sprintf("provider %q (type=%s) has no API key configured; "+
 				"set %s.api_key or ${%s_API_KEY}",
 				p.Name, p.Type, p.Name, strings.ToUpper(p.Name)))
 	}
 
-	// 5. Provider type must be valid
-	validTypes := map[string]bool{
-		"openai": true, "anthropic": true, "google": true,
-		"deepseek": true, "ollama": true, "lmstudio": true, "acp": true,
-	}
+	// 5. ACP providers require an agent_url
 	for _, prov := range cfg.Providers {
-		if !validTypes[prov.Type] {
-			issues = append(issues,
-				fmt.Sprintf("provider %q has unknown type %q; "+
-					"valid types: openai, anthropic, google, "+
-					"deepseek, ollama, lmstudio, acp",
-					prov.Name, prov.Type))
-		}
 		if prov.Type == "acp" && prov.AgentURL == "" {
 			issues = append(issues,
 				fmt.Sprintf("ACP provider %q requires agent_url",
@@ -178,65 +184,6 @@ func runFullValidation(cfg *config.WukongConfig) []string {
 			fmt.Sprintf("lightweight_provider %q not found in providers list; "+
 				"background tasks will use default_provider",
 				cfg.LightweightProvider))
-	}
-
-	// 8. Session backend validation
-	validSessionBackends := map[string]bool{
-		"sqlite": true, "memory": true, "redis": true,
-	}
-	if !validSessionBackends[cfg.Session.Backend] {
-		issues = append(issues,
-			fmt.Sprintf("unknown session backend %q; "+
-				"supported: sqlite, memory, redis",
-				cfg.Session.Backend))
-	}
-
-	// 9. Memory backend validation
-	validMemoryBackends := map[string]bool{
-		"sqlite": true, "redis": true,
-	}
-	if !validMemoryBackends[cfg.Memory.Backend] {
-		issues = append(issues,
-			fmt.Sprintf("unknown memory backend %q; "+
-				"supported: sqlite, redis",
-				cfg.Memory.Backend))
-	}
-
-	// 10. Security permission mode validation
-	validPermModes := map[string]bool{
-		"auto": true, "smart": true, "manual": true, "chat_only": true,
-	}
-	if !validPermModes[string(cfg.Security.PermissionMode)] {
-		issues = append(issues,
-			fmt.Sprintf("unknown permission_mode %q; "+
-				"supported: auto, smart, manual, chat_only",
-				cfg.Security.PermissionMode))
-	}
-
-	// 11. Workflow mode validation
-	validWorkflowModes := map[string]bool{
-		"single": true, "chain": true, "parallel": true,
-		"cycle": true, "graph": true, "team_coordinator": true,
-		"team_swarm": true, "claude_code": true, "codex": true,
-		"dify": true,
-	}
-	if !validWorkflowModes[cfg.Workflow.Mode] {
-		issues = append(issues,
-			fmt.Sprintf("unknown workflow mode %q; "+
-				"supported: single, chain, parallel, cycle, graph, "+
-				"team_coordinator, team_swarm, claude_code, codex, dify",
-				cfg.Workflow.Mode))
-	}
-
-	// 12. Artifact backend validation
-	validArtifactBackends := map[string]bool{
-		"inmemory": true, "cos": true,
-	}
-	if !validArtifactBackends[cfg.ArtifactConfig.Backend] {
-		issues = append(issues,
-			fmt.Sprintf("unknown artifact backend %q; "+
-				"supported: inmemory, cos",
-				cfg.ArtifactConfig.Backend))
 	}
 
 	return issues
@@ -329,7 +276,11 @@ func resolveConfigPath(userPath string) string {
 			filepath.Join(homeDir, ".config", "wukong", "config.yaml"))
 	}
 
-	candidates = append(candidates, "/etc/wukong/config.yaml")
+	// Mirror config.NewLoader: /etc/wukong is only meaningful on
+	// Unix-like systems; skip it on Windows.
+	if runtime.GOOS != "windows" {
+		candidates = append(candidates, "/etc/wukong/config.yaml")
+	}
 
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {

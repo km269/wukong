@@ -10,7 +10,7 @@ import (
 func TestNewSummonManager(t *testing.T) {
 	cfg := &config.SummonConfig{
 		Enabled:       true,
-		SkillsDir:     ".test_skills",
+		DelegatesDir:  ".test_skills",
 		MaxConcurrent: 3,
 	}
 	mgr := NewSummonManager(cfg, nil)
@@ -30,7 +30,7 @@ func TestNewSummonManager(t *testing.T) {
 func TestSummonManager_DefaultMaxConcurrent(t *testing.T) {
 	cfg := &config.SummonConfig{
 		Enabled:       true,
-		SkillsDir:     ".test_skills",
+		DelegatesDir:  ".test_skills",
 		MaxConcurrent: 0, // should default to 5
 	}
 	mgr := NewSummonManager(cfg, nil)
@@ -121,11 +121,11 @@ func TestSummonManager_DelegateCount(t *testing.T) {
 	}
 }
 
-func TestSummonManager_ListSkills_Empty(t *testing.T) {
+func TestSummonManager_ListDelegateInfos_Empty(t *testing.T) {
 	mgr := NewSummonManager(&config.SummonConfig{}, nil)
-	skills := mgr.ListSkills()
-	if len(skills) != 0 {
-		t.Errorf("expected 0 skills, got %d", len(skills))
+	infos := mgr.ListDelegateInfos()
+	if len(infos) != 0 {
+		t.Errorf("expected 0 delegate infos, got %d", len(infos))
 	}
 }
 

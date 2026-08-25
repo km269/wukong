@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/util"
 	"github.com/km269/wukong/pkg/sandbox"
 )
 
@@ -85,9 +86,9 @@ type envInfo struct {
 
 func buildEnvInfo(configPath string) envInfo {
 	info := envInfo{
-		Version:    Version,
-		GitCommit:  GitCommit,
-		BuildDate:  BuildDate,
+		Version:    util.Version,
+		GitCommit:  util.GitCommit,
+		BuildDate:  util.BuildDate,
 		GoVersion:  runtime.Version(),
 		OS:         runtime.GOOS,
 		Arch:       runtime.GOARCH,

@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/km269/wukong/internal/cors"
 )
 
 // RegistryServer provides the ARD HTTP API endpoints.
@@ -19,16 +21,18 @@ type RegistryServer struct {
 	server      *http.Server
 	mux         *http.ServeMux
 	anpHandler  *ANPDiscoveryHandler
+	rateLimiter func(http.Handler) http.Handler
 }
 
 // NewRegistryServer creates a new registry server.
 func NewRegistryServer(registry *Registry, config *RegistryConfig) *RegistryServer {
 	s := &RegistryServer{
-		registry: registry,
-		config:   config,
-		mux:      http.NewServeMux(),
+		registry:    registry,
+		config:      config,
+		mux:         http.NewServeMux(),
+		rateLimiter: RateLimitMiddleware(config.RateLimit),
 	}
-	
+
 	s.setupRoutes()
 	return s
 }
@@ -47,23 +51,23 @@ func (s *RegistryServer) WithANPDiscovery(handler *ANPDiscoveryHandler) *Registr
 func (s *RegistryServer) setupRoutes() {
 	// Well-known endpoint for ai-catalog.json
 	s.mux.HandleFunc("/.well-known/ai-catalog.json", s.handleCatalog)
-	
+
 	// API endpoints
 	if s.config.EnableSearch {
 		s.mux.HandleFunc("/api/v1/search", s.handleSearch)
 	}
-	
+
 	if s.config.EnableExplore {
 		s.mux.HandleFunc("/api/v1/explore", s.handleExplore)
 	}
-	
+
 	if s.config.EnableList {
 		s.mux.HandleFunc("/api/v1/agents", s.handleList)
 	}
-	
+
 	// Health check
 	s.mux.HandleFunc("/health", s.handleHealth)
-	
+
 	// CORS middleware
 	s.mux.HandleFunc("/", s.handleCORS(s.handleNotFound))
 }
@@ -71,21 +75,22 @@ func (s *RegistryServer) setupRoutes() {
 // Start starts the registry server.
 func (s *RegistryServer) Start(ctx context.Context) error {
 	addr := fmt.Sprintf(":%d", s.config.Port)
+	handler := s.rateLimiter(s.mux)
 	s.server = &http.Server{
 		Addr:         addr,
-		Handler:      s.mux,
+		Handler:      handler,
 		ReadTimeout:  10 * time.Second,
-		WriteTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
-	
+
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		s.server.Shutdown(shutdownCtx)
 	}()
-	
+
 	return s.server.ListenAndServe()
 }
 
@@ -100,7 +105,7 @@ func (s *RegistryServer) handleCatalog(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	
+
 	catalog := s.registry.GetCatalog()
 	s.writeJSON(w, http.StatusOK, catalog)
 }
@@ -111,19 +116,19 @@ func (s *RegistryServer) handleSearch(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	
+
 	var req SearchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "Invalid JSON: "+err.Error())
 		return
 	}
-	
+
 	resp, err := s.registry.Search(&req)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	
+
 	s.writeJSON(w, http.StatusOK, resp)
 }
 
@@ -133,19 +138,19 @@ func (s *RegistryServer) handleExplore(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	
+
 	var req ExploreRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "Invalid JSON: "+err.Error())
 		return
 	}
-	
+
 	resp, err := s.registry.Explore(&req)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	
+
 	s.writeJSON(w, http.StatusOK, resp)
 }
 
@@ -155,16 +160,16 @@ func (s *RegistryServer) handleList(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
-	
+
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-	
+
 	resp, err := s.registry.List(limit, offset)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	
+
 	s.writeJSON(w, http.StatusOK, resp)
 }
 
@@ -180,20 +185,17 @@ func (s *RegistryServer) handleNotFound(w http.ResponseWriter, r *http.Request) 
 	s.writeError(w, http.StatusNotFound, "Not found")
 }
 
-// handleCORS wraps a handler with CORS headers.
+// handleCORS wraps a handler with localhost-only CORS headers.
 func (s *RegistryServer) handleCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// CORS headers
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Max-Age", "86400")
-		
+		cors.SetLocalhostOnly(w, r)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		
+
 		next(w, r)
 	}
 }
@@ -219,11 +221,11 @@ func WriteCatalogFile(catalog *AICatalog, path string) error {
 	if err != nil {
 		return fmt.Errorf("marshal catalog: %w", err)
 	}
-	
+
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		return fmt.Errorf("write catalog: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -233,12 +235,12 @@ func ReadCatalogFile(path string) (*AICatalog, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read catalog: %w", err)
 	}
-	
+
 	catalog := &AICatalog{}
 	if err := json.Unmarshal(data, catalog); err != nil {
 		return nil, fmt.Errorf("unmarshal catalog: %w", err)
 	}
-	
+
 	return catalog, nil
 }
 
@@ -247,7 +249,7 @@ func (c *AICatalog) ImportMCPServer(card *MCPServerCard) error {
 	if card.Identifier == "" {
 		return fmt.Errorf("MCPServerCard must have an identifier")
 	}
-	
+
 	entry := CatalogEntry{
 		Identifier:   card.Identifier,
 		DisplayName:  card.Name,
@@ -259,7 +261,7 @@ func (c *AICatalog) ImportMCPServer(card *MCPServerCard) error {
 		Version:      card.Version,
 		UpdatedAt:    Now(),
 	}
-	
+
 	c.AddEntry(entry)
 	return nil
 }
@@ -269,7 +271,7 @@ func (c *AICatalog) ImportA2AAgent(card *A2AAgentCard) error {
 	if card.Identifier == "" {
 		return fmt.Errorf("A2AAgentCard must have an identifier")
 	}
-	
+
 	entry := CatalogEntry{
 		Identifier:   card.Identifier,
 		DisplayName:  card.Name,
@@ -281,7 +283,7 @@ func (c *AICatalog) ImportA2AAgent(card *A2AAgentCard) error {
 		Version:      card.Version,
 		UpdatedAt:    Now(),
 	}
-	
+
 	c.AddEntry(entry)
 	return nil
 }
@@ -289,35 +291,35 @@ func (c *AICatalog) ImportA2AAgent(card *A2AAgentCard) error {
 // MCPServerCard represents an MCP Server Card (simplified).
 type MCPServerCard struct {
 	Identifier  string   `json:"identifier,omitempty"`
-	Name       string   `json:"name,omitempty"`
-	Description string  `json:"description,omitempty"`
-	URL        string   `json:"url,omitempty"`
-	Tools      []string `json:"tools,omitempty"`
-	Tags       []string `json:"tags,omitempty"`
-	Version    string   `json:"version,omitempty"`
+	Name        string   `json:"name,omitempty"`
+	Description string   `json:"description,omitempty"`
+	URL         string   `json:"url,omitempty"`
+	Tools       []string `json:"tools,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Version     string   `json:"version,omitempty"`
 }
 
 // A2AAgentCard represents an A2A Agent Card (simplified).
 type A2AAgentCard struct {
 	Identifier   string   `json:"identifier,omitempty"`
-	Name        string   `json:"name,omitempty"`
-	Description string   `json:"description,omitempty"`
-	URL         string   `json:"url,omitempty"`
+	Name         string   `json:"name,omitempty"`
+	Description  string   `json:"description,omitempty"`
+	URL          string   `json:"url,omitempty"`
 	Capabilities []string `json:"capabilities,omitempty"`
-	Tags        []string `json:"tags,omitempty"`
-	Version     string   `json:"version,omitempty"`
+	Tags         []string `json:"tags,omitempty"`
+	Version      string   `json:"version,omitempty"`
 }
 
 // BuildRepresentativeQueries generates representative queries for an entry.
 func BuildRepresentativeQueries(tags []string, capabilities []string) []string {
 	var queries []string
-	
+
 	// Generate queries based on tags
 	for _, tag := range tags {
 		queries = append(queries, fmt.Sprintf("find a %s tool", tag))
 		queries = append(queries, fmt.Sprintf("I need help with %s", tag))
 	}
-	
+
 	// Generate queries based on capabilities
 	for _, cap := range capabilities {
 		capName := strings.ReplaceAll(cap, "Tool", "")
@@ -327,11 +329,11 @@ func BuildRepresentativeQueries(tags []string, capabilities []string) []string {
 		queries = append(queries, fmt.Sprintf("can you %s", strings.ToLower(capName)))
 		queries = append(queries, fmt.Sprintf("help me %s", strings.ToLower(capName)))
 	}
-	
+
 	// Limit to 5 queries
 	if len(queries) > 5 {
 		queries = queries[:5]
 	}
-	
+
 	return queries
 }

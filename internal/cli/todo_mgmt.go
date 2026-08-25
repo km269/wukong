@@ -66,7 +66,6 @@ func runTodoStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	tc := &wukongCfg.Todo
-	ac := &wukongCfg.Agent
 
 	fmt.Println(strings.Repeat("─", 50))
 	fmt.Println("  Task Management (TODO) Status")
@@ -79,36 +78,20 @@ func runTodoStatus(cmd *cobra.Command, args []string) error {
 	fmt.Println("\n  [Agent Integration]")
 	fmt.Printf("  Native TODO Tool:      %v\n", tc.EnableNativeTodo)
 	fmt.Printf("  TODO Enforcer:         %v\n", tc.EnableEnforcer)
-	fmt.Printf("  Agent TODO Enabled:    %v\n", ac.TodoToolEnabled)
-	fmt.Printf("  Agent Enforcer:        %v\n", ac.TodoEnforcerEnabled)
-
-	// Compute effective status
-	nativeOK := tc.EnableNativeTodo && ac.TodoToolEnabled
-	enforcerOK := tc.EnableEnforcer && ac.TodoEnforcerEnabled
 
 	fmt.Println("\n  [Effective Status]")
-	if nativeOK {
+	if tc.EnableNativeTodo {
 		fmt.Println("  ✓ TODO tool:       Active — agent can manage tasks")
 	} else {
 		fmt.Println("  ✗ TODO tool:       Inactive")
-		if !tc.EnableNativeTodo {
-			fmt.Println("     → enable todo.enable_native_todo in config")
-		}
-		if !ac.TodoToolEnabled {
-			fmt.Println("     → enable agent.todo_tool_enabled in config")
-		}
+		fmt.Println("     → enable todo.enable_native_todo in config")
 	}
 
-	if enforcerOK {
+	if tc.EnableEnforcer {
 		fmt.Println("  ✓ TODO enforcer:   Active — agent must maintain tasks")
 	} else {
 		fmt.Println("  ✗ TODO enforcer:   Inactive")
-		if !tc.EnableEnforcer {
-			fmt.Println("     → enable todo.enable_enforcer in config")
-		}
-		if !ac.TodoEnforcerEnabled {
-			fmt.Println("     → enable agent.todo_enforcer_enabled in config")
-		}
+		fmt.Println("     → enable todo.enable_enforcer in config")
 	}
 
 	fmt.Println()

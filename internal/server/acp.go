@@ -35,8 +35,11 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/km269/wukong/internal/cors"
 
 	"trpc.group/trpc-go/trpc-agent-go/agent"
 	"trpc.group/trpc-go/trpc-agent-go/event"
@@ -45,27 +48,38 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 )
 
+// ToolGuardCheck is a callback that applies the same
+// permission_mode / blocked_commands / approval checks as the
+// agent loop. The callback returns a non-nil error when the tool
+// call should be blocked; the error message is suitable for HTTP
+// 403 responses. Defining this as a callback avoids a cyclic import
+// (server → security → config → server). Callers typically inject a
+// closure over *security.Guard.
+type ToolGuardCheck func(toolName string, args map[string]any, argsJSON []byte) error
+
 // ACPServer provides an HTTP-based ACP endpoint that exposes
 // the Wukong agent to ACP-compatible client applications.
 type ACPServer struct {
 	runner  runner.Runner
 	agent   agent.Agent
+	guardFn ToolGuardCheck
+	sink    ApprovalSink
 	path    string
+	secCfg  ServerSecurityConfig
 	mu      sync.RWMutex
 	running bool
-	server  *http.Server // set after Start, used for graceful Shutdown
+	server  *http.Server
 }
 
 // ACPServerConfig configures the ACP server.
 type ACPServerConfig struct {
-	// Runner is the agent runner for processing messages.
-	Runner runner.Runner
-	// Agent is the agent instance for tool discovery.
-	Agent agent.Agent
-	// Path is the HTTP path prefix for ACP endpoints.
-	Path string
-	// EnableStreaming enables SSE streaming responses.
+	Runner          runner.Runner
+	Agent           agent.Agent
+	GuardCheck      ToolGuardCheck
+	ApprovalSink    ApprovalSink
+	Path            string
 	EnableStreaming bool
+	Security        ServerSecurityConfig
 }
 
 // NewACPServer creates an ACP protocol server.
@@ -79,9 +93,12 @@ func NewACPServer(cfg *ACPServerConfig) (*ACPServer, error) {
 		path = "/acp"
 	}
 	return &ACPServer{
-		runner: cfg.Runner,
-		agent:  cfg.Agent,
-		path:   path,
+		runner:  cfg.Runner,
+		agent:   cfg.Agent,
+		guardFn: cfg.GuardCheck,
+		sink:    cfg.ApprovalSink,
+		path:    path,
+		secCfg:  cfg.Security,
 	}, nil
 }
 
@@ -101,6 +118,12 @@ func (s *ACPServer) Handler() http.Handler {
 	// tools/call — direct tool invocation by ACP clients.
 	mux.HandleFunc(s.path+"/tools/call", s.handleToolsCall)
 
+	// approvals/list — list pending human-approval requests.
+	mux.HandleFunc(s.path+"/approvals/list", s.handleApprovalsList)
+
+	// approvals/resolve — resolve a pending request by ID.
+	mux.HandleFunc(s.path+"/approvals/resolve", s.handleApprovalsResolve)
+
 	// .well-known — agent capability discovery.
 	mux.HandleFunc(
 		s.path+"/.well-known/agent.json",
@@ -110,22 +133,39 @@ func (s *ACPServer) Handler() http.Handler {
 	return mux
 }
 
-// Start begins listening on the given address. Uses *http.Server
-// internally so that Stop() can perform graceful shutdown.
+// Start begins listening on the given address with optional TLS,
+// authentication, and rate limiting from the security config.
 func (s *ACPServer) Start(addr string) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	handler := s.Handler()
+	securedHandler, tlsCfg := ApplySecurity(handler, s.secCfg)
+
 	s.server = &http.Server{
-		Addr:    addr,
-		Handler: s.Handler(),
+		Addr:         addr,
+		Handler:      securedHandler,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
+
+	if tlsCfg != nil {
+		s.server.TLSConfig = tlsCfg
+	}
+
 	s.running = true
-	s.mu.Unlock()
 
 	slog.Info("ACP server starting",
 		"address", addr,
 		"path", s.path,
+		"tls", tlsCfg != nil,
+		"auth", s.secCfg.Auth.Type,
 	)
 
+	if tlsCfg != nil {
+		return s.server.ListenAndServeTLS("", "")
+	}
 	return s.server.ListenAndServe()
 }
 
@@ -172,14 +212,14 @@ type ACPToolsListResponse struct {
 
 // ACPToolCallRequest is the request body for tools/call.
 type ACPToolCallRequest struct {
-	Name      string                 `json:"name"`
+	Name      string         `json:"name"`
 	Arguments map[string]any `json:"arguments"`
 }
 
 // ACPSSEEvent represents a single SSE event.
 type ACPSSEEvent struct {
-	EventType string      `json:"event"`
-	Data      any `json:"data"`
+	EventType string `json:"event"`
+	Data      any    `json:"data"`
 }
 
 // ==========================================================================
@@ -231,7 +271,7 @@ func (s *ACPServer) handleAgentCard(
 func (s *ACPServer) handleMessageSend(
 	w http.ResponseWriter, r *http.Request,
 ) {
-	s.setCORSHeaders(w)
+	s.setCORSHeaders(w, r)
 
 	if r.Method == http.MethodOptions {
 		return
@@ -331,7 +371,7 @@ func (s *ACPServer) handleMessageSend(
 func (s *ACPServer) handleToolsList(
 	w http.ResponseWriter, r *http.Request,
 ) {
-	s.setCORSHeaders(w)
+	s.setCORSHeaders(w, r)
 
 	if r.Method == http.MethodOptions {
 		return
@@ -382,7 +422,7 @@ func (s *ACPServer) handleToolsList(
 func (s *ACPServer) handleToolsCall(
 	w http.ResponseWriter, r *http.Request,
 ) {
-	s.setCORSHeaders(w)
+	s.setCORSHeaders(w, r)
 
 	if r.Method == http.MethodOptions {
 		return
@@ -440,6 +480,23 @@ func (s *ACPServer) handleToolsCall(
 		s.writeJSON(w, http.StatusBadRequest,
 			map[string]string{"error": "marshal arguments failed"})
 		return
+	}
+
+	// Apply security guard checks — mirrors the agent loop's
+	// buildToolCallbacks (internal/agent/loop.go:1520+). Without
+	// this, ACP tools/call can execute dangerous commands
+	// (developer_command_execute, file_delete, etc.) bypassing
+	// permission_mode / blocked_commands / approval flow.
+	if s.guardFn != nil {
+		if err := s.guardFn(req.Name, req.Arguments, argsJSON); err != nil {
+			s.writeJSON(w, http.StatusForbidden,
+				map[string]string{
+					"error": fmt.Sprintf(
+						"tool %q blocked by guard: %v",
+						req.Name, err),
+				})
+			return
+		}
 	}
 
 	result, callErr := callable.Call(r.Context(), argsJSON)
@@ -553,13 +610,11 @@ func (s *ACPServer) writeJSON(
 	json.NewEncoder(w).Encode(data)
 }
 
-// setCORSHeaders sets permissive CORS headers for browser access.
-func (s *ACPServer) setCORSHeaders(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods",
-		"GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers",
-		"Content-Type, Authorization, X-API-Key")
+// setCORSHeaders sets CORS headers that only allow localhost origins,
+// preventing malicious websites from making cross-origin requests to
+// the local ACP server.
+func (s *ACPServer) setCORSHeaders(w http.ResponseWriter, r *http.Request) {
+	cors.SetLocalhostOnly(w, r)
 }
 
 // ==========================================================================

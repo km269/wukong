@@ -8,10 +8,19 @@
 // # File Organization
 //
 // The config package is split across multiple files for maintainability:
-//   - config.go   — WukongConfig root struct, Loader, query helpers
-//   - types.go    — All sub-configuration struct type definitions
-//   - defaults.go — Built-in default values (setDefaults)
-//   - validate.go — Configuration validation (Validate, Warnings)
+//   - config.go              — WukongConfig root struct, Loader, query helpers
+//   - types_provider.go      — Provider & extension types
+//   - types_agent.go         — Agent & security (incl. sandbox) types
+//   - types_storage.go       — Session/memory/todo/recall types
+//   - types_cortex.go        — Cortex stack & revision types
+//   - types_browser.go       — Browser/search/proxy types
+//   - types_features.go      — Feature-tool types (visualiser, code_mode, ...)
+//   - types_apps.go          — Apps (clone & pack) types
+//   - types_orchestration.go — Orchestration & discovery types
+//   - types_server.go        — Service endpoint types (A2A/ACP/MCP/AG-UI)
+//   - types_observability.go — Telemetry/eval/artifact types
+//   - defaults.go            — Built-in default values (setDefaults)
+//   - validate.go            — Configuration validation (Validate, Warnings)
 //
 // # Configuration Priority
 //
@@ -30,21 +39,39 @@
 //
 // # Environment Variable Expansion
 //
-// API keys and secrets support ${ENV_VAR} syntax for runtime expansion.
+// API keys, secrets, URLs, models, and other configurable fields support
+// ${ENV_VAR} syntax for runtime expansion via expandSecrets().
+// Bash-style ${VAR:-default} fallback is also supported.
 // This applies to:
-//   - providers[].api_key
-//   - summon.a2a_remotes[].api_key
-//   - summon.a2a_remotes[].jwt_secret
+//   - providers[].api_key, base_url, model
+//   - summon.a2a_remotes[].api_key, jwt_secret, oauth_client_secret
+//   - gateway.feishu.app_secret, encrypt_key, verification_token
+//   - observability.langfuse_public_key, secret_key
+//   - artifact.cos_secret_id, cos_secret_key
+//   - acp_server.security.auth.api_key
+//   - mcp_server.security.auth.api_key
+//   - cortex.embedding_api_key, embedding_base_url, embedding_model
+//   - cortex.reranker_api_key, reranker_base_url, reranker_model
+//   - cortex.vertical_routing.github_api_key
+//   - memoryflow.planner_model, extractor_model
+//   - graphflow.extractor_model
+//   - dify.api_secret
+//   - session.redis_url
+//   - browser.search.searxng.url, api_key
+//   - browser.search.tavily.api_key
+//   - browser.search.google.api_key, cse_id
+//   - browser.search.bing.api_key
 package config
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
-	"time"
 
+	"github.com/km269/wukong/internal/gateway"
 	"github.com/spf13/viper"
 )
 
@@ -193,9 +220,10 @@ type WukongConfig struct {
 	// Workflow configures multi-mode agent orchestration.
 	Workflow WorkflowConfig `mapstructure:"workflow"`
 
-	// Gateway configures the multi-platform messaging gateway
-	// (Feishu, WeCom, Slack, etc.).
-	Gateway GatewayConfig `mapstructure:"gateway"`
+	// Gateway configures the messaging gateway
+	// (Feishu, etc.). Each channel owns its own inbound transport.
+	// The type lives in internal/gateway; the root config embeds it.
+	Gateway gateway.GatewayConfig `mapstructure:"gateway"`
 
 	// A2AServer configures the local A2A protocol server.
 	A2AServer A2AServerConfig `mapstructure:"a2a_server"`
@@ -212,15 +240,19 @@ type WukongConfig struct {
 	// as an MCP Server for ACP agents.
 	ACPMCP ACPMCPConfig `mapstructure:"acp_mcp"`
 
+	// MCPServer configures the standalone MCP server that exposes
+	// Wukong extensions via the MCP JSON-RPC 2.0 protocol.
+	MCPServer MCPServerConfig `mapstructure:"mcp_server"`
+
 	// Telemetry configures OpenTelemetry observability.
 	Telemetry TelemetryConfig `mapstructure:"telemetry"`
 
 	// Eval configures the evaluation/regression testing system.
 	Eval EvalConfig `mapstructure:"eval"`
 
-	// ArtifactConfig configures artifact storage backend
+	// Artifact configures artifact storage backend
 	// settings.
-	ArtifactConfig ArtifactConfig `mapstructure:"artifact"`
+	Artifact ArtifactConfig `mapstructure:"artifact"`
 
 	// Observability configures enhanced observability
 	// (Langfuse, etc.).
@@ -229,6 +261,19 @@ type WukongConfig struct {
 	// ProjectDir is the directory for project tracking data.
 	// Default: ~/.config/wukong/ (resolved at runtime).
 	ProjectDir string `mapstructure:"project_dir"`
+
+	// unresolvedEnvVars tracks ${VAR} references (without :-default)
+	// that could not be resolved because VAR is unset in the
+	// environment. Populated by expandSecrets during Load() and
+	// surfaced via Warnings() so users can spot typos like
+	// ${OEPNAI_API_KEY}. Not populated from YAML directly.
+	unresolvedEnvVars []string `mapstructure:"-"`
+
+	// deprecationWarnings tracks usage of deprecated config keys
+	// that have been renamed or removed. Populated by
+	// migrateDeprecatedFields during Load() and surfaced via
+	// Warnings() so users know to update their config files.
+	deprecationWarnings []string `mapstructure:"-"`
 }
 
 // ============================================================================
@@ -299,6 +344,170 @@ func NewLoader(configPath string) (*Loader, error) {
 	return l, nil
 }
 
+// expandEnv expands ${ENV_VAR} and ${ENV_VAR:-default} syntax.
+// Unlike os.ExpandEnv, it supports the bash-style ${VAR:-default} fallback.
+func expandEnv(s string) string {
+	return os.Expand(s, func(key string) string {
+		if idx := strings.Index(key, ":-"); idx != -1 {
+			varName := key[:idx]
+			defaultVal := key[idx+2:]
+			if val := os.Getenv(varName); val != "" {
+				return val
+			}
+			return defaultVal
+		}
+		return os.Getenv(key)
+	})
+}
+
+// unresolvedVarRE matches ${VAR} references that do NOT use the
+// ${VAR:-default} fallback form. These references silently resolve
+// to empty strings when VAR is unset, which usually indicates a
+// typo or missing environment configuration.
+var unresolvedVarRE = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// expandEnvTracked is expandEnv with unresolved-variable tracking.
+// For each ${VAR} (without :-default) in the input where VAR is
+// unset, a descriptive message is appended to *unresolved so the
+// caller can surface it via Warnings().
+func expandEnvTracked(s, field string, unresolved *[]string) string {
+	if !strings.Contains(s, "${") {
+		return s
+	}
+	for _, m := range unresolvedVarRE.FindAllStringSubmatch(s, -1) {
+		if os.Getenv(m[1]) == "" {
+			*unresolved = append(*unresolved,
+				fmt.Sprintf("%s references unset env var ${%s}", field, m[1]))
+		}
+	}
+	return expandEnv(s)
+}
+
+// expandSecrets expands ${ENV_VAR} references in all secret fields
+// that support environment variable injection. This is a security
+// measure that keeps secrets out of config files and version control.
+//
+// Unresolved ${VAR} references (no :-default, VAR unset) are recorded
+// in cfg.unresolvedEnvVars and surfaced via Warnings() so users can
+// spot typos like ${OEPNAI_API_KEY}.
+func (l *Loader) expandSecrets(cfg *WukongConfig) {
+	u := &cfg.unresolvedEnvVars
+
+	// Provider API keys, base URLs, and models.
+	for i := range cfg.Providers {
+		p := &cfg.Providers[i]
+		p.APIKey = expandEnvTracked(p.APIKey,
+			"providers["+p.Name+"].api_key", u)
+		p.BaseURL = expandEnvTracked(p.BaseURL,
+			"providers["+p.Name+"].base_url", u)
+		p.Model = expandEnvTracked(p.Model,
+			"providers["+p.Name+"].model", u)
+	}
+
+	// A2A remote secrets.
+	for i := range cfg.Summon.A2ARemotes {
+		r := &cfg.Summon.A2ARemotes[i]
+		r.APIKey = expandEnvTracked(r.APIKey,
+			"summon.a2a_remotes["+r.Name+"].api_key", u)
+		r.JWTSecret = expandEnvTracked(r.JWTSecret,
+			"summon.a2a_remotes["+r.Name+"].jwt_secret", u)
+		r.OAuthClientSecret = expandEnvTracked(r.OAuthClientSecret,
+			"summon.a2a_remotes["+r.Name+"].oauth_client_secret", u)
+	}
+
+	// Gateway Feishu channel secrets.
+	cfg.Gateway.Feishu.AppSecret = expandEnvTracked(
+		cfg.Gateway.Feishu.AppSecret, "gateway.feishu.app_secret", u)
+	cfg.Gateway.Feishu.EncryptKey = expandEnvTracked(
+		cfg.Gateway.Feishu.EncryptKey, "gateway.feishu.encrypt_key", u)
+	cfg.Gateway.Feishu.VerificationToken = expandEnvTracked(
+		cfg.Gateway.Feishu.VerificationToken,
+		"gateway.feishu.verification_token", u)
+
+	// Observability (Langfuse) secrets.
+	cfg.Observability.LangfusePublicKey = expandEnvTracked(
+		cfg.Observability.LangfusePublicKey,
+		"observability.langfuse_public_key", u)
+	cfg.Observability.LangfuseSecretKey = expandEnvTracked(
+		cfg.Observability.LangfuseSecretKey,
+		"observability.langfuse_secret_key", u)
+
+	// Artifact COS credentials.
+	cfg.Artifact.COSSecretID = expandEnvTracked(
+		cfg.Artifact.COSSecretID, "artifact.cos_secret_id", u)
+	cfg.Artifact.COSSecretKey = expandEnvTracked(
+		cfg.Artifact.COSSecretKey, "artifact.cos_secret_key", u)
+
+	// Server endpoint auth keys (nested under Security.Auth).
+	cfg.ACPServer.Security.Auth.APIKey = expandEnvTracked(
+		cfg.ACPServer.Security.Auth.APIKey,
+		"acp_server.security.auth.api_key", u)
+	cfg.MCPServer.Security.Auth.APIKey = expandEnvTracked(
+		cfg.MCPServer.Security.Auth.APIKey,
+		"mcp_server.security.auth.api_key", u)
+
+	// CortexDB embedding settings.
+	cfg.Cortex.EmbeddingAPIKey = expandEnvTracked(
+		cfg.Cortex.EmbeddingAPIKey, "cortex.embedding_api_key", u)
+	cfg.Cortex.EmbeddingBaseURL = expandEnvTracked(
+		cfg.Cortex.EmbeddingBaseURL, "cortex.embedding_base_url", u)
+	cfg.Cortex.EmbeddingModel = expandEnvTracked(
+		cfg.Cortex.EmbeddingModel, "cortex.embedding_model", u)
+
+	// CortexDB reranker settings.
+	cfg.Cortex.RerankerAPIKey = expandEnvTracked(
+		cfg.Cortex.RerankerAPIKey, "cortex.reranker_api_key", u)
+	cfg.Cortex.RerankerBaseURL = expandEnvTracked(
+		cfg.Cortex.RerankerBaseURL, "cortex.reranker_base_url", u)
+	cfg.Cortex.RerankerModel = expandEnvTracked(
+		cfg.Cortex.RerankerModel, "cortex.reranker_model", u)
+
+	// Vertical routing GitHub API key.
+	if cfg.Cortex.VerticalRouting != nil {
+		cfg.Cortex.VerticalRouting.GitHubAPIKey = expandEnvTracked(
+			cfg.Cortex.VerticalRouting.GitHubAPIKey,
+			"cortex.vertical_routing.github_api_key", u)
+	}
+
+	// MemoryFlow model settings.
+	cfg.MemoryFlow.PlannerModel = expandEnvTracked(
+		cfg.MemoryFlow.PlannerModel, "memoryflow.planner_model", u)
+	cfg.MemoryFlow.ExtractorModel = expandEnvTracked(
+		cfg.MemoryFlow.ExtractorModel, "memoryflow.extractor_model", u)
+
+	// GraphFlow model settings.
+	cfg.GraphFlow.ExtractorModel = expandEnvTracked(
+		cfg.GraphFlow.ExtractorModel, "graphflow.extractor_model", u)
+
+	// Dify API secret.
+	cfg.Dify.APISecret = expandEnvTracked(
+		cfg.Dify.APISecret, "dify.api_secret", u)
+
+	// Session Redis URL.
+	cfg.Session.RedisURL = expandEnvTracked(
+		cfg.Session.RedisURL, "session.redis_url", u)
+
+	// Search provider secrets.
+	cfg.Browser.Search.SearXNG.URL = expandEnvTracked(
+		cfg.Browser.Search.SearXNG.URL,
+		"browser.search.searxng.url", u)
+	cfg.Browser.Search.SearXNG.APIKey = expandEnvTracked(
+		cfg.Browser.Search.SearXNG.APIKey,
+		"browser.search.searxng.api_key", u)
+	cfg.Browser.Search.Tavily.APIKey = expandEnvTracked(
+		cfg.Browser.Search.Tavily.APIKey,
+		"browser.search.tavily.api_key", u)
+	cfg.Browser.Search.Google.APIKey = expandEnvTracked(
+		cfg.Browser.Search.Google.APIKey,
+		"browser.search.google.api_key", u)
+	cfg.Browser.Search.Google.CSEID = expandEnvTracked(
+		cfg.Browser.Search.Google.CSEID,
+		"browser.search.google.cse_id", u)
+	cfg.Browser.Search.Bing.APIKey = expandEnvTracked(
+		cfg.Browser.Search.Bing.APIKey,
+		"browser.search.bing.api_key", u)
+}
+
 // Load parses the configuration into a WukongConfig.
 // Results are cached; subsequent calls return the same instance.
 func (l *Loader) Load() (*WukongConfig, error) {
@@ -311,56 +520,8 @@ func (l *Loader) Load() (*WukongConfig, error) {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
 
-	// Expand ${ENV_VAR} references in API keys.
-	for i := range cfg.Providers {
-		cfg.Providers[i].APIKey = os.ExpandEnv(cfg.Providers[i].APIKey)
-	}
-
-	// Expand env vars in A2A remote secrets.
-	for i := range cfg.Summon.A2ARemotes {
-		cfg.Summon.A2ARemotes[i].APIKey =
-			os.ExpandEnv(cfg.Summon.A2ARemotes[i].APIKey)
-		cfg.Summon.A2ARemotes[i].JWTSecret =
-			os.ExpandEnv(cfg.Summon.A2ARemotes[i].JWTSecret)
-	}
-
-	// Expand env vars in gateway channel secrets.
-	cfg.Gateway.Feishu.AppSecret =
-		os.ExpandEnv(cfg.Gateway.Feishu.AppSecret)
-	cfg.Gateway.Feishu.EncryptKey =
-		os.ExpandEnv(cfg.Gateway.Feishu.EncryptKey)
-	cfg.Gateway.Feishu.VerificationToken =
-		os.ExpandEnv(cfg.Gateway.Feishu.VerificationToken)
-	cfg.Gateway.WeCom.Secret =
-		os.ExpandEnv(cfg.Gateway.WeCom.Secret)
-	cfg.Gateway.WeCom.Token =
-		os.ExpandEnv(cfg.Gateway.WeCom.Token)
-	cfg.Gateway.WeCom.EncodingAESKey =
-		os.ExpandEnv(cfg.Gateway.WeCom.EncodingAESKey)
-
-	// Expand env vars in observability secrets.
-	cfg.Observability.LangfusePublicKey =
-		os.ExpandEnv(cfg.Observability.LangfusePublicKey)
-	cfg.Observability.LangfuseSecretKey =
-		os.ExpandEnv(cfg.Observability.LangfuseSecretKey)
-
-	// Expand env vars in artifact COS credentials.
-	cfg.ArtifactConfig.COSSecretID =
-		os.ExpandEnv(cfg.ArtifactConfig.COSSecretID)
-	cfg.ArtifactConfig.COSSecretKey =
-		os.ExpandEnv(cfg.ArtifactConfig.COSSecretKey)
-
-	// Expand env vars in ACPServer API key.
-	cfg.ACPServer.APIKey =
-		os.ExpandEnv(cfg.ACPServer.APIKey)
-
-	// Expand env vars in CortexDB embedding API key.
-	cfg.Cortex.EmbeddingAPIKey =
-		os.ExpandEnv(cfg.Cortex.EmbeddingAPIKey)
-
-	// Expand env vars in Dify API secret.
-	cfg.Dify.APISecret =
-		os.ExpandEnv(cfg.Dify.APISecret)
+	// Expand ${ENV_VAR} references in all secret fields.
+	l.expandSecrets(&cfg)
 
 	l.config = &cfg
 	return l.config, nil
@@ -407,6 +568,67 @@ func (c *WukongConfig) DefaultProviderConfig() *ProviderConfig {
 	return c.FindProvider(c.DefaultProvider)
 }
 
+// defaultContextWindowByType returns a conservative default context
+// window for a provider type when ContextWindow is not explicitly set.
+// Values reflect the lowest commonly-available tier for each family to
+// avoid overflow on small-footprint deployments. Users should set
+// ProviderConfig.ContextWindow explicitly when the actual model differs.
+func defaultContextWindowByType(t ProviderType) int {
+	switch t {
+	case ProviderOpenAI:
+		// gpt-4o family: 128K, but older gpt-3.5 tiers were 16K.
+		// Conservative default: 16K; users with gpt-4o should override.
+		return 16000
+	case ProviderAnthropic:
+		// claude-sonnet-4: 200K. Conservative default: 100K.
+		return 100000
+	case ProviderGoogle:
+		// gemini-2.0-flash: 1M. Conservative default: 32K.
+		return 32000
+	case ProviderDeepSeek:
+		// deepseek-chat: 64K.
+		return 64000
+	case ProviderOllama, ProviderLMStudio, ProviderVLLM:
+		// Local inference servers vary widely. Default to 8K — a
+		// floor that nearly all locally-served models exceed. Users
+		// must set ContextWindow explicitly for accurate clamping.
+		return 8000
+	case ProviderACP:
+		// ACP agents vary; default to 32K.
+		return 32000
+	default:
+		return 32000
+	}
+}
+
+// EffectiveContextWindow returns the effective context window for the
+// provider. If ContextWindow is set explicitly, that value wins;
+// otherwise fall back to defaultContextWindowByType. Returns 0 if p is nil.
+func (p *ProviderConfig) EffectiveContextWindow() int {
+	if p == nil {
+		return 0
+	}
+	if p.ContextWindow > 0 {
+		return p.ContextWindow
+	}
+	return defaultContextWindowByType(ProviderType(p.Type))
+}
+
+// EffectiveContextWindowForDefault returns the effective context window
+// for the default provider. Falls back to Revision.MaxContextTokens when
+// no default provider is configured. This is the value ContextRevisionEngine
+// should clamp against.
+func (c *WukongConfig) EffectiveContextWindowForDefault() int {
+	if p := c.DefaultProviderConfig(); p != nil {
+		return p.EffectiveContextWindow()
+	}
+	// No provider — use Revision as the configured global limit.
+	if c.Revision.MaxContextTokens > 0 {
+		return c.Revision.MaxContextTokens
+	}
+	return 32000
+}
+
 // EffectiveLightweightModel returns the effective lightweight model
 // name. Falls back from LightweightModel to the default provider's
 // model.
@@ -451,31 +673,4 @@ func (c *WukongConfig) FindExtension(name string) *ExtensionConfig {
 		}
 	}
 	return nil
-}
-
-// EffectiveMemoryTTL returns the effective memory TTL duration.
-// Falls back to 720h (30 days) if MemoryTTL is zero.
-func (c *WukongConfig) EffectiveMemoryTTL() time.Duration {
-	if c.Memory.MemoryTTL > 0 {
-		return c.Memory.MemoryTTL
-	}
-	return 720 * time.Hour
-}
-
-// EffectiveCleanupTrigger returns the effective capacity fraction
-// that triggers memory cleanup. Falls back to 0.8 (80%).
-func (c *WukongConfig) EffectiveCleanupTrigger() float64 {
-	if c.Memory.CleanupTriggerThreshold > 0 {
-		return c.Memory.CleanupTriggerThreshold
-	}
-	return 0.8
-}
-
-// EffectiveCleanupTarget returns the effective target capacity
-// fraction after cleanup. Falls back to 0.6 (60%).
-func (c *WukongConfig) EffectiveCleanupTarget() float64 {
-	if c.Memory.CleanupTargetThreshold > 0 {
-		return c.Memory.CleanupTargetThreshold
-	}
-	return 0.6
 }

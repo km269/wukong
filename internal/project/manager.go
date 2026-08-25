@@ -35,9 +35,9 @@ type ProjectRecord struct {
 // Manager handles project tracking persistence and queries.
 // It is safe for concurrent access via sync.RWMutex.
 type Manager struct {
-	mu       sync.RWMutex
-	dir      string
-	records  []ProjectRecord
+	mu      sync.RWMutex
+	dir     string
+	records []ProjectRecord
 }
 
 // NewManager creates a project manager backed by the given directory.

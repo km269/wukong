@@ -11,7 +11,7 @@ import (
 func TestManager_New(t *testing.T) {
 	cfg := &config.TopOfMindConfig{
 		Enabled:         true,
-		InstructionFile: ".wukong_instructions.md",
+		InstructionFile: ".wukong/instructions.md",
 		MaxLength:       2000,
 	}
 
@@ -27,7 +27,7 @@ func TestManager_New(t *testing.T) {
 func TestManager_GetSetAppend(t *testing.T) {
 	cfg := &config.TopOfMindConfig{
 		Enabled:         true,
-		InstructionFile: ".wukong_instructions.md",
+		InstructionFile: ".wukong/instructions.md",
 		MaxLength:       2000,
 	}
 
@@ -60,7 +60,7 @@ func TestManager_GetSetAppend(t *testing.T) {
 func TestManager_MaxLength(t *testing.T) {
 	cfg := &config.TopOfMindConfig{
 		Enabled:         true,
-		InstructionFile: ".wukong_instructions.md",
+		InstructionFile: ".wukong/instructions.md",
 		MaxLength:       10,
 	}
 
@@ -95,7 +95,7 @@ func TestManager_LoadFromFile(t *testing.T) {
 func TestManager_FormatForPrompt(t *testing.T) {
 	cfg := &config.TopOfMindConfig{
 		Enabled:         true,
-		InstructionFile: ".wukong_instructions.md",
+		InstructionFile: ".wukong/instructions.md",
 		MaxLength:       2000,
 	}
 

@@ -11,8 +11,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/util"
@@ -37,6 +40,8 @@ type ACPMCPBridge struct {
 	mgr     *Manager
 	server  *http.Server
 	running bool
+	auditor *ToolAuditLogger
+	health  *MCPHealthChecker
 }
 
 // MCPToolInfo describes a tool in MCP format.
@@ -53,7 +58,7 @@ type MCPListToolsResult struct {
 
 // MCPCallToolRequest is the parameters for tools/call.
 type MCPCallToolRequest struct {
-	Name      string                 `json:"name"`
+	Name      string         `json:"name"`
 	Arguments map[string]any `json:"arguments,omitempty"`
 }
 
@@ -72,17 +77,17 @@ type MCPContentItem struct {
 // MCPJSONRPCRequest is the standard MCP JSON-RPC request wrapper.
 type MCPJSONRPCRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      any     `json:"id"`
+	ID      any             `json:"id"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
 }
 
 // MCPJSONRPCResponse is the standard MCP JSON-RPC response wrapper.
 type MCPJSONRPCResponse struct {
-	JSONRPC string      `json:"jsonrpc"`
-	ID      any `json:"id"`
-	Result  any `json:"result,omitempty"`
-	Error   *MCPError   `json:"error,omitempty"`
+	JSONRPC string    `json:"jsonrpc"`
+	ID      any       `json:"id"`
+	Result  any       `json:"result,omitempty"`
+	Error   *MCPError `json:"error,omitempty"`
 }
 
 // MCPError represents an MCP protocol error.
@@ -107,10 +112,12 @@ func NewACPMCPBridge(
 	}
 
 	bridge := &ACPMCPBridge{
-		cfg:  cfg,
-		addr: address,
-		mgr:  mgr,
+		cfg:     cfg,
+		addr:    address,
+		mgr:     mgr,
+		auditor: NewToolAuditLogger(10000),
 	}
+	bridge.health = NewMCPHealthChecker(bridge.auditor)
 	return bridge, nil
 }
 
@@ -129,6 +136,7 @@ func (b *ACPMCPBridge) Start() error {
 		path = "/mcp"
 	}
 	mux.HandleFunc(path, b.handleMCP)
+	mux.HandleFunc(path+"/health", b.handleHealth)
 
 	b.server = &http.Server{
 		Addr:    b.addr,
@@ -326,8 +334,25 @@ func (b *ACPMCPBridge) handleCallTool(
 		return
 	}
 
+	startTime := time.Now()
+	clientIP := getClientIP(r)
+
 	result, callErr := callable.Call(ctx, argsJSON)
-	if callErr != nil {
+	duration := time.Since(startTime)
+
+	isError := callErr != nil
+	if isError {
+		b.health.RecordCall(true)
+		b.auditor.Record(ToolAuditEntry{
+			ToolName:   callReq.Name,
+			ArgsSize:   len(argsJSON),
+			ResultSize: 0,
+			DurationMs: duration.Milliseconds(),
+			IsError:    true,
+			ErrorMsg:   callErr.Error(),
+			ClientIP:   clientIP,
+			Timestamp:  startTime,
+		})
 		b.writeResult(w, id, MCPCallToolResponse{
 			Content: []MCPContentItem{{
 				Type: "text",
@@ -338,11 +363,23 @@ func (b *ACPMCPBridge) handleCallTool(
 		return
 	}
 
+	b.health.RecordCall(false)
+
 	resultJSON, _ := json.Marshal(result)
 	resultText := string(resultJSON)
 	if resultText == "" {
 		resultText = fmt.Sprintf("%v", result)
 	}
+
+	b.auditor.Record(ToolAuditEntry{
+		ToolName:   callReq.Name,
+		ArgsSize:   len(argsJSON),
+		ResultSize: len(resultJSON),
+		DurationMs: duration.Milliseconds(),
+		IsError:    false,
+		ClientIP:   clientIP,
+		Timestamp:  startTime,
+	})
 
 	util.Logger.Debug("acp_mcp: tools/call",
 		slog.String("tool", callReq.Name),
@@ -355,6 +392,32 @@ func (b *ACPMCPBridge) handleCallTool(
 			Text: resultText,
 		}},
 	})
+}
+
+func getClientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		return strings.TrimSpace(parts[0])
+	}
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	return ip
+}
+
+// handleHealth returns the health check status of the MCP bridge.
+func (b *ACPMCPBridge) handleHealth(
+	w http.ResponseWriter, r *http.Request,
+) {
+	toolCount := 0
+	for _, ts := range b.mgr.ToolSets() {
+		if ts == nil {
+			continue
+		}
+		toolCount += len(ts.Tools(context.Background()))
+	}
+
+	status := b.health.Status(b.running, toolCount)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
 }
 
 // writeResult writes a successful MCP JSON-RPC response.

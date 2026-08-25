@@ -52,8 +52,8 @@ type RecipeRetryConfig struct {
 
 // retryDefaults are applied when fields are zero or invalid.
 const (
-	defaultRetryMaxAttempts  = 3
-	defaultRetryInitialWait  = 1 * time.Second
+	defaultRetryMaxAttempts   = 3
+	defaultRetryInitialWait   = 1 * time.Second
 	defaultRetryBackoffFactor = 2.0
 	defaultRetryMaxWait       = 30 * time.Second
 )

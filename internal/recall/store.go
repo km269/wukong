@@ -14,6 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/search"
 	"github.com/km269/wukong/internal/util"
 )
 
@@ -29,9 +30,9 @@ type ChatMessage struct {
 
 // SearchResult represents a recall search result.
 type SearchResult struct {
-	Message     ChatMessage `json:"message"`
-	Score       float64     `json:"score"`
-	Preview     string      `json:"preview"`
+	Message ChatMessage `json:"message"`
+	Score   float64     `json:"score"`
+	Preview string      `json:"preview"`
 }
 
 // Embedder defines the interface for generating text embeddings.
@@ -47,6 +48,7 @@ type Store struct {
 	pool     *util.DatabasePool
 	cfg      *config.RecallConfig
 	embedder Embedder
+	genome   search.SearchGenome // search strategy parameters
 }
 
 // NewStore creates a new recall store using a shared database pool.
@@ -64,7 +66,7 @@ func NewStore(
 		return nil, fmt.Errorf("get db: %w", err)
 	}
 
-	s := &Store{db: db, pool: pool, cfg: cfg}
+	s := &Store{db: db, pool: pool, cfg: cfg, genome: genomeFromConfig(cfg)}
 	if err := s.initSchema(); err != nil {
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
@@ -82,11 +84,23 @@ func NewStoreWithDB(
 	cfg := &config.RecallConfig{
 		MaxMessagesPerSession: maxMessagesPerSession,
 	}
-	s := &Store{db: db, pool: nil, cfg: cfg}
+	s := &Store{db: db, pool: nil, cfg: cfg, genome: search.DefaultGenome()}
 	if err := s.initSchema(); err != nil {
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
 	return s, nil
+}
+
+// SetGenome configures the search strategy parameters. Call this
+// to override the default 70/30 hybrid weights with tuned values
+// from config or auto-tuning.
+func (s *Store) SetGenome(g search.SearchGenome) {
+	s.genome = g.Normalized()
+}
+
+// Genome returns the current search strategy parameters.
+func (s *Store) Genome() search.SearchGenome {
+	return s.genome
 }
 
 // StoreMessage persists a chat message for future recall.
@@ -126,6 +140,7 @@ func (s *Store) StoreMessage(msg ChatMessage) error {
 
 // Search searches across all stored messages using FTS5 full-text search.
 // Falls back to LIKE search if FTS5 is not available.
+// When userID is non-empty, results are filtered to that user only.
 func (s *Store) Search(
 	query, userID string, limit int,
 ) ([]SearchResult, error) {
@@ -138,17 +153,35 @@ func (s *Store) Search(
 
 	// Use FTS5 full-text search for better relevance and performance.
 	// The FTS5 BM25 ranking provides much better scoring than naive LIKE.
-	rows, err := s.db.Query(
-		`SELECT cr.id, cr.session_id, cr.user_id, cr.role,
-		        cr.content, cr.created_at,
-		        fts.rank AS score
-		 FROM chat_recall_fts fts
-		 JOIN chat_recall cr ON cr.id = fts.rowid
-		 WHERE chat_recall_fts MATCH ?
-		 ORDER BY fts.rank
-		 LIMIT ?`,
-		ftsQuery(query), limit,
+	var (
+		rows *sql.Rows
+		err  error
 	)
+	if userID != "" {
+		rows, err = s.db.Query(
+			`SELECT cr.id, cr.session_id, cr.user_id, cr.role,
+			        cr.content, cr.created_at,
+			        fts.rank AS score
+			 FROM chat_recall_fts fts
+			 JOIN chat_recall cr ON cr.id = fts.rowid
+			 WHERE chat_recall_fts MATCH ? AND cr.user_id = ?
+			 ORDER BY fts.rank
+			 LIMIT ?`,
+			ftsQuery(query), userID, limit,
+		)
+	} else {
+		rows, err = s.db.Query(
+			`SELECT cr.id, cr.session_id, cr.user_id, cr.role,
+			        cr.content, cr.created_at,
+			        fts.rank AS score
+			 FROM chat_recall_fts fts
+			 JOIN chat_recall cr ON cr.id = fts.rowid
+			 WHERE chat_recall_fts MATCH ?
+			 ORDER BY fts.rank
+			 LIMIT ?`,
+			ftsQuery(query), limit,
+		)
+	}
 	if err != nil {
 		// If FTS5 fails (e.g., table not found), fall back to LIKE
 		return s.searchLike(query, userID, limit)
@@ -177,6 +210,9 @@ func (s *Store) Search(
 			Score:   score,
 			Preview: preview,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
 	}
 
 	return results, nil
@@ -237,6 +273,9 @@ func (s *Store) searchLike(
 			Score:   calculateScore(query, msg.Content),
 			Preview: preview,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
 	}
 
 	return results, nil
@@ -313,6 +352,9 @@ func (s *Store) SearchBySession(
 			Preview: preview,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
+	}
 
 	return results, nil
 }
@@ -381,6 +423,9 @@ func (s *Store) ListSessions(userID string) ([]string, error) {
 		}
 		sessions = append(sessions, sid)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
+	}
 	return sessions, nil
 }
 
@@ -404,12 +449,13 @@ func (s *Store) SetEmbedder(e Embedder) {
 // HasHybridSearch returns true when both hybrid mode is configured
 // and an embedder is available.
 func (s *Store) HasHybridSearch() bool {
-	return s.cfg.SearchMode == "hybrid" && s.embedder != nil
+	return s.genome.IsHybrid() && s.embedder != nil
 }
 
 // SearchHybrid performs a hybrid search: FTS5 retrieval followed
 // by embedding-based semantic re-ranking. Returns the top-K results
-// ranked by combined score (BM25 + cosine similarity).
+// ranked by combined score (DenseWeight × cosine + TextWeight × BM25).
+// Weights and pool size are controlled by the Store's SearchGenome.
 func (s *Store) SearchHybrid(
 	ctx context.Context,
 	query, userID string, limit int,
@@ -418,9 +464,11 @@ func (s *Store) SearchHybrid(
 		return s.Search(query, userID, limit)
 	}
 
+	g := s.genome.Normalized()
+	poolSize := g.EffectivePoolSize()
+
 	// Step 1: Retrieve candidates via FTS5 (wider pool for re-ranking)
-	const fts5Pool = 50
-	ftsResults, err := s.Search(query, userID, fts5Pool)
+	ftsResults, err := s.Search(query, userID, poolSize)
 	if err != nil {
 		return nil, fmt.Errorf("fts5 retrieval: %w", err)
 	}
@@ -446,6 +494,8 @@ func (s *Store) SearchHybrid(
 	type scoredResult struct {
 		result SearchResult
 		score  float64
+		sim    float64
+		ftsIdx int // original FTS rank index
 	}
 	var hybrid []scoredResult
 	for i, r := range ftsResults {
@@ -461,10 +511,48 @@ func (s *Store) SearchHybrid(
 			continue
 		}
 		sim := cosineSimilarity(queryVec, candVecs[0])
-		// Combined score: 70% semantic + 30% BM25 (normalized)
-		combined := sim*0.7 + (1.0/float64(i+1))*0.3
-		r.Score = combined
-		hybrid = append(hybrid, scoredResult{result: r, score: combined})
+		hybrid = append(hybrid, scoredResult{
+			result: r,
+			sim:    sim,
+			ftsIdx: i,
+		})
+	}
+
+	// Step 3b: Compute fused score.
+	if g.IsRRF() {
+		// Reciprocal Rank Fusion: rank candidates by similarity,
+		// then fuse FTS rank + vector rank.
+		// Sort a copy by similarity to get vector ranking.
+		vecRanked := make([]scoredResult, len(hybrid))
+		copy(vecRanked, hybrid)
+		for i := 0; i < len(vecRanked)-1; i++ {
+			for j := i + 1; j < len(vecRanked); j++ {
+				if vecRanked[j].sim > vecRanked[i].sim {
+					vecRanked[i], vecRanked[j] = vecRanked[j], vecRanked[i]
+				}
+			}
+		}
+		// Build vector rank map.
+		vecRank := make(map[int]int, len(vecRanked)) // ftsIdx -> vector rank
+		for rank, sr := range vecRanked {
+			vecRank[sr.ftsIdx] = rank
+		}
+		k := g.EffectiveRRFK()
+		for i := range hybrid {
+			ftsRank := hybrid[i].ftsIdx
+			vRank := vecRank[hybrid[i].ftsIdx]
+			hybrid[i].score = 1.0/(k+float64(ftsRank+1)) +
+				1.0/(k+float64(vRank+1))
+			hybrid[i].result.Score = hybrid[i].score
+		}
+	} else {
+		// Weighted fusion (original): sim×DenseWeight + (1/rank)×TextWeight.
+		for i := range hybrid {
+			combined := hybrid[i].sim*g.DenseWeight +
+				(1.0/float64(hybrid[i].ftsIdx+1))*g.TextWeight
+			hybrid[i].score = combined
+			hybrid[i].result.Score = combined
+		}
 	}
 
 	// Step 4: Sort by combined score descending
@@ -611,4 +699,58 @@ func calculateScore(query, content string) float64 {
 		score = 1.0
 	}
 	return score
+}
+
+// genomeFromConfig builds a SearchGenome from RecallConfig.
+// When SearchStrategy is nil, falls back to SearchMode field for
+// backward compatibility (hybrid → 70/30, lexical → 100/0, etc.).
+func genomeFromConfig(cfg *config.RecallConfig) search.SearchGenome {
+	if cfg == nil {
+		return search.DefaultGenome()
+	}
+	if cfg.SearchStrategy != nil {
+		return search.SearchGenome{
+			RecallMode:          cfg.SearchStrategy.RecallMode,
+			DenseWeight:         cfg.SearchStrategy.DenseWeight,
+			TextWeight:          cfg.SearchStrategy.TextWeight,
+			KeywordMatchPercent: cfg.SearchStrategy.KeywordMatchPercent,
+			MaxRetrievedNum:     cfg.SearchStrategy.MaxRetrievedNum,
+			FTS5PoolSize:        cfg.SearchStrategy.FTS5PoolSize,
+			FusionMethod:        cfg.SearchStrategy.FusionMethod,
+			RRFK:                cfg.SearchStrategy.RRFK,
+			RerankerEnabled:     cfg.SearchStrategy.RerankerEnabled,
+			RerankerTopN:        cfg.SearchStrategy.RerankerTopN,
+			MMREnabled:          cfg.SearchStrategy.MMREnabled,
+			MMRLambda:           cfg.SearchStrategy.MMRLambda,
+		}.Normalized()
+	}
+	// Backward compat: derive from SearchMode string.
+	switch cfg.SearchMode {
+	case "lexical", "fts5":
+		return search.SearchGenome{
+			RecallMode:  search.RecallModeLexical,
+			DenseWeight: 0, TextWeight: 1,
+			MaxRetrievedNum: cfg.MaxResults,
+			FTS5PoolSize:    50,
+		}
+	case "vector", "semantic":
+		return search.SearchGenome{
+			RecallMode:  search.RecallModeVector,
+			DenseWeight: 1, TextWeight: 0,
+			MaxRetrievedNum: cfg.MaxResults,
+			FTS5PoolSize:    50,
+		}
+	default: // "hybrid" or empty
+		maxR := cfg.MaxResults
+		if maxR <= 0 {
+			maxR = 10
+		}
+		return search.SearchGenome{
+			RecallMode:      search.RecallModeHybrid,
+			DenseWeight:     0.7,
+			TextWeight:      0.3,
+			MaxRetrievedNum: maxR,
+			FTS5PoolSize:    50,
+		}
+	}
 }

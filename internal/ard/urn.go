@@ -19,10 +19,10 @@ var urnPattern = regexp.MustCompile(`^urn:air:([a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z
 
 // URN represents an ARD URN identifier.
 type URN struct {
-	Publisher  string   // Fully qualified domain name
-	Namespace  string   // Optional hierarchical namespace
-	Name       string   // Resource name
-	Raw        string   // Original URN string
+	Publisher string // Fully qualified domain name
+	Namespace string // Optional hierarchical namespace
+	Name      string // Resource name
+	Raw       string // Original URN string
 }
 
 // ParseURN parses a URN string into a URN struct.
@@ -38,7 +38,7 @@ func ParseURN(urnStr string) (*URN, error) {
 
 	// First part is publisher (domain), rest is namespace:name
 	publisher := parts[0]
-	
+
 	// Validate publisher is a valid domain
 	if !isValidDomain(publisher) {
 		return nil, fmt.Errorf("invalid publisher domain: %s", publisher)
@@ -78,7 +78,7 @@ func NewURN(publisher, namespace, name string) *URN {
 	} else {
 		parts = []string{publisher, name}
 	}
-	
+
 	raw := URNPrefix + strings.Join(parts, ":")
 	return &URN{
 		Publisher: publisher,
@@ -153,7 +153,7 @@ func (b *URNBuilder) BuildString(name string) string {
 var (
 	// WukongLocal is the URN builder for local wukong installation.
 	WukongLocal, _ = NewURNBuilder("wukong.local")
-	
+
 	// WukongOrg is the URN builder for wukong organization.
 	WukongOrg, _ = NewURNBuilder("wukong.ai")
 )
@@ -161,37 +161,37 @@ var (
 // Common Wukong resource URNs.
 var WukongURNs = struct {
 	// Server URNs
-	AppsServer           *URN
-	DeveloperServer     *URN
-	BrowserServer      *URN
-	MemoryServer        *URN
-	ComputerServer      *URN
-	
+	AppsServer      *URN
+	DeveloperServer *URN
+	BrowserServer   *URN
+	MemoryServer    *URN
+	ComputerServer  *URN
+
 	// Agent URNs
-	CortexAgent         *URN
-	EvolutionAgent      *URN
-	RecipeAgent         *URN
-	
+	CortexAgent    *URN
+	EvolutionAgent *URN
+	RecipeAgent    *URN
+
 	// Tool URNs
-	DeveloperTools      *URN
-	BrowserTools        *URN
-	MemoryTools         *URN
-	APITools            *URN
+	DeveloperTools *URN
+	BrowserTools   *URN
+	MemoryTools    *URN
+	APITools       *URN
 }{
-	AppsServer:        WukongLocal.Build("server:apps"),
-	DeveloperServer:   WukongLocal.Build("server:developer"),
-	BrowserServer:    WukongLocal.Build("server:browser"),
-	MemoryServer:     WukongLocal.Build("server:memory"),
-	ComputerServer:   WukongLocal.Build("server:computer"),
-	
-	CortexAgent:      WukongLocal.Build("agent:cortex"),
-	EvolutionAgent:   WukongLocal.Build("agent:evolution"),
-	RecipeAgent:      WukongLocal.Build("agent:recipe"),
-	
-	DeveloperTools:    WukongLocal.Build("tools:developer"),
-	BrowserTools:     WukongLocal.Build("tools:browser"),
-	MemoryTools:      WukongLocal.Build("tools:memory"),
-	APITools:         WukongLocal.Build("tools:api"),
+	AppsServer:      WukongLocal.Build("server:apps"),
+	DeveloperServer: WukongLocal.Build("server:developer"),
+	BrowserServer:   WukongLocal.Build("server:browser"),
+	MemoryServer:    WukongLocal.Build("server:memory"),
+	ComputerServer:  WukongLocal.Build("server:computer"),
+
+	CortexAgent:    WukongLocal.Build("agent:cortex"),
+	EvolutionAgent: WukongLocal.Build("agent:evolution"),
+	RecipeAgent:    WukongLocal.Build("agent:recipe"),
+
+	DeveloperTools: WukongLocal.Build("tools:developer"),
+	BrowserTools:   WukongLocal.Build("tools:browser"),
+	MemoryTools:    WukongLocal.Build("tools:memory"),
+	APITools:       WukongLocal.Build("tools:api"),
 }
 
 // isValidDomain checks if a string is a valid domain name.
@@ -199,13 +199,13 @@ func isValidDomain(domain string) bool {
 	if domain == "" {
 		return false
 	}
-	
+
 	// Basic domain validation
 	parts := strings.Split(domain, ".")
 	if len(parts) < 2 {
 		return false
 	}
-	
+
 	for _, part := range parts {
 		if len(part) == 0 || len(part) > 63 {
 			return false
@@ -220,7 +220,7 @@ func isValidDomain(domain string) bool {
 			}
 		}
 	}
-	
+
 	return true
 }
 

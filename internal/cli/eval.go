@@ -57,7 +57,7 @@ func runEval(cmd *cobra.Command, args []string) error {
 		evalsetPath = wukongCfg.Eval.EvalSetPath
 	}
 	if evalsetPath == "" {
-		evalsetPath = ".wukong_evals/default.evalset.json"
+		evalsetPath = ".wukong/evals/default.evalset.json"
 	}
 
 	// Load evalset.
@@ -98,7 +98,7 @@ func runEval(cmd *cobra.Command, args []string) error {
 		resultsPath = wukongCfg.Eval.ResultsPath
 	}
 	if resultsPath == "" {
-		resultsPath = ".wukong_evals/results.json"
+		resultsPath = ".wukong/evals/results.json"
 	}
 
 	if err := evaluator.SaveResults(resultsPath); err != nil {

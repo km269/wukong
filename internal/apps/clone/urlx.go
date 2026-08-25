@@ -15,12 +15,17 @@ import (
 	"golang.org/x/net/publicsuffix"
 )
 
-// Kind classifies a URL as a page or asset.
+// Kind classifies a URL as a page or a specific asset type.
 type URLKind int
 
 const (
 	KindPage  URLKind = iota // HTML page that needs rendering and link rewriting.
-	KindAsset                // Static resource (CSS, image, font, media).
+	KindAsset                // Generic static resource (fallback).
+	KindCSS                  // Stylesheet (.css or <link rel="stylesheet">).
+	KindImage                // Image (<img>, <picture>, CSS url(), etc.).
+	KindFont                 // Web font (.woff, .ttf, etc.).
+	KindJS                   // JavaScript file.
+	KindMedia                // Audio/video/media files.
 )
 
 // reservedPrefix is the directory where all downloaded assets reside.
@@ -28,16 +33,23 @@ const reservedPrefix = "_wukong"
 
 // binaryExts lists extensions that indicate binary/document (non-HTML) content.
 var binaryExts = map[string]bool{
-	".pdf": true, ".doc": true, ".docx": true, ".xlsx": true,
+	".pdf": true, ".doc": true, ".docx": true, ".xls": true, ".xlsx": true,
+	".ppt": true, ".pptx": true, ".pps": true, ".ppsx": true,
+	".rtf": true, ".txt": true, ".csv": true, ".tsv": true,
+	".odt": true, ".ods": true, ".odp": true,
+	".xlsb": true, ".xlsm": true, ".docm": true, ".dotm": true,
 	".zip": true, ".tar": true, ".gz": true, ".bz2": true,
 	".7z": true, ".rar": true, ".exe": true, ".dmg": true,
+	".iso": true, ".img": true, ".msi": true,
 	".png": true, ".jpg": true, ".jpeg": true, ".gif": true,
 	".svg": true, ".ico": true, ".webp": true, ".avif": true,
+	".bmp": true, ".tiff": true, ".tif": true,
 	".css": true, ".js": true, ".json": true, ".xml": true,
 	".woff": true, ".woff2": true, ".ttf": true, ".otf": true,
 	".eot": true, ".mp3": true, ".mp4": true, ".webm": true,
 	".ogg": true, ".wav": true, ".flac": true, ".avi": true,
-	".mov": true, ".m4v": true, ".m4a": true,
+	".mov": true, ".m4v": true, ".m4a": true, ".wmv": true,
+	".flv": true, ".swf": true,
 }
 
 // Normalize converts a URL into a canonical form suitable for deduplication.
@@ -154,10 +166,8 @@ func LocalPath(seedHost, canonicalURL string, kind URLKind) string {
 	switch kind {
 	case KindPage:
 		return localPagePath(seedHost, u)
-	case KindAsset:
-		return localAssetPath(u)
 	default:
-		return localPagePath(seedHost, u)
+		return localAssetPath(u)
 	}
 }
 
@@ -177,11 +187,14 @@ func localPagePath(seedHost string, u *url.URL) string {
 	}
 
 	// Collapse index.html into the directory itself.
-	if !collapseIndex(&leaf) {
-		// For non-index pages, apply query hash to filename.
-		if u.RawQuery != "" {
-			leaf = applyQueryHash(leaf, u.RawQuery)
-		}
+	collapseIndex(&leaf)
+
+	// Apply query parameter suffix to all pages that have query parameters,
+	// including index pages (e.g. /list/?Page=2 must not collide with /list/).
+	// Uses readable naming for common pagination params, falls back to hash
+	// for complex/unknown query strings.
+	if u.RawQuery != "" {
+		leaf = applyPageQuerySuffix(leaf, u.RawQuery)
 	}
 
 	if strings.EqualFold(u.Host, seedHost) {
@@ -278,6 +291,147 @@ func collapseIndex(leaf *string) bool {
 		return true
 	}
 	return false
+}
+
+// pageParamNames lists common query parameter names used for pagination.
+// When a page URL has only one of these params, we use a readable suffix
+// instead of a hash (e.g. index_page_2.html instead of index__q-xxx.html).
+var pageParamNames = map[string]bool{
+	"page":     true,
+	"Page":     true,
+	"p":        true,
+	"pg":       true,
+	"pagenum":  true,
+	"pageNum":  true,
+	"PageNum":  true,
+	"pageno":   true,
+	"pageNo":   true,
+	"PageNo":   true,
+	"paged":    true,
+	"page_num": true,
+}
+
+// offsetParamNames lists common offset/limit-style pagination params.
+var offsetParamNames = map[string]bool{
+	"offset":    true,
+	"start":     true,
+	"skip":      true,
+	"from":      true,
+	"after":     true,
+	"limit":     true,
+	"size":      true,
+	"count":     true,
+	"per_page":  true,
+	"perPage":   true,
+	"page_size": true,
+	"pageSize":  true,
+}
+
+// cursorParamNames lists common cursor/token/seek-style pagination params.
+var cursorParamNames = map[string]bool{
+	"cursor":       true,
+	"next":         true,
+	"after_id":     true,
+	"afterId":      true,
+	"pageToken":    true,
+	"page_token":   true,
+	"token":        true,
+	"continuation": true,
+	"since":        true,
+	"before":       true,
+	"until":        true,
+	"from":         true,
+	"after":        true,
+}
+
+// applyPageQuerySuffix appends a query parameter suffix to a page filename.
+// For simple pagination URLs with only page-related params, uses readable
+// names (e.g. ?Page=2 → index_page_2.html). For offset/limit pairs, uses
+// offset-based names (e.g. ?offset=50&limit=25 → index_offset_50_25.html).
+// For cursor/token-style params, uses the param name and a short hash.
+// For complex query strings, falls back to a hash-based suffix.
+func applyPageQuerySuffix(filename, query string) string {
+	values, err := url.ParseQuery(query)
+	if err != nil {
+		return applyQueryHash(filename, query)
+	}
+
+	ext := path.Ext(filename)
+	base := filename[:len(filename)-len(ext)]
+
+	// Case 1: single page-number param → index_page_N.html
+	// All page-like param names (page, Page, p, pg, pageNum, etc.) are
+	// normalized to "_page_" for readability. In practice, a single site
+	// will use one consistent param name, so collisions are unlikely.
+	if len(values) == 1 {
+		for key := range values {
+			lowerKey := strings.ToLower(key)
+			if pageParamNames[lowerKey] || pageParamNames[key] {
+				vals := values[key]
+				if len(vals) == 1 && vals[0] != "" {
+					return base + "_page_" + vals[0] + ext
+				}
+			}
+		}
+	}
+
+	// Case 2: offset+limit pair → index_offset_N_M.html
+	// Handles common combinations: offset/limit, start/size, skip/count, etc.
+	if len(values) == 2 {
+		var offsetVal, limitVal string
+		var hasOffset, hasLimit bool
+
+		for key := range values {
+			lowerKey := strings.ToLower(key)
+			vals := values[key]
+			if len(vals) != 1 || vals[0] == "" {
+				continue
+			}
+			if isOffsetParam(lowerKey) {
+				offsetVal = vals[0]
+				hasOffset = true
+			} else if isLimitParam(lowerKey) {
+				limitVal = vals[0]
+				hasLimit = true
+			}
+		}
+
+		if hasOffset && hasLimit {
+			return base + "_offset_" + offsetVal + "_" + limitVal + ext
+		}
+	}
+
+	// Case 3: single cursor/token-style param → index_{param}_{shortHash}.html
+	if len(values) == 1 {
+		for key := range values {
+			lowerKey := strings.ToLower(key)
+			if cursorParamNames[lowerKey] || cursorParamNames[key] {
+				vals := values[key]
+				if len(vals) == 1 && vals[0] != "" {
+					shortHash := sha256Str(vals[0], 6)
+					return base + "_" + lowerKey + "_" + shortHash + ext
+				}
+			}
+		}
+	}
+
+	// Fallback: hash-based suffix for everything else.
+	return applyQueryHash(filename, query)
+}
+
+// isOffsetParam returns true if the query param name is an offset-style
+// pagination parameter (skip, offset, start, from, after, etc.).
+func isOffsetParam(name string) bool {
+	return name == "offset" || name == "start" || name == "skip" ||
+		name == "from" || name == "after" || name == "after_id"
+}
+
+// isLimitParam returns true if the query param name is a limit-style
+// pagination parameter (limit, size, count, per_page, page_size, etc.).
+func isLimitParam(name string) bool {
+	return name == "limit" || name == "size" || name == "count" ||
+		name == "per_page" || name == "perpage" || name == "page_size" ||
+		name == "pagesize" || name == "pageSize"
 }
 
 // applyQueryHash appends a query parameter hash to a filename.
@@ -377,6 +531,7 @@ func SameRegistrableDomain(seed, u *url.URL) bool {
 type ScopeConfig struct {
 	AllowSubdomains bool
 	ScopePrefix     string
+	ScopeAnchor     string
 	ExcludePrefixes []string
 }
 
@@ -389,8 +544,34 @@ func InScope(seed, u *url.URL, cfg ScopeConfig) bool {
 		return false
 	}
 
-	if cfg.ScopePrefix != "" && !strings.HasPrefix(u.Path, cfg.ScopePrefix) {
-		return false
+	// Check scope anchor first (if specified, URL must have matching fragment)
+	if cfg.ScopeAnchor != "" {
+		if u.Fragment == "" {
+			return false
+		}
+		if !strings.EqualFold(u.Fragment, cfg.ScopeAnchor) {
+			return false
+		}
+	}
+
+	if cfg.ScopePrefix != "" {
+		matched := false
+		if matchesScopePrefixWithList(u.Path, cfg.ScopePrefix) {
+			matched = true
+		}
+		if !matched && u.Fragment != "" {
+			cleanPrefix := strings.Trim(cfg.ScopePrefix, "/")
+			parts := strings.Split(cleanPrefix, "/")
+			if len(parts) > 0 {
+				lastSegment := strings.ToLower(parts[len(parts)-1])
+				if strings.ToLower(u.Fragment) == lastSegment {
+					matched = true
+				}
+			}
+		}
+		if !matched {
+			return false
+		}
 	}
 
 	for _, excl := range cfg.ExcludePrefixes {
@@ -400,6 +581,58 @@ func InScope(seed, u *url.URL, cfg ScopeConfig) bool {
 	}
 
 	return true
+}
+
+func matchesScopePrefix(path, prefix string) bool {
+	// Normalize: strip trailing slashes to avoid double-slash issues
+	// when prefix already ends with "/" (e.g. "/about/" + "/" = "/about//").
+	cleanPrefix := strings.TrimRight(prefix, "/")
+	cleanPath := strings.TrimRight(path, "/")
+
+	if cleanPath == cleanPrefix {
+		return true
+	}
+	if cleanPrefix == "" {
+		// Empty prefix matches everything.
+		return true
+	}
+	return strings.HasPrefix(cleanPath, cleanPrefix+"/")
+}
+
+// matchesScopePrefixWithList checks whether a path matches the scope prefix,
+// also considering bi-directional "-list" suffix matching:
+//   - prefix "/biographies-list" matches "/biographies/xxx" (strip -list)
+//   - prefix "/biographies" matches "/biographies-list/..." (add -list)
+//
+// This handles the common pattern where a list page lives at /prefix-list/
+// and detail pages live at /prefix/<slug>.
+func matchesScopePrefixWithList(path, prefix string) bool {
+	// Direct match.
+	if matchesScopePrefix(path, prefix) {
+		return true
+	}
+
+	cleanPrefix := strings.TrimRight(prefix, "/")
+
+	// Direction 1: prefix ends with "-list" → try without "-list".
+	// e.g. prefix="/biographies-list" matches "/biographies/xxx".
+	if strings.HasSuffix(cleanPrefix, "-list") {
+		basePrefix := strings.TrimSuffix(cleanPrefix, "-list")
+		if matchesScopePrefix(path, basePrefix) {
+			return true
+		}
+	}
+
+	// Direction 2: prefix does NOT end with "-list" → try adding "-list".
+	// e.g. prefix="/biographies" matches "/biographies-list/page/2/".
+	if !strings.HasSuffix(cleanPrefix, "-list") {
+		listPrefix := cleanPrefix + "-list"
+		if matchesScopePrefix(path, listPrefix) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // PageKey returns a deterministic key for a page URL used for deduplication.

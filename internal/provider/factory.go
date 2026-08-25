@@ -22,6 +22,7 @@ const (
 	DeepSeekBaseURL  = "https://api.deepseek.com/v1"
 	OllamaBaseURL    = "http://localhost:11434/v1"
 	LMStudioBaseURL  = "http://localhost:1234/v1"
+	VLLMBaseURL      = "http://localhost:8000/v1"
 )
 
 // Factory creates model instances from provider configuration.
@@ -61,7 +62,7 @@ func (f *Factory) CreateModel(name string) (model.Model, error) {
 
 	switch p.Type {
 	case "openai", "anthropic", "google", "deepseek",
-		"ollama", "lmstudio":
+		"ollama", "lmstudio", "vllm":
 		return f.createOpenAI(p), nil
 	case "acp":
 		return f.createACP(p)
@@ -96,10 +97,16 @@ func (f *Factory) CreateModelWithName(
 
 	switch p.Type {
 	case "openai", "anthropic", "google", "deepseek",
-		"ollama", "lmstudio":
+		"ollama", "lmstudio", "vllm":
 		opts := []openai.Option{
 			openai.WithBaseURL(p.BaseURL),
 			openai.WithAPIKey(p.APIKey),
+		}
+		if p.ContextWindow > 0 {
+			opts = append(opts,
+				openai.WithContextWindow(p.ContextWindow),
+				openai.WithEnableTokenTailoring(true),
+			)
 		}
 		return openai.New(modelName, opts...), nil
 	case "acp":
@@ -135,6 +142,8 @@ func (f *Factory) fillDefaultBaseURL(p *config.ProviderConfig) {
 		p.BaseURL = OllamaBaseURL
 	case "lmstudio":
 		p.BaseURL = LMStudioBaseURL
+	case "vllm":
+		p.BaseURL = VLLMBaseURL
 	}
 }
 
@@ -164,6 +173,16 @@ func (f *Factory) createOpenAI(p *config.ProviderConfig) model.Model {
 	opts := []openai.Option{
 		openai.WithBaseURL(p.BaseURL),
 		openai.WithAPIKey(p.APIKey),
+	}
+	// Pass the configured context window so the framework can perform
+	// accurate token-budget trimming. Without this, the framework falls
+	// back to its built-in model registry (128K default), which causes
+	// "exceed_context_size_error" on local models with smaller windows.
+	if p.ContextWindow > 0 {
+		opts = append(opts,
+			openai.WithContextWindow(p.ContextWindow),
+			openai.WithEnableTokenTailoring(true),
+		)
 	}
 	return openai.New(p.Model, opts...)
 }

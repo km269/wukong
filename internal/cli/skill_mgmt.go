@@ -14,7 +14,6 @@ import (
 
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/skill"
-	"github.com/km269/wukong/internal/util"
 )
 
 // newSkillCmd creates the "wukong skill" command group.
@@ -185,15 +184,12 @@ func createSkillManager(configPath string) (*skill.Manager, error) {
 	}
 
 	if _, err := os.Stat(skillsDir); os.IsNotExist(err) {
-		// Try legacy path
-		skillsDir = ".wukong_skills"
-		if _, err2 := os.Stat(skillsDir); os.IsNotExist(err2) {
-			// Create the default directory
-			homeDir, _ := os.UserHomeDir()
-			if homeDir != "" {
-				skillsDir = filepath.Join(homeDir, ".config",
-					"wukong", "skills")
-			}
+		// .wukong/skills does not exist; create under
+		// ~/.config/wukong/skills as fallback
+		homeDir, _ := os.UserHomeDir()
+		if homeDir != "" {
+			skillsDir = filepath.Join(homeDir, ".config",
+				"wukong", "skills")
 		}
 	}
 
@@ -209,6 +205,3 @@ func createSkillManager(configPath string) (*skill.Manager, error) {
 
 	return mgr, nil
 }
-
-// Ensure util is used
-var _ = util.Logger

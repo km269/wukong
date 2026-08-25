@@ -153,10 +153,10 @@ func TestNewController(t *testing.T) {
 
 	// Test with custom config
 	cfg := &config.BrowserConfig{
-		Timeout:        10 * 1000000000, // 10 seconds in ns
-		BrowserType:    "chromium",
-		Headless:       true,
-		CacheDir:       ".test_cache",
+		Timeout:         10 * 1000000000, // 10 seconds in ns
+		BrowserType:     "chromium",
+		Headless:        true,
+		CacheDir:        ".test_cache",
 		MaxDownloadSize: 1024,
 	}
 	ctrl = NewController(cfg)
@@ -235,7 +235,7 @@ func TestController_IsChromedpMode(t *testing.T) {
 		BrowserType: "http",
 		Enabled:     true,
 	})
-	if httpCtrl.isChromedpMode() {
+	if httpCtrl.isChromedpBackend() {
 		t.Error("expected non-chromedp mode for HTTP config")
 	}
 
@@ -244,7 +244,7 @@ func TestController_IsChromedpMode(t *testing.T) {
 		BrowserType: "chromium",
 		Enabled:     false,
 	})
-	if chromiumCtrl.isChromedpMode() {
+	if chromiumCtrl.isChromedpBackend() {
 		t.Error("expected non-chromedp mode when browser disabled")
 	}
 }

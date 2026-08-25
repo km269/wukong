@@ -12,8 +12,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/km269/wukong/internal/apps/clone"
 	"github.com/km269/wukong/internal/browser"
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/security"
 
 	"trpc.group/trpc-go/trpc-agent-go/tool"
 	"trpc.group/trpc-go/trpc-agent-go/tool/function"
@@ -22,11 +24,11 @@ import (
 // ComputerControllerToolSet provides web scraping, file caching,
 // and browser automation tools.
 type ComputerControllerToolSet struct {
-	tools     []tool.Tool
-	cfg       *config.WukongConfig
-	browser   *browser.Controller
-	inited    bool
-	closed    bool
+	tools   []tool.Tool
+	cfg     *config.WukongConfig
+	browser *browser.Controller
+	inited  bool
+	closed  bool
 }
 
 // NewComputerControllerToolSet creates the computer controller tool set.
@@ -40,7 +42,7 @@ func NewComputerControllerToolSet(
 	ts.tools = []tool.Tool{
 		function.NewFunctionTool(
 			ts.webFetch,
-			function.WithName("web_fetch"),
+			function.WithName("computer_controller_web_fetch"),
 			function.WithDescription(
 				"Fetch content from a URL and return as text. "+
 					"Use this to read web pages, API responses, "+
@@ -49,7 +51,7 @@ func NewComputerControllerToolSet(
 		),
 		function.NewFunctionTool(
 			ts.fileCache,
-			function.WithName("file_cache"),
+			function.WithName("computer_controller_file_cache"),
 			function.WithDescription(
 				"Download and cache a file from a URL to local "+
 					"storage. Returns the local file path. Use for "+
@@ -58,21 +60,21 @@ func NewComputerControllerToolSet(
 		),
 		function.NewFunctionTool(
 			ts.cacheList,
-			function.WithName("cache_list"),
+			function.WithName("computer_controller_cache_list"),
 			function.WithDescription(
 				"List files in the local cache directory.",
 			),
 		),
 		function.NewFunctionTool(
 			ts.cacheClear,
-			function.WithName("cache_clear"),
+			function.WithName("computer_controller_cache_clear"),
 			function.WithDescription(
 				"Clear the local file cache.",
 			),
 		),
 		function.NewFunctionTool(
 			ts.browserNavigate,
-			function.WithName("browser_navigate"),
+			function.WithName("computer_controller_browser_navigate"),
 			function.WithDescription(
 				"Navigate to a URL and extract page content. "+
 					"Returns the page title, text content, and "+
@@ -82,7 +84,7 @@ func NewComputerControllerToolSet(
 		),
 		function.NewFunctionTool(
 			ts.browserExtract,
-			function.WithName("browser_extract"),
+			function.WithName("computer_controller_browser_extract"),
 			function.WithDescription(
 				"Extract readable text content from a web page. "+
 					"Removes HTML tags, scripts, and styles to "+
@@ -92,7 +94,7 @@ func NewComputerControllerToolSet(
 		),
 		function.NewFunctionTool(
 			ts.browserScreenshot,
-			function.WithName("browser_screenshot"),
+			function.WithName("computer_controller_browser_screenshot"),
 			function.WithDescription(
 				"Capture a screenshot of a web page. Saves the "+
 					"page content as a self-contained HTML file "+
@@ -106,7 +108,7 @@ func NewComputerControllerToolSet(
 		),
 		function.NewFunctionTool(
 			ts.browserClick,
-			function.WithName("browser_click"),
+			function.WithName("computer_controller_browser_click"),
 			function.WithDescription(
 				"Click an element on the current page using a "+
 					"CSS selector. Requires browser automation "+
@@ -117,12 +119,21 @@ func NewComputerControllerToolSet(
 		),
 		function.NewFunctionTool(
 			ts.browserFill,
-			function.WithName("browser_fill"),
+			function.WithName("computer_controller_browser_fill"),
 			function.WithDescription(
 				"Fill a form input element on the current page "+
 					"using a CSS selector and value. Requires "+
 					"browser automation mode. Use after "+
 					"browser_navigate to automate form interaction.",
+			),
+		),
+		function.NewFunctionTool(
+			ts.siteClone,
+			function.WithName("computer_controller_site_clone"),
+			function.WithDescription(
+				"Clone a website locally with full assets and linked pages. "+
+					"Supports BFS/DFS traversal, depth limiting, robots.txt compliance, "+
+					"content deduplication, and resume capability. Returns the path to the cloned site.",
 			),
 		),
 	}
@@ -149,7 +160,7 @@ func (ts *ComputerControllerToolSet) Name() string {
 func (ts *ComputerControllerToolSet) Init(ctx context.Context) error {
 	cacheDir := ts.cfg.Browser.CacheDir
 	if cacheDir == "" {
-		cacheDir = ".wukong_cache"
+		cacheDir = ".wukong/cache"
 	}
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		return fmt.Errorf("create cache dir: %w", err)
@@ -185,12 +196,32 @@ type WebFetchRsp struct {
 func (ts *ComputerControllerToolSet) webFetch(
 	ctx context.Context, req WebFetchReq,
 ) (WebFetchRsp, error) {
+	// SSRF protection: reject URLs that resolve to loopback,
+	// link-local (incl. cloud metadata 169.254.169.254), or private
+	// addresses. Prevents a prompt-injected agent from reading cloud
+	// IAM credentials or scanning the internal network.
+	if err := security.CheckURL(req.URL); err != nil {
+		return WebFetchRsp{
+			Success: false,
+			Error:   err.Error(),
+		}, nil
+	}
+
 	timeout := 30 * time.Second
 	if req.Timeout > 0 {
 		timeout = time.Duration(req.Timeout) * time.Second
 	}
 
-	client := &http.Client{Timeout: timeout}
+	// Disable redirects so an attacker cannot bypass CheckURL by
+	// redirecting to an internal address. The user-agent already
+	// records the first response; redirects are rare for the
+	// scraping use case.
+	client := &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	httpReq, err := http.NewRequestWithContext(
 		ctx, http.MethodGet, req.URL, nil,
 	)
@@ -259,7 +290,7 @@ func (ts *ComputerControllerToolSet) fileCache(
 ) (FileCacheRsp, error) {
 	cacheDir := ts.cfg.Browser.CacheDir
 	if cacheDir == "" {
-		cacheDir = ".wukong_cache"
+		cacheDir = ".wukong/cache"
 	}
 
 	filename := req.Filename
@@ -339,10 +370,10 @@ type CacheListReq struct{}
 
 // CacheListRsp is the output for listing cache.
 type CacheListRsp struct {
-	Success bool          `json:"success"`
+	Success bool            `json:"success"`
 	Files   []CacheFileInfo `json:"files,omitempty"`
-	Count   int           `json:"count"`
-	Error   string        `json:"error,omitempty"`
+	Count   int             `json:"count"`
+	Error   string          `json:"error,omitempty"`
 }
 
 // CacheFileInfo describes a cached file.
@@ -357,7 +388,7 @@ func (ts *ComputerControllerToolSet) cacheList(
 ) (CacheListRsp, error) {
 	cacheDir := ts.cfg.Browser.CacheDir
 	if cacheDir == "" {
-		cacheDir = ".wukong_cache"
+		cacheDir = ".wukong/cache"
 	}
 
 	entries, err := os.ReadDir(cacheDir)
@@ -406,7 +437,7 @@ func (ts *ComputerControllerToolSet) cacheClear(
 ) (CacheClearRsp, error) {
 	cacheDir := ts.cfg.Browser.CacheDir
 	if cacheDir == "" {
-		cacheDir = ".wukong_cache"
+		cacheDir = ".wukong/cache"
 	}
 
 	entries, err := os.ReadDir(cacheDir)
@@ -537,9 +568,10 @@ type BrowserExtractReq struct {
 
 // BrowserExtractRsp is the output for text extraction.
 type BrowserExtractRsp struct {
-	Success bool   `json:"success"`
-	Text    string `json:"text,omitempty"`
-	Error   string `json:"error,omitempty"`
+	Success  bool   `json:"success"`
+	Text     string `json:"text,omitempty"`
+	Markdown string `json:"markdown,omitempty"`
+	Error    string `json:"error,omitempty"`
 }
 
 func (ts *ComputerControllerToolSet) browserExtract(
@@ -554,16 +586,17 @@ func (ts *ComputerControllerToolSet) browserExtract(
 	}
 
 	return BrowserExtractRsp{
-		Success: result.Success,
-		Text:    result.Text,
-		Error:   result.Error,
+		Success:  result.Success,
+		Text:     result.Text,
+		Markdown: result.Markdown,
+		Error:    result.Error,
 	}, nil
 }
 
 // BrowserScreenshotReq is the input for capturing a screenshot.
 type BrowserScreenshotReq struct {
 	URL        string `json:"url" jsonschema:"description=URL to capture screenshot of"`
-	OutputPath string `json:"output_path,omitempty" jsonschema:"description=Optional output file path for the screenshot HTML"`
+	OutputPath string `json:"output_path,omitempty" jsonschema:"description=Optional output file path for the screenshot PNG"`
 }
 
 // BrowserScreenshotRsp is the output for capturing a screenshot.
@@ -583,7 +616,7 @@ func (ts *ComputerControllerToolSet) browserScreenshot(
 	if outputPath == "" {
 		cacheDir := ts.cfg.Browser.CacheDir
 		if cacheDir == "" {
-			cacheDir = ".wukong_cache"
+			cacheDir = ".wukong/cache"
 		}
 		// Generate a filename based on URL and timestamp
 		safeName := strings.NewReplacer(
@@ -595,7 +628,7 @@ func (ts *ComputerControllerToolSet) browserScreenshot(
 		}
 		outputPath = filepath.Join(
 			cacheDir,
-			fmt.Sprintf("screenshot_%s_%d.html",
+			fmt.Sprintf("screenshot_%s_%d.png",
 				safeName, time.Now().Unix()),
 		)
 	}
@@ -617,5 +650,111 @@ func (ts *ComputerControllerToolSet) browserScreenshot(
 		Title:      result.Title,
 		StatusCode: result.StatusCode,
 		Error:      result.Error,
+	}, nil
+}
+
+// SiteCloneReq is the input for cloning a website.
+type SiteCloneReq struct {
+	URL              string `json:"url" jsonschema:"description=URL of the website to clone"`
+	OutputDir        string `json:"output_dir,omitempty" jsonschema:"description=Local directory to save the cloned site"`
+	MaxPages         int    `json:"max_pages,omitempty" jsonschema:"description=Maximum number of pages to clone (0 = unlimited)"`
+	MaxDepth         int    `json:"max_depth,omitempty" jsonschema:"description=Maximum link depth to crawl (0 = unlimited)"`
+	Traversal        string `json:"traversal,omitempty" jsonschema:"description=Traversal strategy: bfs or dfs (default: bfs)"`
+	Subdomains       bool   `json:"subdomains,omitempty" jsonschema:"description=Include subdomains in crawl scope"`
+	Scroll           bool   `json:"scroll,omitempty" jsonschema:"description=Enable auto-scrolling for lazy loading"`
+	RespectRobots    bool   `json:"respect_robots,omitempty" jsonschema:"description=Obey robots.txt rules (default: true)"`
+	DedupContent     bool   `json:"dedup_content,omitempty" jsonschema:"description=Enable SHA-256 content deduplication (default: true)"`
+	EnableResume     bool   `json:"enable_resume,omitempty" jsonschema:"description=Enable resume capability (default: true)"`
+	Force            bool   `json:"force,omitempty" jsonschema:"description=Delete existing clone data and start fresh"`
+	Workers          int    `json:"workers,omitempty" jsonschema:"description=Number of concurrent workers (default: 4)"`
+	ExportStructured bool   `json:"export_structured,omitempty" jsonschema:"description=Export results as structured JSON with Markdown content"`
+}
+
+// SiteCloneRsp is the output for cloning a website.
+type SiteCloneRsp struct {
+	Success       bool   `json:"success"`
+	OutputDir     string `json:"output_dir,omitempty"`
+	ExportPath    string `json:"export_path,omitempty"`
+	URL           string `json:"url,omitempty"`
+	PagesCloned   int    `json:"pages_cloned"`
+	AssetsSaved   int    `json:"assets_saved"`
+	AssetsSkipped int    `json:"assets_skipped"`
+	StartTime     string `json:"start_time,omitempty"`
+	EndTime       string `json:"end_time,omitempty"`
+	Duration      string `json:"duration,omitempty"`
+	Error         string `json:"error,omitempty"`
+}
+
+func (ts *ComputerControllerToolSet) siteClone(
+	ctx context.Context, req SiteCloneReq,
+) (SiteCloneRsp, error) {
+	if req.URL == "" {
+		return SiteCloneRsp{
+			Success: false,
+			Error:   "URL is required",
+		}, nil
+	}
+
+	opts := clone.DefaultEnhancedOptions()
+
+	if req.OutputDir != "" {
+		opts.OutputDir = req.OutputDir
+	}
+	if req.MaxPages > 0 {
+		opts.MaxPages = req.MaxPages
+	}
+	if req.MaxDepth > 0 {
+		opts.MaxDepth = req.MaxDepth
+	}
+	if req.Traversal != "" {
+		opts.Traversal = clone.TraversalMode(req.Traversal)
+	}
+	opts.Subdomains = req.Subdomains
+	opts.Scroll = req.Scroll
+	opts.RespectRobots = req.RespectRobots
+	opts.DedupContent = req.DedupContent
+	opts.EnableResume = req.EnableResume
+	opts.Force = req.Force
+	opts.ExportStructuredData = req.ExportStructured
+	if req.Workers > 0 {
+		opts.Workers = req.Workers
+	}
+
+	cloner := clone.NewEnhancedCloner(opts)
+	result, err := cloner.Clone(ctx, req.URL)
+	if err != nil {
+		return SiteCloneRsp{
+			Success: false,
+			Error:   fmt.Sprintf("clone failed: %v", err),
+		}, nil
+	}
+
+	if !result.Success {
+		errorMsg := ""
+		if len(result.Errors) > 0 {
+			errorMsg = result.Errors[0]
+		}
+		return SiteCloneRsp{
+			Success: false,
+			Error:   errorMsg,
+		}, nil
+	}
+
+	exportPath := ""
+	if req.ExportStructured {
+		exportPath = filepath.Join(result.OutputDir, "structured_export.json")
+	}
+
+	return SiteCloneRsp{
+		Success:       true,
+		OutputDir:     result.OutputDir,
+		ExportPath:    exportPath,
+		URL:           result.SeedURL,
+		PagesCloned:   result.Pages,
+		AssetsSaved:   result.Assets,
+		AssetsSkipped: len(result.Skipped),
+		StartTime:     result.StartTime.Format(time.RFC3339),
+		EndTime:       result.EndTime.Format(time.RFC3339),
+		Duration:      result.EndTime.Sub(result.StartTime).String(),
 	}, nil
 }

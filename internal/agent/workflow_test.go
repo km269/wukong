@@ -277,7 +277,7 @@ func TestDefaultSubAgents_Parallel(t *testing.T) {
 			Instruction: "Analyze docs.",
 			AllTools:    false,
 			AllowedTools: []string{
-				"read_file", "web_fetch",
+				"read_file", "computer_controller_web_fetch",
 			},
 		},
 		{

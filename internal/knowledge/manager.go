@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/util"
@@ -124,7 +125,11 @@ func NewManager(
 	)
 
 	m.kb = kb
-	m.searchTool = searchTool
+	if ct, ok := searchTool.(tool.CallableTool); ok {
+		m.searchTool = &gracefulSearchTool{inner: ct}
+	} else {
+		m.searchTool = searchTool
+	}
 	m.loaded = true
 
 	util.Logger.Info("knowledge: manager initialized",
@@ -186,7 +191,13 @@ func (m *Manager) collectSources() ([]knowledgesource.Source, error) {
 }
 
 // resolveEmbedderCredentials determines embedder API credentials.
-// Priority: knowledge.embedder_provider → default LLM provider → env vars.
+// Priority:
+//  1. knowledge.embedder_provider (must match a name in providers[])
+//  2. cortex.embedding_base_url + cortex.embedding_api_key (when cortex.enabled)
+//  3. default LLM provider
+//
+// The cortex fallback lets knowledge share the embedding service configured
+// for CortexDB without requiring a duplicate provider entry.
 func resolveEmbedderCredentials(
 	providerName string,
 	wukongCfg *config.WukongConfig,
@@ -198,10 +209,43 @@ func resolveEmbedderCredentials(
 		}
 	}
 
-	// Fall back to default provider.
+	// Fall back to CortexDB embedding settings (shared embedding service).
+	if wukongCfg.Cortex.Enabled {
+		if wukongCfg.Cortex.EmbeddingBaseURL != "" {
+			return wukongCfg.Cortex.EmbeddingAPIKey,
+				wukongCfg.Cortex.EmbeddingBaseURL
+		}
+	}
+
+	// Final fallback: default LLM provider.
 	if dp := wukongCfg.DefaultProviderConfig(); dp != nil {
 		return dp.APIKey, dp.BaseURL
 	}
 
 	return "", ""
+}
+
+// gracefulSearchTool wraps the knowledge search tool so that
+// "no relevant documents found" is returned as a normal (non-error)
+// result. This lets the agent gracefully fall back to other tools
+// (e.g. web search) instead of treating an empty knowledge base hit
+// as a tool-call failure.
+type gracefulSearchTool struct {
+	inner tool.CallableTool
+}
+
+func (g *gracefulSearchTool) Declaration() *tool.Declaration {
+	return g.inner.Declaration()
+}
+
+func (g *gracefulSearchTool) Call(
+	ctx context.Context, jsonArgs []byte,
+) (any, error) {
+	result, err := g.inner.Call(ctx, jsonArgs)
+	if err != nil &&
+		strings.Contains(err.Error(), "no relevant documents found") {
+		return "No relevant documents found in the knowledge base " +
+			"for this query. Consider using web search instead.", nil
+	}
+	return result, err
 }

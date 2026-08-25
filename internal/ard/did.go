@@ -34,6 +34,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/km269/wukong/internal/cors"
 )
 
 // ============================================================================
@@ -74,15 +76,15 @@ const (
 // It contains the public keys, authentication methods, service
 // endpoints, and a cryptographic proof of integrity.
 type DIDDocument struct {
-	Context           []string             `json:"@context"`
-	ID                string               `json:"id"`
-	AlsoKnownAs       []string             `json:"alsoKnownAs,omitempty"`
-	VerificationMethod []VerificationMethod  `json:"verificationMethod"`
-	Authentication    []string             `json:"authentication"`
-	AssertionMethod   []string             `json:"assertionMethod"`
-	KeyAgreement      []string             `json:"keyAgreement,omitempty"`
-	Service            []DIDService        `json:"service,omitempty"`
-	Proof              *DataIntegrityProof `json:"proof,omitempty"`
+	Context            []string             `json:"@context"`
+	ID                 string               `json:"id"`
+	AlsoKnownAs        []string             `json:"alsoKnownAs,omitempty"`
+	VerificationMethod []VerificationMethod `json:"verificationMethod"`
+	Authentication     []string             `json:"authentication"`
+	AssertionMethod    []string             `json:"assertionMethod"`
+	KeyAgreement       []string             `json:"keyAgreement,omitempty"`
+	Service            []DIDService         `json:"service,omitempty"`
+	Proof              *DataIntegrityProof  `json:"proof,omitempty"`
 }
 
 // VerificationMethod describes a cryptographic key in the DID document.
@@ -118,18 +120,18 @@ type DIDManager struct {
 	mu sync.RWMutex
 
 	// Identity components
-	domain       string
-	path         string
-	agentName    string
-	did          string
-	didDoc       *DIDDocument
+	domain    string
+	path      string
+	agentName string
+	did       string
+	didDoc    *DIDDocument
 
 	// Cryptographic keys
-	signingKey   ed25519.PrivateKey   // Ed25519 for assertions/signing
-	agreementKey *ecdh.PrivateKey      // X25519 for E2EE key agreement
+	signingKey   ed25519.PrivateKey // Ed25519 for assertions/signing
+	agreementKey *ecdh.PrivateKey   // X25519 for E2EE key agreement
 
 	// DID document URL
-	docURL       string
+	docURL string
 }
 
 // DIDManagerConfig configures the DID manager.
@@ -500,7 +502,7 @@ func (h *DIDHandler) handleDIDDocument(
 	}
 
 	w.Header().Set("Content-Type", "application/did+json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	cors.SetLocalhostOnly(w, r)
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 	json.NewEncoder(w).Encode(doc)
 }

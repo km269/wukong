@@ -9,8 +9,8 @@ import (
 
 func TestGuard_New(t *testing.T) {
 	cfg := &config.SecurityConfig{
-		DefaultTimeout:        30 * time.Second,
-		MaxTimeout:            300 * time.Second,
+		DefaultTimeout:         30 * time.Second,
+		MaxTimeout:             300 * time.Second,
 		BlockDangerousCommands: true,
 		BlockedCommands: []string{
 			"rm -rf /",

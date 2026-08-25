@@ -41,16 +41,22 @@ func newLexicalStore(db *sql.DB) (*lexicalStore, error) {
 
 // storeMessage inserts a chat message into the chat_recall table.
 // Enforces MaxMessagesPerSession by pruning oldest messages.
+// Returns the auto-incremented message ID.
 func (ls *lexicalStore) storeMessage(
 	msg recall.ChatMessage, maxPerSession ...int,
-) error {
-	_, err := ls.db.Exec(
+) (int64, error) {
+	result, err := ls.db.Exec(
 		`INSERT INTO chat_recall (session_id, user_id, role, content, created_at)
 		 VALUES (?, ?, ?, ?, ?)`,
 		msg.SessionID, msg.UserID, msg.Role, msg.Content, msg.CreatedAt,
 	)
 	if err != nil {
-		return err
+		return 0, err
+	}
+
+	msgID, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
 	}
 
 	// Enforce per-session message limit.
@@ -71,7 +77,7 @@ func (ls *lexicalStore) storeMessage(
 		)`,
 		msg.SessionID, limit, msg.SessionID,
 	)
-	return nil
+	return msgID, nil
 }
 
 // search performs FTS5 full-text search.
@@ -140,6 +146,9 @@ func (ls *lexicalStore) listSessions(userID string) ([]string, error) {
 			return nil, err
 		}
 		sessions = append(sessions, sid)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
 	}
 	return sessions, nil
 }
@@ -466,6 +475,9 @@ func scanResults(rows *sql.Rows) ([]recall.SearchResult, error) {
 			Preview: truncatePreview(msg.Content, 200),
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
+	}
 	return results, nil
 }
 
@@ -486,6 +498,9 @@ func scanResultsNoRank(
 			Score:   calcScore(query, msg.Content),
 			Preview: truncatePreview(msg.Content, 200),
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
 	}
 	return results, nil
 }

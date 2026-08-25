@@ -37,8 +37,8 @@ func newInMemoryService() artifact.Service {
 
 // newCOSService creates a Tencent Cloud COS-backed artifact service.
 // Credentials are resolved in order:
-//   1. Config file (cos_secret_id / cos_secret_key)
-//   2. Environment variables (COS_SECRETID / COS_SECRETKEY)
+//  1. Config file (cos_secret_id / cos_secret_key)
+//  2. Environment variables (COS_SECRETID / COS_SECRETKEY)
 func newCOSService(cfg *config.ArtifactConfig) (artifact.Service, error) {
 	bucketURL := cfg.COSBucketURL
 	if bucketURL == "" {

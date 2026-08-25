@@ -11,9 +11,29 @@
 #   6. /etc/wukong/config.yaml (non-Windows)
 #   7. Built-in defaults (internal/config/defaults.go)
 #
-# Env var expansion: ${ENV_VAR} supported in api_key, app_secret,
-# encrpy_key, token, encoding_aes_key, jwt_secret, cos_secret_id,
-# cos_secret_key, langfuse_public_key, langfuse_secret_key fields.
+# Env var expansion: ${ENV_VAR} and ${VAR:-default} syntax supported
+# in the following fields:
+#   - providers[].api_key, base_url, model
+#   - summon.a2a_remotes[].api_key, jwt_secret, oauth_client_secret
+#   - gateway.feishu.app_secret, encrypt_key, verification_token
+#   - observability.langfuse_public_key, langfuse_secret_key
+#   - artifact.cos_secret_id, cos_secret_key
+#   - acp_server.security.auth.api_key
+#   - mcp_server.security.auth.api_key
+#   - cortex.embedding_api_key, embedding_base_url, embedding_model
+#   - cortex.reranker_api_key, reranker_base_url, reranker_model
+#   - cortex.vertical_routing.github_api_key
+#   - memoryflow.planner_model, memoryflow.extractor_model
+#   - graphflow.extractor_model
+#   - dify.api_secret
+#   - session.redis_url
+#   - browser.search.searxng.url, searxng.api_key
+#   - browser.search.tavily.api_key
+#   - browser.search.google.api_key, google.cse_id
+#   - browser.search.bing.api_key
+#
+# Unresolved ${VAR} (no :-default, VAR unset) is surfaced as a
+# startup warning so typos like ${OEPNAI_API_KEY} are visible.
 #
 # Path conventions:
 #   - .wukong/      — Runtime data (apps, cache, skills, visuals, okf, evals)
@@ -25,20 +45,16 @@
 # A. Global Settings
 # ===========================================================================
 log_level: "info"                    # debug | info | warn | error
-
-# Default LLM provider (must match a name in providers[] below).
-default_provider: "lmstudio"
-
-# Background task model (memory extraction, summarisation, KG).
-# Falls back to default_provider when empty.
-lightweight_provider: "lmstudio"
-lightweight_model: "gemma-4-e4b-it"
+default_provider: "vllm"         # must match a name in providers[]
+lightweight_provider: "vllm"     # background tasks (empty = default_provider)
+lightweight_model: "deepseek-v4-flash-0731"  # background lightweight model name
 
 # ===========================================================================
 # B. Providers — LLM backends
 # ===========================================================================
-# Supported types: openai | anthropic | google | deepseek | ollama |
-#                  lmstudio | acp
+# Supported types: openai | anthropic | google | deepseek | ollama | lmstudio | vllm | acp
+# - openai-compatible cloud providers (siliconflow/openrouter/groq/etc.) use type: "openai"
+# - local inference servers (vllm/ollama/lmstudio) need no api_key
 # api_key supports ${ENV_VAR} expansion for secrets management.
 providers:
   - name: "openai"
@@ -47,17 +63,30 @@ providers:
     base_url: "https://api.openai.com/v1"
     model: "gpt-4o"
 
+  - name: "anthropic"
+    type: "anthropic"
+    api_key: "${ANTHROPIC_API_KEY}"
+    base_url: "https://api.anthropic.com/v1"
+    model: "claude-sonnet-4-20250514"
+
+  - name: "google"
+    type: "google"
+    api_key: "${GOOGLE_API_KEY}"
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai"
+    model: "gemini-2.0-flash"
+
   - name: "deepseek"
     type: "deepseek"
     api_key: "${DEEPSEEK_API_KEY}"
     base_url: "https://api.deepseek.com"
     model: "deepseek-chat"
 
-  - name: "anthropic"
-    type: "anthropic"
-    api_key: "${ANTHROPIC_API_KEY}"
-    base_url: "https://api.anthropic.com"
-    model: "claude-sonnet-4-20250514"
+  - name: "vllm"
+    type: "vllm"
+    api_key: "${VLLM_API_KEY:-}"                 # local vllm needs no api_key; left empty on purpose
+    base_url: "${VLLM_BASE_URL:-http://192.168.50.115:8888/v1}"  # must end with /v1 (vllm OpenAI-compatible endpoint)
+    model: "deepseek-v4-flash-0731"
+    context_window: 131072          # match vllm serve --max-model-len; prevents 400 overflow
 
   - name: "ollama"
     type: "ollama"
@@ -68,10 +97,40 @@ providers:
   - name: "lmstudio"
     type: "lmstudio"
     api_key: "lmstudio"
-    base_url: "http://192.168.50.97:1234/v1"
-    model: "google/gemma-4-26b-a4b"
+    base_url: "${LMSTUDIO_BASE_URL:-http://localhost:1234/v1}"
+    model: "${LMSTUDIO_MODEL:-google/gemma-4-26b-a4b}"
 
-  # ACP provider: connects to a remote ACP agent via MCP bridge.
+  # --- OpenAI-compatible cloud providers (type: openai) ---
+  - name: "siliconflow"
+    type: "openai"
+    api_key: "${SILICONFLOW_API_KEY}"
+    base_url: "https://api.siliconflow.cn/v1"
+    model: "Qwen/Qwen2.5-72B-Instruct"
+
+  - name: "openrouter"
+    type: "openai"
+    api_key: "${OPENROUTER_API_KEY}"
+    base_url: "https://openrouter.ai/api/v1"
+    model: "anthropic/claude-sonnet-4"
+
+  - name: "groq"
+    type: "openai"
+    api_key: "${GROQ_API_KEY}"
+    base_url: "https://api.groq.com/openai/v1"
+    model: "llama-3.3-70b-versatile"
+
+  - name: "moonshot"
+    type: "openai"
+    api_key: "${MOONSHOT_API_KEY}"
+    base_url: "https://api.moonshot.cn/v1"
+    model: "moonshot-v1-32k"
+
+  - name: "zhipu"
+    type: "openai"
+    api_key: "${ZHIPU_API_KEY}"
+    base_url: "https://open.bigmodel.cn/api/paas/v4"
+    model: "glm-4-plus"
+
   - name: "acp-coder"
     type: "acp"
     agent_url: "http://localhost:4000"
@@ -81,63 +140,46 @@ providers:
 # C. Agent — Core behaviour & generation parameters
 # ===========================================================================
 agent:
-  # --- LLM call limits ---
   max_llm_calls: 50                  # 0 = unlimited
-  max_tool_iterations: 30
-  max_run_duration: "300s"           # wall-clock time limit
+  max_tool_iterations: 50
+  max_run_duration: "3600s"          # wall-clock time limit (1h, local LLM complex tasks)
+  tool_call_timeout: "120s"          # per-tool-call deadline; bounds a single hung/slow tool so it can't exhaust the run budget
 
-  # --- Generation parameters ---
   parallel_tools: true               # concurrent independent tool calls
   streaming: true                    # real-time token streaming in TUI
-  temperature: 0.7                   # 0.0-2.0
+  temperature: 0.7                   # [0.0, 2.0]
   max_tokens: 4096
 
-  # --- Tool retry (exponential backoff) ---
   tool_retry_enabled: true
   tool_retry_max_attempts: 3
   tool_retry_initial_wait: "1s"
   tool_retry_backoff_factor: 2.0
   enable_post_tool_prompt: true
 
-  # --- Planner ---
-  # Options: "" (disabled) | "builtin" | "react"
-  planner: ""
+  planner: ""                        # "" (disabled) | "builtin" | "react"
   # reasoning_effort: "medium"       # low | medium | high (builtin planner)
-  # thinking_enabled: true            # explicit thinking toggle (builtin)
-  # thinking_tokens: 4096             # thinking budget (Claude/Gemini)
+  # thinking_enabled: true
+  # thinking_tokens: 4096
 
-  # --- Tool search (TopK filtering per model call) ---
   tool_search_enabled: true
   tool_search_max_tools: 20
 
-  # --- Context compaction (prevents context window overflow) ---
   context_compaction: true
   context_compaction_tool_result_max_tokens: 1024
   context_compaction_oversized_max_tokens: 8192
   context_compaction_keep_recent: 1
-  # context_compaction_force_clean_tools: ["shell", "grep"]
-  # context_compaction_keep_tools: ["memory_search", "session_recall"]
 
-  # --- Session recall (cross-session context preloading) ---
   session_recall_enabled: false
   session_recall_limit: 5
 
-  # --- JSON repair (for malformed JSON tool args) ---
   json_repair_enabled: false
 
-  # --- Todo system ---
-  todo_tool_enabled: true            # tRPC-native todo_write tool
-  todo_enforcer_enabled: true        # enforce completion before final answer
-
-  # --- Agent tools (sub-agent wrappers) ---
   agent_tools_enabled: false
   agent_tools_stream: false
 
-  # --- System prompt & recipe ---
   system_prompt_dir: "~/.config/wukong/prompts/"
   recipe_dir: ".wukong/recipes/"
   recipe_enabled: true
-  # inline_recipes: []               # define recipes inline in YAML
 
 # ===========================================================================
 # D. Security — Tool execution safety & access control
@@ -155,126 +197,143 @@ security:
     - "fork bomb"
   default_timeout: "30s"
   max_timeout: "300s"
-  allowlist: []                      # empty = all tools allowed
-  denylist: []                       # always blocked
-  guardrail_enabled: false           # prompt injection detection
+  allowlist: []
+  denylist: []
+  guardrail_enabled: false
   ignore_file_enabled: true
   ignore_file: ".wukongignore"
+  # Process-level sandbox for shell execution (developer toolset).
+  # Limits cap CPU / memory / file-size / process-count per command;
+  # kill_on_parent_exit binds child processes to wukong's lifetime.
+  # Zero values mean "unlimited" — leave commented defaults in place
+  # for legacy behavior. Enabling requires platform support:
+  #   Windows: Job Object (no admin needed; low-integrity label is
+  #            best-effort and decoupled from limits).
+  #   Linux:   setrlimit + Landlock (kernel 5.13+).
+  #   macOS:   sandbox-exec (limits not enforced — no-op).
+  sandbox:
+    kill_on_parent_exit: false
+    limits:
+      max_cpu_seconds: 0      # Windows: JOB_OBJECT_LIMIT_PROCESS_TIME; Linux: RLIMIT_CPU
+      max_memory_bytes: 0     # Windows: JOB_OBJECT_LIMIT_PROCESS_MEMORY; Linux: RLIMIT_AS
+      max_file_bytes: 0       # Linux only (RLIMIT_FSIZE); ignored on Windows
+      max_processes: 0        # Windows: JOB_OBJECT_LIMIT_ACTIVE_PROCESS; Linux: RLIMIT_NPROC
 
 # ===========================================================================
 # E. Storage — SQLite-backed persistence layer
 # ===========================================================================
 # All subsystems share the same SQLite WAL file (wukong.db) by default.
-#
-# session:  conversation history
-# memory:   long-term knowledge persistence
-# todo:     task tracking
-# recall:   cross-session chat history search (FTS5)
 
-# ---------------------------------------------------------------------------
-# E1. Session — Conversation history storage
-# ---------------------------------------------------------------------------
-# Backend: sqlite (default) | memory | redis
 session:
-  backend: "sqlite"
+  backend: "sqlite"                  # sqlite | memory | redis
   db_path: "wukong.db"
   event_limit: 500
-  ttl: "0h"                          # 0 = no expiration
+  ttl: "0h"
   enable_summary: true
   summary_trigger: 50
-  # redis_url: "redis://localhost:6379/0"  # for backend=redis
+  # Log the messages the model actually sees (after context
+  # enrichment), enforcing the "model-visible means logged" invariant.
+  enable_model_event_log: true
+  redis_url: "${REDIS_URL:-}"
 
-# ---------------------------------------------------------------------------
-# E2. Memory — Long-term knowledge persistence
-# ---------------------------------------------------------------------------
 memory:
   backend: "sqlite"
   db_path: "wukong.db"
   max_memories: 100
   auto_extract: true
-  extract_timeout: "60s"
-  # extractor_provider: "lmstudio"   # dedicated provider for extraction
-  # extractor_model: "gemma-4-e4b-it" # dedicated model for extraction
-  # extractor_prompt: |              # custom extraction prompt
-  #   You are a Memory Manager. Extract concise memories.
+  extract_timeout: "300s"
+  extractor_provider: ""
+  extractor_model: ""
+  extractor_prompt: ""
 
-  # Smart cleanup (capacity-aware eviction)
+  recency_weight: 0.4
+  reference_weight: 0.3
+  importance_weight: 0.2
+  length_weight: 0.1
+  dynamic_ttl: true
+
   enable_smart_cleanup: true
-  cleanup_trigger_threshold: 0.8     # evict at 80% capacity
-  cleanup_target_threshold: 0.6      # evict down to 60% capacity
-  memory_ttl: "720h"                 # 30 days
+  cleanup_trigger_threshold: 0.8
+  cleanup_target_threshold: 0.6
+  memory_ttl: "720h"
 
-# ---------------------------------------------------------------------------
-# E3. Todo — Task tracking
-# ---------------------------------------------------------------------------
 todo:
   backend: "sqlite"
   db_path: "wukong.db"
   enable_native_todo: true
   enable_enforcer: true
 
-# ---------------------------------------------------------------------------
-# E4. Recall — Cross-session chat history search (FTS5)
-# ---------------------------------------------------------------------------
 recall:
   enabled: true
   backend: "sqlite"
   db_path: "wukong.db"
   max_results: 10
   max_messages_per_session: 200
-  search_mode: "fts5"                # fts5 | hybrid
-  # embedding_provider: "openai"     # for hybrid mode
-  # embedding_model: "text-embedding-3-small"
+  search_mode: "fts5"
 
 # ===========================================================================
 # F. CortexDB Memory Stack — Vector + FTS5 + Knowledge Graph
 # ===========================================================================
-# CortexDB provides a unified HNSW vector + full-text + knowledge graph
-# engine that replaces raw SQLite FTS5 with intelligent multi-modal recall.
-#
-# cortex:     HNSW vector + FTS5 intelligent recall
-# memoryflow: conversation transcript + semantic wake-up context
-# graphflow:  entity/relation extraction + knowledge graph (RDF + SPARQL)
-# importflow: structured data import (DDL -> KG, CSV -> RAG+KG)
-
-# ---------------------------------------------------------------------------
-# F1. Cortex — HNSW vector + FTS5 intelligent recall
-# ---------------------------------------------------------------------------
-# When enabled, replaces raw SQLite FTS5 recall with CortexDB's
-# unified vector + full-text + knowledge graph capabilities.
 cortex:
   enabled: true
   db_path: "wukong.db"
   max_results: 10
   max_messages_per_session: 200
-  embedding_base_url: "http://192.168.50.97:1234"
-  embedding_api_key: "lmstudio"
-  embedding_model: "qwen3-embedding-0.6b"
+  embedding_base_url: "${EMBEDDING_BASE_URL:-http://192.168.50.97:8082/v1}"
+  embedding_api_key: "${EMBEDDING_API_KEY:-vllm}"
+  embedding_model: "${EMBEDDING_MODEL:-bge-m3-Q8_0}"
+  # Cross-Encoder reranker (optional; empty = disabled)
+  # Reuses embedding_base_url/api_key when reranker_* not set.
+  reranker_base_url: "${RERANKER_BASE_URL:-http://192.168.50.97:8083}"
+  reranker_api_key: "${RERANKER_API_KEY:-vllm}"
+  reranker_model: "${RERANKER_MODEL:-bge-reranker-v2-m3-FP16}"
+  # Search strategy tuning (optional)
+  search_strategy:
+    recall_mode: "hybrid"          # lexical | vector | hybrid
+    dense_weight: 0.7              # vector weight [0,1]
+    text_weight: 0.3               # lexical weight [0,1]
+    fts5_pool_size: 50             # candidate pool before re-rank
+    max_retrieved_num: 10          # final Top-K
+    fusion_method: "rrf"           # weighted | rrf (RRF recommended)
+    rrf_k: 60                      # RRF smoothing constant
+    reranker_enabled: false        # enable Cross-Encoder reranking
+    reranker_top_n: 20             # candidates to send to reranker
+    mmr_enabled: false             # enable MMR diversity in top-K
+    mmr_lambda: 0.7                # MMR trade-off [0,1]: 1=relevance, 0=diversity
 
-# ---------------------------------------------------------------------------
-# F2. MemoryFlow — Conversation transcript + semantic wake-up
-# ---------------------------------------------------------------------------
+  # Vertical domain search routing (optional)
+  # Routes queries to specialised backends (arXiv, GitHub, Wikipedia,
+  # Reddit) based on detected intent, augmenting local retrieval.
+  vertical_routing:
+    enabled: false                 # enable query-intent routing
+    top_n: 5                       # max results per backend
+    timeout: "10s"                 # per-backend deadline
+    merge_mode: "prepend"          # prepend | append | replace
+    github_api_key: "${GITHUB_API_KEY:-}"
+
+  # Semantic chunking for RAG ingestion (optional, enabled by default)
+  # Splits long messages into coherent chunks before embedding.
+  chunking:
+    enabled: true                  # enable semantic chunking
+    max_size: 1200                 # max runes per chunk
+    overlap: 200                   # overlap runes between chunks
+    min_size: 100                  # merge chunks smaller than this
+
 memoryflow:
   enabled: true
   db_path: "wukong.db"
   namespace: "assistant"
-  embedding_dimensions: 0            # 0 = auto-detect
-  # planner_model: ""                # retrieval strategy planner
-  # extractor_model: ""              # transcript fact extraction
+  embedding_dimensions: 0
+  planner_model: "${VLLM_MODEL:-qwen3.6-27b}"
+  extractor_model: "${VLLM_MODEL:-qwen3.6-27b}"
 
-# ---------------------------------------------------------------------------
-# F3. GraphFlow — Knowledge graph (RDF + SPARQL)
-# ---------------------------------------------------------------------------
 graphflow:
   enabled: true
   db_path: "wukong.db"
   max_chars_per_doc: 8000
   auto_extract: true
-  # extractor_model: ""              # LLM-driven entity extraction
+  extractor_model: "${VLLM_MODEL:-qwen3.6-27b}"
 
-# ---------------------------------------------------------------------------
-# F4. ImportFlow — Structured data import (DDL -> KG, CSV -> RAG+KG)
-# ---------------------------------------------------------------------------
 importflow:
   enabled: true
   db_path: "wukong.db"
@@ -284,278 +343,249 @@ importflow:
 # ===========================================================================
 revision:
   enabled: true
-  # revision_provider: "lmstudio"   # dedicated provider for summaries
-  # revision_model: ""               # dedicated model for summaries
+  revision_provider: ""
+  revision_model: ""
   enable_llm_summarize: true
   summary_cooldown: "120s"
   summary_timeout: "30s"
   max_command_output: 8000
   enable_semantic_search: false
-  search_strategy: "include_all"     # include_all | semantic
-  max_context_tokens: 64000
+  search_strategy: "include_all"
+  max_context_tokens: 24000         # Conservative ceiling. vllm qwen3.6-27b n_ctx=32768;
+                                    # keep 8000+ buffer for a single user input + tool results.
+                                    # ContextRevisionEngine triggers asynchronously and needs
+                                    # headroom, otherwise one large input pushes the prompt past
+                                    # the model n_ctx and yields a 400. Can be tightened further
+                                    # via providers[].context_window.
   trim_ratio: 0.3
 
 # ===========================================================================
 # H. Feature Tools
 # ===========================================================================
-
-# ---------------------------------------------------------------------------
-# H1. Browser — Web automation & file caching
-# ---------------------------------------------------------------------------
 browser:
   enabled: true
   browser_type: "chromium"
-  headless: true                     # --no-headless for visible window
-  browser_path: ""                   # empty = auto-detect
-  stealth: true                      # anti-detection scripts + Chrome flags
+  backend: "rod"                     # chromedp | rod — browser automation backend
+  headless: true
+  browser_path: ""
+  stealth: true
   cache_dir: ".wukong/cache"
-  max_download_size: 104857600       # 100 MB
+  max_download_size: 104857600
   timeout: "60s"
   viewport_width: 1280
   viewport_height: 720
-  search_backend: "duckduckgo"       # duckduckgo | searxng | tavily
-  # search_backend_url: ""           # for SearXNG
-  # search_api_key: ""               # for Tavily
+  scroll: false
+  control_url: ""
+  workers: 4
+  # Process-wide render budget shared by all browser pools (0.3.0+).
+  # 0 = auto (max(4, NumCPU)); negative disables the global cap.
+  global_render_slots: 0
+  profile_dir: ""
+  proxy:
+    enabled: false
+    pool: []
+    rotate_every: 10
+  search:
+    duckduckgo:
+      enabled: false
+      url: "https://api.duckduckgo.com/"
+    searxng:
+      enabled: true
+      url: "${SEARXNG_URL:-http://43.167.226.121:8080/}"
+      api_key: "${SEARXNG_API_KEY:-}"
+    tavily:
+      enabled: false
+      api_key: "${TAVILY_API_KEY:-}"
+    google:
+      enabled: false
+      api_key: "${GOOGLE_API_KEY}"
+      cse_id: "${GOOGLE_CSE_ID}"
+    bing:
+      enabled: false
+      api_key: "${BING_API_KEY}"
 
-# ---------------------------------------------------------------------------
-# H2. Visualiser — Chart & diagram generation
-# ---------------------------------------------------------------------------
 visualiser:
   enabled: true
   output_dir: ".wukong/visuals"
   max_width: 1200
   max_height: 800
 
-# ---------------------------------------------------------------------------
-# H3. Tutorial — Interactive tutorial system
-# ---------------------------------------------------------------------------
 tutorial:
   enabled: true
-  language: "zh"                     # zh | en
+  language: "zh"
 
-# ---------------------------------------------------------------------------
-# H4. TopOfMind — Persistent instruction injection
-# ---------------------------------------------------------------------------
 top_of_mind:
   enabled: true
   instruction_file: ".wukong/instructions.md"
   max_length: 2000
 
-# ---------------------------------------------------------------------------
-# H5. CodeMode — JavaScript sandbox execution (goja)
-# ---------------------------------------------------------------------------
 code_mode:
   enabled: true
   timeout: "10s"
   max_memory_mb: 128
 
-# ---------------------------------------------------------------------------
-# H6. Apps — HTML apps + Website cloning + ZIM packaging
-# ---------------------------------------------------------------------------
 apps:
   enabled: true
   app_dir: ".wukong/apps"
 
-  # --- Website cloning ---
   clone:
-    # Crawl scope
-    max_pages: 0                     # 0 = unlimited
-    max_depth: 0                     # 0 = unlimited
-    traversal: "bfs"                 # bfs | dfs
+    max_pages: 0
+    max_depth: 0
+    traversal: "bfs"
     subdomains: false
-    scope_prefix: ""                 # restrict to URL paths starting with this
-
-    # Rendering
-    workers: 4                       # page render goroutines
-    asset_workers: 8                 # asset download concurrency (IO-bound)
-    browser_pages: 4                 # Chrome tab pool (0 = use workers)
-    timeout: 60                      # HTTP request timeout (seconds)
-    render_timeout: 30               # page render hard timeout (seconds)
-    settle: 1500                     # network-idle settle (milliseconds)
-    scroll: false                    # auto-scroll for lazy loading
-    user_agent: ""                   # empty = Chrome/124 macOS
-
-    # Asset policy
-    asset_same_domain: true          # skip 3rd-party CDN assets
-    max_asset_bytes: 52428800        # 50 MB per-asset cap
-
-    # Compliance
-    respect_robots: true             # robots.txt via temoto/robotstxt
-    crawl_delay: 0                   # milliseconds (0 = use robots.txt)
+    scope_prefix: ""
+    workers: 4
+    asset_workers: 8
+    timeout: 60                    # seconds — page navigation deadline
+    render_timeout: 30             # seconds — single render wait
+    settle: 1500                   # milliseconds — network idle wait
+    scroll: false
+    user_agent: ""
+    asset_same_domain: true
+    max_asset_bytes: 52428800
+    respect_robots: true
+    crawl_delay: 0                 # milliseconds — delay between requests
+    rate_limit_whitelist: []       # hosts exempt from asset rate limiting (trusted CDN/intranet/dev servers; skip per-host token bucket + 429/503 slowdown; portless entry matches any port)
+    rate_limit_ip_segment: true    # propagate 429/503 penalties across hosts sharing an IP segment (CDN aliases); DNS consulted only after a penalty
+    rate_limit_ip_prefix_v4: 24    # IPv4 segment prefix length
+    rate_limit_ip_prefix_v6: 64    # IPv6 segment prefix length
     no_sitemap: false
-
-    # Optimizations
-    dedup_content: true              # SHA-256 + hard links
-    mobile_readable: true            # inject responsive CSS
-    enable_resume: true              # frontier state checkpoint
-    persist: true                    # save state.json
-    incremental: false               # ETag/Last-Modified cache
-    cache_max_age: 86400             # seconds
-
-    # Anti-detection (5-level escalation)
+    dedup_content: true
+    mobile_readable: true
+    enable_resume: true
+    persist: true
+    incremental: true
+    cache_max_age: 86400           # seconds — cache TTL
     headless: true
-    stealth: true                    # 13 JS + 11 Chrome flags
+    stealth: true
     chrome_profile: ".wukong/chrome/profile"
-    chrome_path: ""                  # empty = multi-platform auto-detect
-    antibot_enabled: true            # auto-detect + escalate
-    antibot_auto_escalate: true      # 5-level: None -> Flags -> Stealth -> Aggressive -> Backoff
+    chrome_path: ""
+    antibot_enabled: true
+    antibot_auto_escalate: true
+    cookie_file: ""
+    browser_backend: "rod"
+    proxy_enabled: false
+    proxy_pool: []
+    proxy_rotate_every: 10
+    # --- TLS (certificate verification policy for clone/download) ---
+    # insecure_tls: set true to skip certificate verification (only for
+    #               intranet/.mil/.gov certs that cannot chain to a public
+    #               root). Default false = strict verification (safe).
+    insecure_tls: false
+    # tls_ca_cert_path: PEM CA bundle (e.g. a DoD root package) used to
+    #                   trust .mil/.gov sites while keeping strict
+    #                   verification. Empty = system roots.
+    tls_ca_cert_path: ""
 
-    # Session
-    cookie_file: ""                  # Netscape-format cookie file
-
-  # --- App packaging defaults ---
   pack:
-    compress: true                   # zstd codec 5 (ZIM v6)
-    incremental: false               # reuse unchanged clusters from cache
-    language: "eng"                  # ISO 639-3 code
+    compress: true
+    incremental: false
+    language: "eng"
     creator: "Wukong"
-    format: "html"                   # html | zim | binary | app
+    format: "html"
 
 # ===========================================================================
 # I. Extensions — MCP external servers
 # ===========================================================================
 extensions: []
-# Example external MCP extension:
-#   - name: "filesystem"
-#     type: "external"
-#     transport: "stdio"
-#     command: "npx"
-#     args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-#     enabled: true
-#     timeout: "30s"
-#     mcp_broker: false              # true = on-demand discovery via broker
 
 # ===========================================================================
 # J. Service Endpoints — Multi-protocol server ports
 # ===========================================================================
-
-# ---------------------------------------------------------------------------
-# J1. A2A Server — Agent-to-Agent protocol
-# ---------------------------------------------------------------------------
 a2a_server:
   enabled: true
   address: ":9090"
   agent_name: "wukong"
   agent_description: "Wukong AI Agent — A2A endpoint"
 
-# ---------------------------------------------------------------------------
-# J2. AG-UI SSE — Web-based chat UI streaming
-# ---------------------------------------------------------------------------
 agui:
   enabled: true
   address: ":8080"
   path: "/agui"
 
-# ---------------------------------------------------------------------------
-# J3. ACP Server — Agent Client Protocol
-# ---------------------------------------------------------------------------
 acp_server:
   enabled: true
   address: ":9091"
   path: "/acp"
   enable_streaming: true
-  auth_type: ""                      # "" | api_key | jwt
-  # api_key: "${ACP_API_KEY}"
+  # Auth must be nested under security.auth.* — top-level
+  # auth_type/api_key keys are silently dropped by Viper (no
+  # mapstructure tag), leaving authentication ineffective.
+  security:
+    auth:
+      type: ""                          # "" | "api_key" | "jwt"
+      api_key: "${ACP_API_KEY:-}"       # expanded from acp_server.security.auth.api_key
 
-# ---------------------------------------------------------------------------
-# J4. ACP MCP Bridge — Exposes extensions as MCP Server
-# ---------------------------------------------------------------------------
 acp_mcp:
   enabled: true
   address: ":3400"
   path: "/mcp"
 
-# ---------------------------------------------------------------------------
-# J5. Gateway — Multi-platform messaging channel (Feishu, WeCom, etc.)
-# ---------------------------------------------------------------------------
-gateway:
-  enabled: false                      # global gateway toggle
-  address: ":9093"                   # HTTP listen address
-  default_timeout: "120s"             # agent single-run timeout
-  max_concurrent_sessions: 100        # max concurrent agent sessions
-  message_dedup_ttl: "5m"            # message dedup window
-  rate_limit_per_user: 10             # max requests per user per window
-  rate_limit_window: "10s"            # per-user rate limit sliding window
+# Standalone MCP server (exposes agent tools as MCP tools).
+# Same security structure as acp_server.security; empty type = no auth.
+mcp_server:
+  enabled: false
+  address: ":3401"
+  security:
+    auth:
+      type: ""                          # "" | "api_key" | "jwt"
+      api_key: "${MCP_API_KEY:-}"
 
-  # --- Feishu / Lark ---
+gateway:
+  enabled: false
+  default_timeout: "900s"
+  max_concurrent_sessions: 100
+  message_dedup_ttl: "5m"
+  rate_limit_per_user: 20
+  rate_limit_window: "60s"
+
   feishu:
     enabled: false
-    app_id: ""
+    app_id: "${FEISHU_APP_ID:-}"
     app_secret: "${FEISHU_APP_SECRET}"
+    api_base: "https://open.feishu.cn/open-apis"
     encrypt_key: "${FEISHU_ENCRYPT_KEY}"
     verification_token: "${FEISHU_VERIFICATION_TOKEN}"
     stream_card_enabled: true
     stream_card_update_interval: "500ms"
     max_message_length: 4096
-    enable_file_receive: false
-
-  # --- WeCom / 企业微信 ---
-  wecom:
-    enabled: false
-    corpid: ""
-    secret: "${WECOM_SECRET}"
-    token: "${WECOM_TOKEN}"
-    encoding_aes_key: "${WECOM_ENCODING_AES_KEY}"
-    stream_enabled: true
-    stream_update_interval: "1s"
-    max_message_length: 2048
-    enable_card_reply: true
+    enable_file_receive: true
 
 # ===========================================================================
 # K. Agent-to-Agent Communication
 # ===========================================================================
-
-# ---------------------------------------------------------------------------
-# K1. Summon — Sub-agent delegation & A2A remotes
-# ---------------------------------------------------------------------------
+# summon — Sub-agent delegation subsystem (internal/summon/delegate.go).
+# Loads .md delegate definitions from delegates_dir, wraps Skill agents
+# and remote A2A agents as callable tools for the main agent.
 summon:
-  enabled: true
-  skills_dir: ".wukong/skills"
-  max_concurrent: 5
-  a2a_remotes: []                    # list of A2ARemoteConfig entries
+  enabled: true                     # false = skip sub-agent delegation entirely
+  delegates_dir: ".wukong/skills"   # delegate definition dir (.md files, one per Delegate)
+  max_concurrent: 5                 # max parallel sub-agent executions (>=0)
+  a2a_remotes: []                   # remote A2A agents; OAuth2 ones get auto token-refresh
 
-# ---------------------------------------------------------------------------
-# K2. ANP — Agent Network Protocol (DID + Meta-Protocol + E2EE + HTTP Sign)
-# ---------------------------------------------------------------------------
-# ANP enables interoperable agent-to-agent communication via:
-#   - W3C DID-based identity (did:wba)
-#   - Capability discovery (ADP)
-#   - E2EE encrypted messaging (X25519 + ChaCha20-Poly1305)
-#   - RFC 9421 HTTP request signing
-#
-# Protocol dependencies:
-#   DID -> MetaProtocol -> E2EE (key exchange via meta-protocol)
-#   HTTP Sign is independent and signs all outgoing ANP requests
+# anp — Agent Network Protocol stack. Implemented in internal/summon/
+# (meta_protocol.go, e2ee.go) but exposed as an independent config block.
+# These flags drive the summon package's MetaProtocol + E2EEMessenger.
 anp:
   enabled: false
-  # did_domain: "wukong.example.com"  # default: os.Hostname()
-  # did_path: "/agents/wukong"        # default: "/agents/<agent_name>"
   port: 9092
   discovery_enabled: true
-  meta_protocol_enabled: true
+  meta_protocol_enabled: true       # drives summon.NewMetaProtocol
   http_sign_enabled: true
-  e2ee_enabled: true
-  a2a_enabled: true                   # auto-create A2A card for ANP discovery
-  mcp_enabled: true                   # auto-create MCP card for ANP discovery
-  agui_enabled: true                  # auto-create AG-UI card for ANP discovery
+  e2ee_enabled: true                # drives summon.NewE2EEMessenger
+  a2a_enabled: true
+  mcp_enabled: true
+  agui_enabled: true
 
-# ---------------------------------------------------------------------------
-# K3. ARD — Agentic Resource Discovery
-# ---------------------------------------------------------------------------
 ard:
   enabled: false
-  registry_url: ""                   # remote registry for federation search
+  registry_url: ""
   catalog_path: ".wukong/ard/catalog.json"
-  publish_enabled: false             # expose self as discoverable registry
-  publish_port: 0                    # 0 = disabled
+  publish_enabled: false
+  publish_port: 0
 
-# ---------------------------------------------------------------------------
-# K4. Dify — Dify AI platform integration
-# ---------------------------------------------------------------------------
 dify:
   enabled: false
-  # base_url: "https://api.dify.ai/v1"
-  # api_secret: "${DIFY_API_SECRET}"
   agent_name: "dify"
   enable_streaming: false
   timeout: "120s"
@@ -563,127 +593,74 @@ dify:
 # ===========================================================================
 # L. Knowledge & Skill Management
 # ===========================================================================
-
-# ---------------------------------------------------------------------------
-# L1. Knowledge — RAG knowledge base
-# ---------------------------------------------------------------------------
 knowledge:
   enabled: true
-  embedder_provider: "lmstudio"      # empty = default provider
-  embedder_model: "text-embedding-3-small"
-  # sources: ["./docs", "./markdown"]  # local document directories
-  # source_urls: ["https://example.com/doc"]  # remote document URLs
+  embedder_provider: ""                   # empty → falls back to cortex.embedding_* (port 8082), then default_provider
+  embedder_model: "bge-m3-Q8_0"
   vector_store: "inmemory"
   max_results: 5
-  enable_source_sync: false          # auto re-index on file change
-  reranker_enabled: false
+  enable_source_sync: false
   search_tool_name: "knowledge_search"
 
-# ---------------------------------------------------------------------------
-# L2. OKF — Open Knowledge Format (v0.1) interoperability
-# ---------------------------------------------------------------------------
-# OKF is a vendor-neutral standard for representing knowledge as
-# Markdown files with YAML frontmatter. When enabled, Wukong can
-# import/export knowledge bundles, inject knowledge index into
-# agent context, and auto-generate concepts from data sources.
 okf:
   enabled: true
   bundle_dir: ".wukong/okf"
-  injector_enabled: false            # inject OKF index into MemoryFlow wake-up
-  enrichment_enabled: false          # auto-generate concepts from DDL/directories
-  # enrichment_output_dir: ""        # empty = use bundle_dir
-  auto_export: false                 # export knowledge base as OKF on session end
-  register_in_ard: false             # register OKF bundles in ARD catalog
+  injector_enabled: false
+  enrichment_enabled: false
+  auto_export: false
+  register_in_ard: false
 
-# ---------------------------------------------------------------------------
-# L3. Skill — tRPC Agent Skill repository
-# ---------------------------------------------------------------------------
 skill:
   enabled: true
-  skills_dir: ".wukong/skills"       # shared with summon.skills_dir
-  auto_load: true
-  max_skills: 20
+  skills_dir: ".wukong/skills"
 
-# ---------------------------------------------------------------------------
-# L4. Evolution — Skill self-evolution system
-# ---------------------------------------------------------------------------
 evolution:
   enabled: true
-  auto_patch: false                  # false = log suggestions only
-  analysis_provider: ""              # empty = default provider
-  analysis_model: ""                 # empty = provider default
+  auto_patch: false
+  analysis_provider: ""
+  analysis_model: ""
   min_confidence: 0.7
   cooldown_period: "30m"
   max_patches_per_day: 10
   max_versions_kept: 10
-  max_patch_size: 8192               # 8 KB
+  max_patch_size: 8192
   analysis_timeout: "60s"
+  export_json: false
 
 # ===========================================================================
 # M. Agent Orchestration
 # ===========================================================================
-
-# ---------------------------------------------------------------------------
-# M1. Workflow — Multi-mode agent orchestration
-# ---------------------------------------------------------------------------
-# Modes: single | chain | parallel | cycle | graph |
-#        team_coordinator | team_swarm | claude_code | codex | dify
 workflow:
   mode: "single"
-  max_iterations: 10                 # for cycle/graph modes
-  cycle_mode: "default"              # default | code_review
-  stream_mode: "none"                # none | hub
-  cache_enabled: false               # node caching for graph workflows
-  engine: "bsp"                      # bsp | dag
-  sub_agents: []                     # custom sub-agent configs
-  # team_members: []                 # for team_coordinator/team_swarm
-  # claude_code_bin: "claude"        # for claude_code mode
-  # codex_bin: "codex"               # for codex mode
+  max_iterations: 10
+  cycle_mode: "default"
+  sub_agents: []
+  team_members: []
+  claude_code_bin: ""
+  codex_bin: ""
 
 # ===========================================================================
 # N. Observability & Evaluation
 # ===========================================================================
-
-# ---------------------------------------------------------------------------
-# N1. Telemetry — OpenTelemetry distributed tracing
-# ---------------------------------------------------------------------------
 telemetry:
   enabled: false
-  exporter_type: "console"           # console | grpc | http
+  exporter_type: "console"
   endpoint: "localhost:4317"
   service_name: "wukong"
   service_version: "1.0.0"
-  environment: "development"         # development | staging | production
-  sample_rate: 1.0                   # 0.0-1.0
+  environment: "development"
+  sample_rate: 1.0
 
-# ---------------------------------------------------------------------------
-# N2. Observability — Langfuse LLM tracing
-# ---------------------------------------------------------------------------
 observability:
   langfuse_enabled: false
-  # langfuse_host: "cloud.langfuse.com"
-  # langfuse_public_key: "${LANGFUSE_PUBLIC_KEY}"
-  # langfuse_secret_key: "${LANGFUSE_SECRET_KEY}"
 
-# ---------------------------------------------------------------------------
-# N3. Eval — Agent regression testing
-# ---------------------------------------------------------------------------
 eval:
   enabled: false
   evalset_path: ".wukong/evals/default.evalset.json"
   results_path: ".wukong/evals/results.json"
-  # metrics:
-  #   - name: "tool_trajectory_match"
-  #     threshold: 0.8
 
-# ---------------------------------------------------------------------------
-# N4. Artifact — Named, versioned binary storage
-# ---------------------------------------------------------------------------
 artifact:
-  backend: "inmemory"                # inmemory | cos
-  # cos_bucket_url: "https://bucket.cos.region.myqcloud.com"
-  # cos_secret_id: "${COS_SECRETID}"
-  # cos_secret_key: "${COS_SECRETKEY}"
+  backend: "inmemory"
 
 # ===========================================================================
 # O. Project Directory

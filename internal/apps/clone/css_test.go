@@ -10,7 +10,7 @@ func TestRewriteCSS_URLs(t *testing.T) {
 	handler := func(absURL string) string {
 		// Map known URLs to local paths.
 		mapping := map[string]string{
-			"https://example.com/images/bg.png":  "images/bg.png",
+			"https://example.com/images/bg.png":      "images/bg.png",
 			"https://example.com/fonts/roboto.woff2": "fonts/roboto.woff2",
 		}
 		if p, ok := mapping[absURL]; ok {
@@ -70,9 +70,9 @@ func TestExtractCSSAssetRefs(t *testing.T) {
 	}
 
 	expected := map[string]bool{
-		"https://example.com/images/bg.png":    true,
+		"https://example.com/images/bg.png":      true,
 		"https://example.com/fonts/roboto.woff2": true,
-		"https://example.com/css/icons/star.svg":  true,
+		"https://example.com/css/icons/star.svg": true,
 	}
 
 	for _, ref := range refs {

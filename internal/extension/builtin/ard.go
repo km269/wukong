@@ -11,7 +11,7 @@ import (
 
 // ARDToolSet provides Agentic Resource Discovery tools.
 type ARDToolSet struct {
-	tools     []tool.Tool
+	tools      []tool.Tool
 	ardToolSet *ard.ToolSet
 	inited     bool
 	closed     bool
@@ -20,13 +20,13 @@ type ARDToolSet struct {
 // NewARDToolSet creates a new ARD tool set.
 func NewARDToolSet(registryURL, catalogPath string) (*ARDToolSet, error) {
 	ts := &ARDToolSet{}
-	
+
 	ardTS, err := ard.NewToolSet(registryURL, catalogPath)
 	if err != nil {
 		return nil, err
 	}
 	ts.ardToolSet = ardTS
-	
+
 	ts.tools = []tool.Tool{
 		function.NewFunctionTool(
 			ts.ardSearch,
@@ -78,7 +78,7 @@ func NewARDToolSet(registryURL, catalogPath string) (*ARDToolSet, error) {
 			),
 		),
 	}
-	
+
 	ts.inited = true
 	return ts, nil
 }
@@ -113,17 +113,17 @@ type SearchReq struct {
 // SearchRsp is the output for ARD search.
 type SearchRsp struct {
 	Results []SearchResult `json:"results"`
-	Total   int           `json:"total"`
+	Total   int            `json:"total"`
 }
 
 // SearchResult is a single search result.
 type SearchResult struct {
 	Identifier  string  `json:"identifier"`
-	DisplayName string `json:"display_name"`
-	Type       string `json:"type"`
-	URL        string `json:"url,omitempty"`
-	Description string `json:"description,omitempty"`
-	Score      float64 `json:"score"`
+	DisplayName string  `json:"display_name"`
+	Type        string  `json:"type"`
+	URL         string  `json:"url,omitempty"`
+	Description string  `json:"description,omitempty"`
+	Score       float64 `json:"score"`
 }
 
 // ardSearch searches for resources in the ARD catalog.
@@ -132,24 +132,24 @@ func (a *ARDToolSet) ardSearch(ctx context.Context, req SearchReq) (SearchRsp, e
 	if req.Type != "" {
 		filters["type"] = req.Type
 	}
-	
+
 	resp, err := a.ardToolSet.Search(ctx, req.Query, filters)
 	if err != nil {
 		return SearchRsp{}, err
 	}
-	
+
 	results := make([]SearchResult, len(resp.Results))
 	for i, r := range resp.Results {
 		results[i] = SearchResult{
 			Identifier:  r.Identifier,
 			DisplayName: r.DisplayName,
-			Type:       r.Type,
-			URL:        r.URL,
+			Type:        r.Type,
+			URL:         r.URL,
 			Description: r.Description,
-			Score:      r.Score,
+			Score:       r.Score,
 		}
 	}
-	
+
 	return SearchRsp{
 		Results: results,
 		Total:   resp.Total,
@@ -172,19 +172,19 @@ func (a *ARDToolSet) ardDiscover(ctx context.Context, req DiscoverReq) (Discover
 	if err != nil {
 		return DiscoverRsp{}, err
 	}
-	
+
 	searchResults := make([]SearchResult, len(results))
 	for i, r := range results {
 		searchResults[i] = SearchResult{
 			Identifier:  r.Identifier,
 			DisplayName: r.DisplayName,
-			Type:       r.Type,
-			URL:        r.URL,
+			Type:        r.Type,
+			URL:         r.URL,
 			Description: r.Description,
-			Score:      r.Score,
+			Score:       r.Score,
 		}
 	}
-	
+
 	return DiscoverRsp{Results: searchResults}, nil
 }
 
@@ -198,24 +198,24 @@ type ListRsp struct {
 type EntryInfo struct {
 	Identifier  string `json:"identifier"`
 	DisplayName string `json:"display_name"`
-	Type       string `json:"type"`
+	Type        string `json:"type"`
 	Description string `json:"description,omitempty"`
 }
 
 // ardList lists all registered resources.
 func (a *ARDToolSet) ardList(ctx context.Context, req struct{}) (ListRsp, error) {
 	entries := a.ardToolSet.List()
-	
+
 	entryInfos := make([]EntryInfo, len(entries))
 	for i, e := range entries {
 		entryInfos[i] = EntryInfo{
 			Identifier:  e.Identifier,
 			DisplayName: e.DisplayName,
-			Type:       e.Type,
+			Type:        e.Type,
 			Description: e.Description,
 		}
 	}
-	
+
 	return ListRsp{
 		Entries: entryInfos,
 		Total:   len(entryInfos),
@@ -231,11 +231,11 @@ type GetReq struct {
 type GetRsp struct {
 	Identifier   string   `json:"identifier"`
 	DisplayName  string   `json:"display_name"`
-	Type        string   `json:"type"`
-	URL         string   `json:"url,omitempty"`
-	Description string   `json:"description,omitempty"`
+	Type         string   `json:"type"`
+	URL          string   `json:"url,omitempty"`
+	Description  string   `json:"description,omitempty"`
 	Capabilities []string `json:"capabilities,omitempty"`
-	Tags        []string `json:"tags,omitempty"`
+	Tags         []string `json:"tags,omitempty"`
 }
 
 // ardGet gets a specific resource by identifier.
@@ -244,15 +244,15 @@ func (a *ARDToolSet) ardGet(ctx context.Context, req GetReq) (GetRsp, error) {
 	if entry == nil {
 		return GetRsp{}, nil
 	}
-	
+
 	return GetRsp{
 		Identifier:   entry.Identifier,
 		DisplayName:  entry.DisplayName,
-		Type:        entry.Type,
-		URL:         entry.URL,
-		Description: entry.Description,
+		Type:         entry.Type,
+		URL:          entry.URL,
+		Description:  entry.Description,
 		Capabilities: entry.Capabilities,
-		Tags:        entry.Tags,
+		Tags:         entry.Tags,
 	}, nil
 }
 
@@ -260,14 +260,14 @@ func (a *ARDToolSet) ardGet(ctx context.Context, req GetReq) (GetRsp, error) {
 type RegisterReq struct {
 	Identifier  string `json:"identifier" jsonschema:"description=URN 标识符"`
 	DisplayName string `json:"display_name" jsonschema:"description=显示名称"`
-	Type       string `json:"type" jsonschema:"description=资源类型"`
-	URL        string `json:"url,omitempty" jsonschema:"description=资源 URL"`
+	Type        string `json:"type" jsonschema:"description=资源类型"`
+	URL         string `json:"url,omitempty" jsonschema:"description=资源 URL"`
 	Description string `json:"description,omitempty" jsonschema:"description=资源描述"`
 }
 
 // RegisterRsp is the output for ARD register.
 type RegisterRsp struct {
-	Success     bool   `json:"success"`
+	Success    bool   `json:"success"`
 	Identifier string `json:"identifier,omitempty"`
 	Error      string `json:"error,omitempty"`
 }
@@ -277,15 +277,15 @@ func (a *ARDToolSet) ardRegister(ctx context.Context, req RegisterReq) (Register
 	entry := ard.CatalogEntry{
 		Identifier:  req.Identifier,
 		DisplayName: req.DisplayName,
-		Type:       req.Type,
-		URL:        req.URL,
+		Type:        req.Type,
+		URL:         req.URL,
 		Description: req.Description,
 	}
-	
+
 	if err := a.ardToolSet.Register(entry); err != nil {
 		return RegisterRsp{Success: false, Error: err.Error()}, nil
 	}
-	
+
 	return RegisterRsp{Success: true, Identifier: req.Identifier}, nil
 }
 
@@ -296,7 +296,7 @@ type UnregisterReq struct {
 
 // UnregisterRsp is the output for ARD unregister.
 type UnregisterRsp struct {
-	Success     bool   `json:"success"`
+	Success    bool   `json:"success"`
 	Identifier string `json:"identifier,omitempty"`
 	Error      string `json:"error,omitempty"`
 }
@@ -306,14 +306,14 @@ func (a *ARDToolSet) ardUnregister(ctx context.Context, req UnregisterReq) (Unre
 	if err := a.ardToolSet.Unregister(req.Identifier); err != nil {
 		return UnregisterRsp{Success: false, Error: err.Error()}, nil
 	}
-	
+
 	return UnregisterRsp{Success: true, Identifier: req.Identifier}, nil
 }
 
 // ExportRsp is the output for ARD export.
 type ExportRsp struct {
 	Catalog string `json:"catalog"`
-	Error  string `json:"error,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 // ardExport exports the ARD catalog as JSON.
@@ -322,6 +322,6 @@ func (a *ARDToolSet) ardExport(ctx context.Context, req struct{}) (ExportRsp, er
 	if err != nil {
 		return ExportRsp{Error: err.Error()}, nil
 	}
-	
+
 	return ExportRsp{Catalog: string(data)}, nil
 }

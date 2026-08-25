@@ -9,7 +9,7 @@ import (
 // SandboxedHost provides a secure sandbox for rendering UI apps.
 // It wraps the View and communicates with it through an intermediate Sandbox proxy.
 type SandboxedHost struct {
-	mu       sync.RWMutex
+	mu        sync.RWMutex
 	resources map[string]*UIResource
 	content   map[string]string // URI -> HTML content
 	tools     map[string]*ToolRegistration
@@ -18,10 +18,10 @@ type SandboxedHost struct {
 
 // ToolRegistration represents a tool registration for MCP Apps.
 type ToolRegistration struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
+	Name        string        `json:"name"`
+	Description string        `json:"description"`
 	InputSchema any           `json:"inputSchema"`
-	Meta        *ToolMetaHost  `json:"_meta,omitempty"`
+	Meta        *ToolMetaHost `json:"_meta,omitempty"`
 }
 
 // ToolMetaHost contains tool metadata for UI association.

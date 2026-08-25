@@ -62,10 +62,10 @@ type Options struct {
 // DefaultOptions returns default cloning options.
 func DefaultOptions() Options {
 	return Options{
-		MaxPages:    0,    // unlimited
-		MaxDepth:    0,    // unlimited
+		MaxPages:    0, // unlimited
+		MaxDepth:    0, // unlimited
 		Subdomains:  false,
-		Scroll:      false,
+		Scroll:      true,
 		ScopePrefix: "",
 		Exclude:     nil,
 		Refresh:     false,

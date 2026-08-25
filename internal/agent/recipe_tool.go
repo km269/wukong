@@ -134,14 +134,14 @@ func newRecipeTool(
 
 // RecipeMetrics tracks execution statistics for a recipe tool (P4-B).
 type RecipeMetrics struct {
-	CallCount    int           `json:"call_count"`
-	SuccessCount int           `json:"success_count"`
-	ErrorCount   int           `json:"error_count"`
-	RetryCount   int           `json:"retry_count"`
+	CallCount     int           `json:"call_count"`
+	SuccessCount  int           `json:"success_count"`
+	ErrorCount    int           `json:"error_count"`
+	RetryCount    int           `json:"retry_count"`
 	TotalDuration time.Duration `json:"-"`
-	LastDuration time.Duration `json:"-"`
-	LastError    string        `json:"last_error,omitempty"`
-	LastCallAt   time.Time     `json:"last_call_at,omitempty"`
+	LastDuration  time.Duration `json:"-"`
+	LastError     string        `json:"last_error,omitempty"`
+	LastCallAt    time.Time     `json:"last_call_at,omitempty"`
 }
 
 // snapshot returns a copy of the metrics for safe external use.

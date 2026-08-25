@@ -1,6 +1,0 @@
-ard:
-  enabled: true
-  registry_url: "https://remote.registry.example.com"  # 发现别人的注册表
-  catalog_path: ".wukong/ard/catalog.json"
-  publish_enabled: true        # 让自己可被别​人发现
-  publish_port: 8081           # 发布端口

@@ -65,10 +65,10 @@ type Progress struct {
 type PackPhase string
 
 const (
-	PhaseScanning    PackPhase = "scanning"     // Scanning source files
-	PhaseCollecting  PackPhase = "collecting"   // Collecting assets
-	PhaseProcessing  PackPhase = "processing"   // Processing HTML files
-	PhaseCompressing PackPhase = "compressing"  // Compressing content
-	PhaseWriting     PackPhase = "writing"      // Writing output
-	PhaseFinalizing  PackPhase = "finalizing"   // Finalizing package
+	PhaseScanning    PackPhase = "scanning"    // Scanning source files
+	PhaseCollecting  PackPhase = "collecting"  // Collecting assets
+	PhaseProcessing  PackPhase = "processing"  // Processing HTML files
+	PhaseCompressing PackPhase = "compressing" // Compressing content
+	PhaseWriting     PackPhase = "writing"     // Writing output
+	PhaseFinalizing  PackPhase = "finalizing"  // Finalizing package
 )

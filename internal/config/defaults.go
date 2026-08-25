@@ -6,6 +6,8 @@
 // the struct categories in types.go.
 package config
 
+import "github.com/km269/wukong/internal/gateway"
+
 // setDefaults registers all built-in default values with Viper.
 // These are used when no config file or environment variable
 // provides a value.
@@ -36,7 +38,8 @@ func (l *Loader) setAgentDefaults() {
 	// LLM call limits
 	l.v.SetDefault("agent.max_llm_calls", 50)
 	l.v.SetDefault("agent.max_tool_iterations", 30)
-	l.v.SetDefault("agent.max_run_duration", "300s")
+	l.v.SetDefault("agent.max_run_duration", "900s")
+	l.v.SetDefault("agent.tool_call_timeout", "120s")
 
 	// Generation parameters
 	l.v.SetDefault("agent.parallel_tools", true)
@@ -71,10 +74,6 @@ func (l *Loader) setAgentDefaults() {
 	// JSON repair
 	l.v.SetDefault("agent.json_repair_enabled", false)
 
-	// Todo
-	l.v.SetDefault("agent.todo_tool_enabled", true)
-	l.v.SetDefault("agent.todo_enforcer_enabled", true)
-
 	// Agent tools
 	l.v.SetDefault("agent.agent_tools_enabled", true)
 	l.v.SetDefault("agent.agent_tools_stream", false)
@@ -100,6 +99,16 @@ func (l *Loader) setSecurityDefaults() {
 	l.v.SetDefault("security.guardrail_enabled", false)
 	l.v.SetDefault("security.ignore_file_enabled", true)
 	l.v.SetDefault("security.ignore_file", ".wukongignore")
+
+	// Sandbox process-level resource limits and lifecycle binding.
+	// All-zero defaults keep legacy behavior (no Job Object / no
+	// setrlimit) so existing deployments are unaffected unless
+	// operators explicitly enable caps in config.yaml.
+	l.v.SetDefault("security.sandbox.kill_on_parent_exit", false)
+	l.v.SetDefault("security.sandbox.limits.max_cpu_seconds", 0)
+	l.v.SetDefault("security.sandbox.limits.max_memory_bytes", 0)
+	l.v.SetDefault("security.sandbox.limits.max_file_bytes", 0)
+	l.v.SetDefault("security.sandbox.limits.max_processes", 0)
 }
 
 // setStorageDefaults registers storage subsystem defaults
@@ -112,13 +121,29 @@ func (l *Loader) setStorageDefaults() {
 	l.v.SetDefault("session.ttl", "0h")
 	l.v.SetDefault("session.enable_summary", true)
 	l.v.SetDefault("session.summary_trigger", 50)
+	// Model-visible event log: records the messages the model
+	// actually sees after context enrichment, enforcing the
+	// "model-visible means logged" invariant. Distinct from the
+	// framework session service's own event storage.
+	l.v.SetDefault("session.enable_model_event_log", true)
 
 	// Memory
 	l.v.SetDefault("memory.backend", "sqlite")
 	l.v.SetDefault("memory.db_path", "wukong.db")
 	l.v.SetDefault("memory.max_memories", 100)
 	l.v.SetDefault("memory.auto_extract", true)
-	l.v.SetDefault("memory.extract_timeout", "60s")
+	l.v.SetDefault("memory.extract_timeout", "300s")
+
+	// Memory scoring weights
+	l.v.SetDefault("memory.recency_weight", 0.4)
+	l.v.SetDefault("memory.reference_weight", 0.3)
+	l.v.SetDefault("memory.importance_weight", 0.2)
+	l.v.SetDefault("memory.length_weight", 0.1)
+
+	// Dynamic TTL
+	l.v.SetDefault("memory.dynamic_ttl", true)
+
+	// Smart cleanup
 	l.v.SetDefault("memory.enable_smart_cleanup", true)
 	l.v.SetDefault("memory.cleanup_trigger_threshold", 0.8)
 	l.v.SetDefault("memory.cleanup_target_threshold", 0.6)
@@ -186,6 +211,7 @@ func (l *Loader) setFeatureDefaults() {
 	// Browser
 	l.v.SetDefault("browser.enabled", true)
 	l.v.SetDefault("browser.browser_type", "chromium")
+	l.v.SetDefault("browser.backend", "rod")
 	l.v.SetDefault("browser.headless", true)
 	l.v.SetDefault("browser.stealth", false)
 	l.v.SetDefault("browser.cache_dir", ".wukong/cache")
@@ -193,7 +219,18 @@ func (l *Loader) setFeatureDefaults() {
 	l.v.SetDefault("browser.timeout", "60s")
 	l.v.SetDefault("browser.viewport_width", 1280)
 	l.v.SetDefault("browser.viewport_height", 720)
-	l.v.SetDefault("browser.search_backend", "duckduckgo")
+	l.v.SetDefault("browser.proxy.enabled", false)
+	l.v.SetDefault("browser.proxy.pool", []string{})
+	l.v.SetDefault("browser.proxy.rotate_every", 10)
+
+	// Browser Search
+	l.v.SetDefault("browser.search.duckduckgo.enabled", true)
+	l.v.SetDefault("browser.search.duckduckgo.url", "https://api.duckduckgo.com/")
+	l.v.SetDefault("browser.search.searxng.enabled", false)
+	l.v.SetDefault("browser.search.searxng.url", "http://localhost:8080/")
+	l.v.SetDefault("browser.search.searxng.api_key", "")
+	l.v.SetDefault("browser.search.tavily.enabled", false)
+	l.v.SetDefault("browser.search.tavily.api_key", "")
 
 	// Visualiser
 	l.v.SetDefault("visualiser.enabled", true)
@@ -230,13 +267,16 @@ func (l *Loader) setAppsDefaults() {
 	l.v.SetDefault("apps.clone.scope_prefix", "")
 	l.v.SetDefault("apps.clone.workers", 4)
 	l.v.SetDefault("apps.clone.asset_workers", 8)
-	l.v.SetDefault("apps.clone.browser_pages", 4)
-	l.v.SetDefault("apps.clone.timeout", 60)
-	l.v.SetDefault("apps.clone.render_timeout", 30)
+	l.v.SetDefault("apps.clone.timeout", 300)
+	l.v.SetDefault("apps.clone.render_timeout", 120)
 	l.v.SetDefault("apps.clone.settle", 1500)
 	l.v.SetDefault("apps.clone.scroll", false)
 	l.v.SetDefault("apps.clone.respect_robots", true)
 	l.v.SetDefault("apps.clone.crawl_delay", 0)
+	l.v.SetDefault("apps.clone.rate_limit_whitelist", []string{})
+	l.v.SetDefault("apps.clone.rate_limit_ip_segment", true)
+	l.v.SetDefault("apps.clone.rate_limit_ip_prefix_v4", 24)
+	l.v.SetDefault("apps.clone.rate_limit_ip_prefix_v6", 64)
 	l.v.SetDefault("apps.clone.no_sitemap", false)
 	l.v.SetDefault("apps.clone.dedup_content", true)
 	l.v.SetDefault("apps.clone.mobile_readable", true)
@@ -255,6 +295,9 @@ func (l *Loader) setAppsDefaults() {
 	l.v.SetDefault("apps.clone.max_asset_bytes", 52428800)
 	l.v.SetDefault("apps.clone.cookie_file", "")
 	l.v.SetDefault("apps.clone.user_agent", "")
+	l.v.SetDefault("apps.clone.proxy_enabled", false)
+	l.v.SetDefault("apps.clone.proxy_pool", []string{})
+	l.v.SetDefault("apps.clone.proxy_rotate_every", 10)
 
 	// Pack defaults
 	l.v.SetDefault("apps.pack.compress", true)
@@ -277,25 +320,23 @@ func (l *Loader) setOrchestrationDefaults() {
 
 	// Summon
 	l.v.SetDefault("summon.enabled", true)
-	l.v.SetDefault("summon.skills_dir", ".wukong/skills")
+	l.v.SetDefault("summon.delegates_dir", ".wukong/skills")
 	l.v.SetDefault("summon.max_concurrent", 5)
 
 	// Skill
 	l.v.SetDefault("skill.enabled", true)
 	l.v.SetDefault("skill.skills_dir", ".wukong/skills")
-	l.v.SetDefault("skill.auto_load", true)
-	l.v.SetDefault("skill.max_skills", 20)
 
 	// ANP
 	l.v.SetDefault("anp.enabled", false)
 	l.v.SetDefault("anp.port", 9092)
 	l.v.SetDefault("anp.discovery_enabled", true)
 	l.v.SetDefault("anp.meta_protocol_enabled", true)
-	l.v.SetDefault("anp.http_sign_enabled", true)
 	l.v.SetDefault("anp.e2ee_enabled", true)
 	l.v.SetDefault("anp.a2a_enabled", true)
-	l.v.SetDefault("anp.mcp_enabled", true)
 	l.v.SetDefault("anp.agui_enabled", true)
+	l.v.SetDefault("anp.http_sign_enabled", true)
+	l.v.SetDefault("anp.mcp_enabled", true)
 
 	// Evolution
 	l.v.SetDefault("evolution.enabled", false)
@@ -308,6 +349,7 @@ func (l *Loader) setOrchestrationDefaults() {
 	l.v.SetDefault("evolution.max_versions_kept", 10)
 	l.v.SetDefault("evolution.max_patch_size", 8192)
 	l.v.SetDefault("evolution.analysis_timeout", "60s")
+	l.v.SetDefault("evolution.export_json", false)
 
 	// Knowledge
 	l.v.SetDefault("knowledge.enabled", false)
@@ -316,7 +358,6 @@ func (l *Loader) setOrchestrationDefaults() {
 	l.v.SetDefault("knowledge.vector_store", "inmemory")
 	l.v.SetDefault("knowledge.max_results", 5)
 	l.v.SetDefault("knowledge.enable_source_sync", false)
-	l.v.SetDefault("knowledge.reranker_enabled", false)
 	l.v.SetDefault("knowledge.search_tool_name",
 		"knowledge_search")
 
@@ -324,9 +365,6 @@ func (l *Loader) setOrchestrationDefaults() {
 	l.v.SetDefault("workflow.mode", "single")
 	l.v.SetDefault("workflow.max_iterations", 10)
 	l.v.SetDefault("workflow.cycle_mode", "default")
-	l.v.SetDefault("workflow.stream_mode", "none")
-	l.v.SetDefault("workflow.cache_enabled", false)
-	l.v.SetDefault("workflow.engine", "bsp")
 
 	// Dify
 	l.v.SetDefault("dify.enabled", false)
@@ -355,12 +393,27 @@ func (l *Loader) setServerDefaults() {
 	l.v.SetDefault("acp_server.address", ":9091")
 	l.v.SetDefault("acp_server.path", "/acp")
 	l.v.SetDefault("acp_server.enable_streaming", true)
-	l.v.SetDefault("acp_server.auth_type", "")
+	// Security defaults — must match ACPServerConfig.Security
+	// (ServerSecurityConfig). Previous code set the top-level key
+	// "acp_server.auth_type" which has no corresponding mapstructure
+	// tag and was silently dropped, leaving auth middleware
+	// disabled even when users followed the docs.
+	l.v.SetDefault("acp_server.security.auth.type", "")
+	l.v.SetDefault("acp_server.security.auth.api_key", "")
 
 	// ACP MCP Bridge
 	l.v.SetDefault("acp_mcp.enabled", true)
 	l.v.SetDefault("acp_mcp.address", ":3400")
 	l.v.SetDefault("acp_mcp.path", "/mcp")
+
+	// Standalone MCP server (exposes extensions via JSON-RPC 2.0).
+	// Security defaults to empty auth — users exposing this on a
+	// non-loopback interface MUST set security.auth.type explicitly
+	// to prevent unauthorized tools/call access.
+	l.v.SetDefault("mcp_server.enabled", false)
+	l.v.SetDefault("mcp_server.address", ":3401")
+	l.v.SetDefault("mcp_server.security.auth.type", "")
+	l.v.SetDefault("mcp_server.security.auth.api_key", "")
 }
 
 // setObservabilityDefaults registers observability & evaluation
@@ -389,31 +442,11 @@ func (l *Loader) setObservabilityDefaults() {
 	l.v.SetDefault("telemetry.sample_rate", 1.0)
 }
 
-// setGatewayDefaults registers Gateway and multi-platform channel
-// defaults.
+// setGatewayDefaults registers Gateway and channel defaults. The
+// concrete defaults live in the gateway package (which owns the config
+// types); here we delegate to gateway.SetDefaults.
 func (l *Loader) setGatewayDefaults() {
-	// Gateway server
-	l.v.SetDefault("gateway.enabled", false)
-	l.v.SetDefault("gateway.address", ":9093")
-	l.v.SetDefault("gateway.default_timeout", "120s")
-	l.v.SetDefault("gateway.max_concurrent_sessions", 100)
-	l.v.SetDefault("gateway.message_dedup_ttl", "5m")
-	l.v.SetDefault("gateway.rate_limit_per_user", 10)
-	l.v.SetDefault("gateway.rate_limit_window", "10s")
-
-	// Feishu channel
-	l.v.SetDefault("gateway.feishu.enabled", false)
-	l.v.SetDefault("gateway.feishu.stream_card_enabled", true)
-	l.v.SetDefault("gateway.feishu.stream_card_update_interval", "500ms")
-	l.v.SetDefault("gateway.feishu.max_message_length", 4096)
-	l.v.SetDefault("gateway.feishu.enable_file_receive", false)
-
-	// WeCom channel
-	l.v.SetDefault("gateway.wecom.enabled", false)
-	l.v.SetDefault("gateway.wecom.stream_enabled", true)
-	l.v.SetDefault("gateway.wecom.stream_update_interval", "1s")
-	l.v.SetDefault("gateway.wecom.max_message_length", 2048)
-	l.v.SetDefault("gateway.wecom.enable_card_reply", true)
+	gateway.SetDefaults(l.v)
 }
 
 // setOKFDefaults registers Open Knowledge Format (OKF)

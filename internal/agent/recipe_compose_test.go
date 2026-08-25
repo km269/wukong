@@ -242,8 +242,8 @@ func TestResolveExtends_Chain(t *testing.T) {
 			Extends: "grandparent",
 		},
 		"child": {
-			Name:    "child",
-			Extends: "parent",
+			Name:      "child",
+			Extends:   "parent",
 			MaxTokens: 4096, // override
 		},
 	}
@@ -435,9 +435,9 @@ func TestRetryComputeDelay_MaxCap(t *testing.T) {
 // callCountingTool is a test double that counts calls and returns
 // configurable results per attempt.
 type callCountingTool struct {
-	decl     *tool.Declaration
-	results  []callOutcome
-	calls    int
+	decl    *tool.Declaration
+	results []callOutcome
+	calls   int
 }
 
 type callOutcome struct {
@@ -548,7 +548,7 @@ func TestRetryTool_ValidationFailureRetries(t *testing.T) {
 	}
 	validator := buildOutputValidator(&RecipeResponseConfig{
 		JSONSchema: map[string]any{
-			"type": "object",
+			"type":     "object",
 			"required": []any{"summary"},
 		},
 	})
@@ -614,7 +614,7 @@ func TestBuildOutputValidator_EmptySchema(t *testing.T) {
 func TestOutputValidator_ValidJSON(t *testing.T) {
 	resp := &RecipeResponseConfig{
 		JSONSchema: map[string]any{
-			"type": "object",
+			"type":     "object",
 			"required": []any{"summary"},
 		},
 	}
@@ -631,7 +631,7 @@ func TestOutputValidator_ValidJSON(t *testing.T) {
 func TestOutputValidator_InvalidJSON(t *testing.T) {
 	resp := &RecipeResponseConfig{
 		JSONSchema: map[string]any{
-			"type": "object",
+			"type":     "object",
 			"required": []any{"summary"},
 		},
 	}
@@ -648,7 +648,7 @@ func TestOutputValidator_InvalidJSON(t *testing.T) {
 func TestOutputValidator_MissingRequired(t *testing.T) {
 	resp := &RecipeResponseConfig{
 		JSONSchema: map[string]any{
-			"type": "object",
+			"type":     "object",
 			"required": []any{"summary", "issues"},
 		},
 	}
@@ -665,7 +665,7 @@ func TestOutputValidator_MissingRequired(t *testing.T) {
 func TestOutputValidator_AcceptsByteSlice(t *testing.T) {
 	resp := &RecipeResponseConfig{
 		JSONSchema: map[string]any{
-			"type": "object",
+			"type":     "object",
 			"required": []any{"x"},
 		},
 	}
@@ -679,7 +679,7 @@ func TestOutputValidator_AcceptsByteSlice(t *testing.T) {
 func TestOutputValidator_AcceptsStruct(t *testing.T) {
 	resp := &RecipeResponseConfig{
 		JSONSchema: map[string]any{
-			"type": "object",
+			"type":     "object",
 			"required": []any{"x"},
 		},
 	}
@@ -753,7 +753,7 @@ func TestLoadInlineRecipe_Valid(t *testing.T) {
 
 func TestLoadInlineRecipe_WithParameters(t *testing.T) {
 	raw := map[string]any{
-		"name":  "param-recipe",
+		"name":   "param-recipe",
 		"prompt": "Review {{.lang}}",
 		"parameters": []any{
 			map[string]any{

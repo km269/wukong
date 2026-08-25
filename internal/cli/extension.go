@@ -13,7 +13,6 @@ import (
 
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/extension"
-	"github.com/km269/wukong/internal/provider"
 	"github.com/km269/wukong/internal/security"
 	"github.com/km269/wukong/internal/util"
 )
@@ -271,7 +270,7 @@ func newExtensionListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List all registered extensions",
 		Long:  `List all registered MCP extensions with their status and details.`,
-		RunE: runExtensionList,
+		RunE:  runExtensionList,
 	}
 	return cmd
 }
@@ -572,7 +571,3 @@ func runExtensionRemove(cmd *cobra.Command, args []string) error {
 
 	return nil
 }
-
-// Ensure unused import warning is suppressed for provider package.
-var _ = provider.NewFactory
-var _ = util.Logger

@@ -3,7 +3,10 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/km269/wukong/internal/gateway"
 )
 
 func TestResolvePath(t *testing.T) {
@@ -341,6 +344,60 @@ providers:
 	}
 }
 
+// TestNewLoader_ServerAuthEnvExpansion verifies that the nested
+// server endpoint auth keys (acp_server.security.auth.api_key and
+// mcp_server.security.auth.api_key) are env-expanded. The MCP path
+// was historically missing from expandSecrets, silently leaving
+// ${MCP_API_KEY} literals in the auth key.
+func TestNewLoader_ServerAuthEnvExpansion(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	os.Setenv("TEST_ACP_KEY", "acp-key-value")
+	os.Setenv("TEST_MCP_KEY", "mcp-key-value")
+	defer func() {
+		os.Unsetenv("TEST_ACP_KEY")
+		os.Unsetenv("TEST_MCP_KEY")
+	}()
+
+	yamlContent := `
+acp_server:
+  enabled: true
+  security:
+    auth:
+      type: "api_key"
+      api_key: ${TEST_ACP_KEY}
+mcp_server:
+  enabled: true
+  security:
+    auth:
+      type: "api_key"
+      api_key: ${TEST_MCP_KEY}
+`
+	if err := os.WriteFile(
+		configPath, []byte(yamlContent), 0644,
+	); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	loader, err := NewLoader(configPath)
+	if err != nil {
+		t.Fatalf("NewLoader failed: %v", err)
+	}
+
+	cfg, err := loader.Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if got := cfg.ACPServer.Security.Auth.APIKey; got != "acp-key-value" {
+		t.Errorf("acp_server.security.auth.api_key: expected expanded env var, got %q", got)
+	}
+	if got := cfg.MCPServer.Security.Auth.APIKey; got != "mcp-key-value" {
+		t.Errorf("mcp_server.security.auth.api_key: expected expanded env var, got %q", got)
+	}
+}
+
 func TestLoader_GetConfig(t *testing.T) {
 	loader, err := NewLoader("")
 	if err != nil {
@@ -360,5 +417,177 @@ func TestLoader_GetConfig(t *testing.T) {
 	// After Load, GetConfig returns the config
 	if cfg := loader.GetConfig(); cfg == nil {
 		t.Error("expected non-nil after Load")
+	}
+}
+
+// TestValidate_DefaultProviderMissing verifies that a default_provider
+// that does not match any configured provider is a fatal error.
+func TestValidate_DefaultProviderMissing(t *testing.T) {
+	cfg := &WukongConfig{
+		DefaultProvider: "nonexistent",
+		Providers:       []ProviderConfig{{Name: "openai"}},
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error for missing default provider")
+	}
+}
+
+// TestValidate_DefaultProviderFound verifies that a matching provider
+// passes validation.
+func TestValidate_DefaultProviderFound(t *testing.T) {
+	cfg := &WukongConfig{
+		DefaultProvider: "openai",
+		Providers:       []ProviderConfig{{Name: "openai"}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+}
+
+// TestValidate_TemperatureOutOfRange verifies the temperature range
+// guard. Temperature must be within [0.0, 2.0].
+func TestValidate_TemperatureOutOfRange(t *testing.T) {
+	for _, temp := range []float64{-0.1, 2.1, 10.0} {
+		cfg := &WukongConfig{
+			Agent: AgentConfig{Temperature: temp},
+		}
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("expected error for temperature %v, got nil", temp)
+		}
+	}
+	// Boundary values should pass.
+	for _, temp := range []float64{0.0, 1.0, 2.0} {
+		cfg := &WukongConfig{
+			Agent: AgentConfig{Temperature: temp},
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("expected no error for temperature %v, got %v", temp, err)
+		}
+	}
+}
+
+// TestValidate_BadPermissionMode verifies that an unknown
+// permission_mode is rejected, and recognized modes pass.
+func TestValidate_BadPermissionMode(t *testing.T) {
+	cfg := &WukongConfig{
+		Security: SecurityConfig{PermissionMode: "bogus"},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for bogus permission mode")
+	}
+
+	for _, mode := range []PermissionMode{
+		PermissionAuto, PermissionSmart, PermissionManual, PermissionChatOnly,
+	} {
+		cfg := &WukongConfig{
+			Security: SecurityConfig{PermissionMode: mode},
+		}
+		if err := cfg.Validate(); err != nil {
+			t.Errorf("expected no error for mode %q, got %v", mode, err)
+		}
+	}
+}
+
+// TestValidate_NegativeMaxTokens verifies that negative max_tokens is
+// rejected.
+func TestValidate_NegativeMaxTokens(t *testing.T) {
+	cfg := &WukongConfig{
+		Agent: AgentConfig{MaxTokens: -1},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected error for negative max_tokens")
+	}
+}
+
+// TestWarnings_NoProviders verifies a non-fatal warning is produced
+// when no providers are configured.
+func TestWarnings_NoProviders(t *testing.T) {
+	cfg := &WukongConfig{}
+	warnings := cfg.Warnings()
+	found := false
+	for _, w := range warnings {
+		if contains(w, "no providers configured") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'no providers' warning, got %v", warnings)
+	}
+}
+
+// TestWarnings_FeishuMissingAppID verifies a warning is produced when
+// the Feishu channel is enabled without an app_id.
+func TestWarnings_FeishuMissingAppID(t *testing.T) {
+	cfg := &WukongConfig{
+		Gateway: gateway.GatewayConfig{
+			Enabled: true,
+			Feishu:  gateway.FeishuChannelConfig{Enabled: true}, // AppID empty
+		},
+	}
+	warnings := cfg.Warnings()
+	found := false
+	for _, w := range warnings {
+		if contains(w, "app_id is empty") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected feishu app_id warning, got %v", warnings)
+	}
+}
+
+// contains is a small helper wrapping strings.Contains for readability
+// in the warning-assertion tests above.
+func contains(s, sub string) bool {
+	return strings.Contains(s, sub)
+}
+
+// TestValidateURLField verifies the URL sanity-check helper used by
+// Warnings() to catch malformed URLs in enabled subsystems.
+func TestValidateURLField(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		wantErr bool
+	}{
+		{"empty allowed", "", false},
+		{"valid https", "https://api.example.com/v1", false},
+		{"valid redis", "redis://localhost:6379/0", false},
+		{"missing scheme", "api.example.com/v1", true},
+		{"missing host", "https:///v1", true},
+		{"bare path", "/just/a/path", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := validateURLField(tt.raw, "test_field")
+			if tt.wantErr && w == "" {
+				t.Errorf("expected warning for %q, got none", tt.raw)
+			}
+			if !tt.wantErr && w != "" {
+				t.Errorf("expected no warning for %q, got %q", tt.raw, w)
+			}
+		})
+	}
+}
+
+// TestWarnings_MalformedRedisURL verifies a malformed redis_url produces
+// a warning when set.
+func TestWarnings_MalformedRedisURL(t *testing.T) {
+	cfg := &WukongConfig{
+		Session: SessionConfig{RedisURL: "not-a-url"},
+	}
+	warnings := cfg.Warnings()
+	found := false
+	for _, w := range warnings {
+		if contains(w, "redis_url") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected redis_url warning for malformed URL, got %v", warnings)
 	}
 }

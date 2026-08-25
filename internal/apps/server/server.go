@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"html"
 	"net"
 	"net/http"
 	"os"
@@ -15,13 +16,13 @@ import (
 
 // Server provides a local HTTP server for previewing apps.
 type Server struct {
-	mu       sync.RWMutex
-	httpSrv  *http.Server
-	running  bool
-	port     int
-	rootDir  string
-	addr     string
-	appName  string
+	mu      sync.RWMutex
+	httpSrv *http.Server
+	running bool
+	port    int
+	rootDir string
+	addr    string
+	appName string
 }
 
 // Config holds server configuration.
@@ -90,7 +91,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.httpSrv = &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),
-		Handler:     mux,
+		Handler:      mux,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
@@ -222,7 +223,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	// 检查文件是否存在
 	info, err := os.Stat(filePath)
-	if os.IsNotExist(err) {
+	if err != nil {
 		http.Error(w, "Not Found", http.StatusNotFound)
 		return
 	}
@@ -258,9 +259,10 @@ func (s *Server) serveDirectoryList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	escPath := html.EscapeString(path)
 	fmt.Fprintf(w, "<!DOCTYPE html>\n<html>\n<head>\n")
 	fmt.Fprintf(w, "<meta charset=\"utf-8\">\n")
-	fmt.Fprintf(w, "<title>Index of %s</title>\n", path)
+	fmt.Fprintf(w, "<title>Index of %s</title>\n", escPath)
 	fmt.Fprintf(w, "<style>\n")
 	fmt.Fprintf(w, "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; ")
 	fmt.Fprintf(w, "max-width: 800px; margin: 40px auto; padding: 0 20px; }\n")
@@ -272,7 +274,7 @@ func (s *Server) serveDirectoryList(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, ".folder { color: #666; }\n")
 	fmt.Fprintf(w, "</style>\n")
 	fmt.Fprintf(w, "</head>\n<body>\n")
-	fmt.Fprintf(w, "<h1>Index of %s</h1>\n", path)
+	fmt.Fprintf(w, "<h1>Index of %s</h1>\n", escPath)
 	fmt.Fprintf(w, "<ul>\n")
 
 	// 父目录链接
@@ -281,16 +283,18 @@ func (s *Server) serveDirectoryList(w http.ResponseWriter, r *http.Request) {
 		if parentPath == "." {
 			parentPath = "/"
 		}
-		fmt.Fprintf(w, "<li><a href=\"%s\">📁 ..</a></li>\n", parentPath)
+		fmt.Fprintf(w, "<li><a href=\"%s\">📁 ..</a></li>\n", html.EscapeString(parentPath))
 	}
 
 	// 子目录和文件
 	for _, entry := range entries {
 		entryPath := filepath.Join(path, entry.Name())
+		escName := html.EscapeString(entry.Name())
+		escEntryPath := html.EscapeString(entryPath)
 		if entry.IsDir() {
-			fmt.Fprintf(w, "<li><a href=\"%s/\">📁 %s/</a></li>\n", entryPath, entry.Name())
+			fmt.Fprintf(w, "<li><a href=\"%s/\">📁 %s/</a></li>\n", escEntryPath, escName)
 		} else {
-			fmt.Fprintf(w, "<li><a href=\"%s\">📄 %s</a></li>\n", entryPath, entry.Name())
+			fmt.Fprintf(w, "<li><a href=\"%s\">📄 %s</a></li>\n", escEntryPath, escName)
 		}
 	}
 

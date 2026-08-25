@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 	"time"
 
+	"github.com/km269/wukong/pkg/capability"
 	"github.com/km269/wukong/pkg/sandbox"
 
 	"trpc.group/trpc-go/trpc-agent-go/tool"
@@ -19,15 +19,43 @@ import (
 )
 
 // DeveloperToolSet provides standard developer tools as function tools.
+// fs/shell execution are delegated to capability.FileService /
+// ShellService so tests can inject mocks and backends can be
+// substituted without touching tool logic.
 type DeveloperToolSet struct {
 	tools  []tool.Tool
 	inited bool
 	closed bool
+	fs     capability.FileService
+	shell  capability.ShellService
+}
+
+// Option configures a DeveloperToolSet at construction.
+type Option func(*DeveloperToolSet)
+
+// WithFileService overrides the default OS-backed FileService (e.g.
+// for mock injection in tests).
+func WithFileService(fs capability.FileService) Option {
+	return func(ts *DeveloperToolSet) { ts.fs = fs }
+}
+
+// WithShellService overrides the default sandbox-backed ShellService.
+func WithShellService(ss capability.ShellService) Option {
+	return func(ts *DeveloperToolSet) { ts.shell = ss }
 }
 
 // NewDeveloperToolSet creates the built-in developer tool set.
-func NewDeveloperToolSet() *DeveloperToolSet {
-	ts := &DeveloperToolSet{}
+// Without options it uses the default OSFileService +
+// SandboxShellService; pass WithFileService/WithShellService to
+// inject alternatives (mocks, remote backends).
+func NewDeveloperToolSet(opts ...Option) *DeveloperToolSet {
+	ts := &DeveloperToolSet{
+		fs:    capability.NewOSFileService(),
+		shell: capability.NewSandboxShellService(),
+	}
+	for _, o := range opts {
+		o(ts)
+	}
 	ts.tools = []tool.Tool{
 		function.NewFunctionTool(
 			ts.readFile,
@@ -123,7 +151,7 @@ type FileReadRsp struct {
 func (ts *DeveloperToolSet) readFile(
 	ctx context.Context, req FileReadReq,
 ) (FileReadRsp, error) {
-	data, err := os.ReadFile(req.Path)
+	data, err := ts.fs.Read(ctx, req.Path)
 	if err != nil {
 		return FileReadRsp{
 			Success: false,
@@ -152,7 +180,7 @@ type FileWriteRsp struct {
 func (ts *DeveloperToolSet) writeFile(
 	ctx context.Context, req FileWriteReq,
 ) (FileWriteRsp, error) {
-	err := os.WriteFile(req.Path, []byte(req.Content), 0644)
+	err := ts.fs.Write(ctx, req.Path, []byte(req.Content))
 	if err != nil {
 		return FileWriteRsp{
 			Success: false,
@@ -169,9 +197,9 @@ func (ts *DeveloperToolSet) writeFile(
 
 // FileReplaceReq is the input for find-and-replace in a file.
 type FileReplaceReq struct {
-	Path    string `json:"path" jsonschema:"description=Path to the file to modify"`
-	OldStr  string `json:"old_str" jsonschema:"description=Exact text to find and replace"`
-	NewStr  string `json:"new_str" jsonschema:"description=Text to replace with (use empty string to delete)"`
+	Path   string `json:"path" jsonschema:"description=Path to the file to modify"`
+	OldStr string `json:"old_str" jsonschema:"description=Exact text to find and replace"`
+	NewStr string `json:"new_str" jsonschema:"description=Text to replace with (use empty string to delete)"`
 }
 
 // FileReplaceRsp is the output for find-and-replace.
@@ -185,16 +213,13 @@ type FileReplaceRsp struct {
 func (ts *DeveloperToolSet) replaceInFile(
 	ctx context.Context, req FileReplaceReq,
 ) (FileReplaceRsp, error) {
-	data, err := os.ReadFile(req.Path)
+	count, err := ts.fs.Replace(ctx, req.Path, req.OldStr, req.NewStr)
 	if err != nil {
 		return FileReplaceRsp{
 			Success: false,
 			Error:   err.Error(),
 		}, nil
 	}
-
-	content := string(data)
-	count := strings.Count(content, req.OldStr)
 	if count == 0 {
 		return FileReplaceRsp{
 			Success: false,
@@ -203,19 +228,6 @@ func (ts *DeveloperToolSet) replaceInFile(
 			),
 		}, nil
 	}
-
-	newContent := strings.ReplaceAll(
-		content, req.OldStr, req.NewStr,
-	)
-
-	err = os.WriteFile(req.Path, []byte(newContent), 0644)
-	if err != nil {
-		return FileReplaceRsp{
-			Success: false,
-			Error:   err.Error(),
-		}, nil
-	}
-
 	return FileReplaceRsp{
 		Success:     true,
 		Message:     fmt.Sprintf("Replaced %d occurrence(s) in %q", count, req.Path),
@@ -247,44 +259,21 @@ func (ts *DeveloperToolSet) executeCommand(
 		timeout = time.Duration(req.Timeout) * time.Second
 	}
 
-	execCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	// Build the command with sandbox filesystem write protection.
-	// On all supported platforms (Linux Landlock / macOS sandbox-exec /
-	// Windows Low IL), the child process can only write to the working
-	// dir and .wukong cache. Falls back safely if sandbox unavailable.
-	var shell, shellFlag string
-	if runtime.GOOS == "windows" {
-		shell, shellFlag = "cmd", "/C"
-	} else {
-		shell, shellFlag = "sh", "-c"
+	// Delegate to the ShellService seam (default: sandboxed exec via
+	// pkg/sandbox; mock/remote backends injectable via WithShellService).
+	res, _ := ts.shell.Execute(ctx, capability.ExecRequest{
+		Command: req.Command,
+		WorkDir: req.WorkDir,
+		Timeout: timeout,
+	})
+	if res.Err != nil {
+		return CommandExecuteRsp{
+			Success: false,
+			Error:   res.Err.Error(),
+		}, nil
 	}
 
-	sc := sandbox.CommandContext(execCtx, shell, shellFlag, req.Command)
-	if req.WorkDir != "" {
-		sc.Dir = req.WorkDir
-		sc.Policy.WritableDirs = []string{req.WorkDir, ".wukong"}
-	}
-
-	var stdout, stderr strings.Builder
-	sc.Stdout = &stdout
-	sc.Stderr = &stderr
-
-	err := sc.Run()
-	exitCode := 0
-	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			exitCode = exitErr.ExitCode()
-		} else {
-			return CommandExecuteRsp{
-				Success: false,
-				Error:   err.Error(),
-			}, nil
-		}
-	}
-
-	return formatCommandOutput(stdout.String(), stderr.String(), exitCode)
+	return formatCommandOutput(res.Stdout, res.Stderr, res.ExitCode)
 }
 
 // formatCommandOutput truncates and formats command output for consistent responses.

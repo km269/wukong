@@ -111,7 +111,7 @@ func matcherWithRules(t *testing.T, lines []string) *IgnoreMatcher {
 	t.Helper()
 
 	m := &IgnoreMatcher{
-		enabled:    true,
+		enabled:   true,
 		sourceDir: "/",
 	}
 

@@ -74,21 +74,29 @@ var turnstileIndicators = []string{
 	"cf_chl_",
 }
 
-// cloudflareHeaders are response headers set by Cloudflare anti-bot.
-var cloudflareHeaders = []string{
-	"cf-ray",
+// cloudflareBlockHeaders are response headers that indicate active
+// Cloudflare anti-bot challenges, not just Cloudflare CDN usage.
+// Headers like cf-cache-status are common on any Cloudflare site and
+// do NOT indicate blocking.
+var cloudflareBlockHeaders = []string{
 	"cf-chl-bypass",
 	"cf-chl-out",
 	"cf-chl-proxied",
+}
+
+// cloudflareInfoHeaders are informational Cloudflare headers that indicate
+// the site uses Cloudflare but do NOT indicate blocking/challenges.
+var cloudflareInfoHeaders = []string{
+	"cf-ray",
 	"cf-cache-status",
 	"cf-connecting-ip",
 	"cf-ipcountry",
 	"cf-visitor",
-	"x-sucuri-id",
-	"x-sucuri-cache",
-	"x-iinfo",
-	"x-cdn",
 }
+
+// allCloudflareHeaders is the union of block and info headers, used for
+// detecting whether a site uses Cloudflare at all.
+var allCloudflareHeaders = append(cloudflareBlockHeaders, cloudflareInfoHeaders...)
 
 // DetectHTTP analyses an HTTP response for anti-bot indicators.
 // Returns the detected reason and a human-readable description.
@@ -104,25 +112,15 @@ func DetectHTTP(statusCode int, headers http.Header) (BlockReason, string) {
 			"HTTP 429 Too Many Requests — rate limit exceeded"
 
 	case 503:
-		// Check for Cloudflare-specific headers.
-		for _, h := range cloudflareHeaders {
+		for _, h := range cloudflareBlockHeaders {
 			if headers.Get(h) != "" {
 				return ReasonCloudflare,
-					"HTTP 503 + Cloudflare headers — " +
+					"HTTP 503 + Cloudflare challenge headers — " +
 						"anti-bot challenge page"
 			}
 		}
 		return ReasonUnavailable,
 			"HTTP 503 Service Unavailable — possible bot wall"
-	}
-
-	// Check Cloudflare headers even on 200 (challenge-passed pages).
-	for _, h := range cloudflareHeaders {
-		if headers.Get(h) != "" {
-			return ReasonCloudflare,
-				"Cloudflare headers detected on response — " +
-					"site uses anti-bot protection"
-		}
 	}
 
 	return ReasonNone, ""
@@ -133,7 +131,7 @@ func DetectHTTP(statusCode int, headers http.Header) (BlockReason, string) {
 // run before Chrome is started so stealth measures are in place from
 // the very first page load.
 func HasCloudflareHeaders(headers http.Header) bool {
-	for _, h := range cloudflareHeaders {
+	for _, h := range allCloudflareHeaders {
 		if headers.Get(h) != "" {
 			return true
 		}
@@ -154,6 +152,43 @@ func HasTurnstileMarkers(html string) bool {
 	return false
 }
 
+var maintenanceKeywords = []string{
+	"technical difficulties",
+	"under maintenance",
+	"currently unavailable",
+	"service unavailable",
+	"site is down",
+	"down for maintenance",
+	"we'll be back soon",
+}
+
+// maintenancePageMaxSize is the maximum size (in bytes) for a page to be
+// considered a maintenance/block page. Real content pages are almost always
+// larger than this threshold, while maintenance pages are typically small.
+const maintenancePageMaxSize = 15000
+
+func isMaintenancePage(html string) bool {
+	if len(html) > maintenancePageMaxSize {
+		return false
+	}
+	lower := strings.ToLower(html)
+	matches := 0
+	for _, kw := range maintenanceKeywords {
+		if strings.Contains(lower, kw) {
+			matches++
+			if matches >= 1 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// suspiciousPageMaxSize is the maximum size (in bytes) for a page to be
+// considered suspicious for CAPTCHA/detection keywords. Real content pages
+// are typically much larger, while anti-bot pages are small.
+const suspiciousPageMaxSize = 50000
+
 // DetectDOM analyses HTML content for anti-bot / CAPTCHA indicators.
 // Turnstile (Cloudflare) challenges are checked first to produce the most
 // specific reason, followed by generic CAPTCHA keywords.
@@ -164,8 +199,12 @@ func DetectDOM(html string) (BlockReason, string) {
 
 	lower := strings.ToLower(html)
 
+	if isMaintenancePage(html) {
+		return ReasonUnavailable, "site maintenance page"
+	}
+
 	// Short blocked pages.
-	if len(html) < 200 {
+	if len(html) < 150 {
 		if strings.Contains(lower, "forbidden") ||
 			strings.Contains(lower, "denied") {
 			return ReasonBlocked, "short blocked page"
@@ -186,12 +225,17 @@ func DetectDOM(html string) (BlockReason, string) {
 	}
 
 	// Generic CAPTCHA / anti-bot keywords.
-	for _, kw := range captchaKeywords {
-		idx := strings.Index(lower, kw)
-		if idx >= 0 {
-			snippet := extractSnippet(html, idx, len(kw), 60)
-			return ReasonCaptcha,
-				"anti-bot page: " + snippet
+	// Only check these if the page is small enough to be suspicious.
+	// Large pages (>50KB) are unlikely to be anti-bot pages even if they
+	// contain keywords like "blocked" or "denied" in normal content.
+	if len(html) <= suspiciousPageMaxSize {
+		for _, kw := range captchaKeywords {
+			idx := strings.Index(lower, kw)
+			if idx >= 0 {
+				snippet := extractSnippet(html, idx, len(kw), 60)
+				return ReasonCaptcha,
+					"anti-bot page: " + snippet
+			}
 		}
 	}
 

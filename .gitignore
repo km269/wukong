@@ -1,7 +1,7 @@
 # Build output
 wukong.exe
 main.exe
-
+*.exe
 # gse Chinese dictionary workaround (see dict loading in gse module)
 github.com/
 
@@ -14,3 +14,9 @@ github.com/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local runtime database (SQLite WAL files)
+wukong.db
+wukong.db-shm
+wukong.db-wal
+.wukong/

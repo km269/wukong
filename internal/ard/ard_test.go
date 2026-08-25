@@ -56,19 +56,19 @@ func TestParseURN(t *testing.T) {
 
 func TestNewURN(t *testing.T) {
 	urn := NewURN("wukong.local", "server", "apps")
-	
+
 	if urn.Publisher != "wukong.local" {
 		t.Errorf("NewURN() publisher = %v, want wukong.local", urn.Publisher)
 	}
-	
+
 	if urn.Namespace != "server" {
 		t.Errorf("NewURN() namespace = %v, want server", urn.Namespace)
 	}
-	
+
 	if urn.Name != "apps" {
 		t.Errorf("NewURN() name = %v, want apps", urn.Name)
 	}
-	
+
 	expected := "urn:air:wukong.local:server:apps"
 	if urn.Raw != expected {
 		t.Errorf("NewURN() raw = %v, want %v", urn.Raw, expected)
@@ -98,9 +98,9 @@ func TestCatalogEntry(t *testing.T) {
 
 func TestCatalogEntryValidation(t *testing.T) {
 	tests := []struct {
-		name   string
-		entry  CatalogEntry
-		valid  bool
+		name  string
+		entry CatalogEntry
+		valid bool
 	}{
 		{
 			name: "valid entry with URL",
@@ -278,10 +278,10 @@ func TestURNBuilder(t *testing.T) {
 func TestCatalogEntryFilter(t *testing.T) {
 	entry := &CatalogEntry{
 		Identifier:   "urn:air:test.com:agent:test",
-		DisplayName: "Test Agent",
-		Type:        MediaTypeA2AAgentCard,
-		Description: "A test agent for testing purposes",
-		Tags:        []string{"test", "agent"},
+		DisplayName:  "Test Agent",
+		Type:         MediaTypeA2AAgentCard,
+		Description:  "A test agent for testing purposes",
+		Tags:         []string{"test", "agent"},
 		Capabilities: []string{"tool1", "tool2"},
 	}
 
@@ -766,7 +766,7 @@ func TestRegistry_CatalogPersistence(t *testing.T) {
 }
 
 // ==========================================================================
-// Federator Tests  
+// Federator Tests
 // ==========================================================================
 
 func TestCalculateScore(t *testing.T) {

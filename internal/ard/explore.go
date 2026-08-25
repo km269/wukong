@@ -17,8 +17,8 @@ type ExploreOptions struct {
 	Publisher    string   // Publisher domain filter
 
 	// Sorting options
-	SortBy    string // "name", "type", "updated", "score"
-	SortDesc  bool   // Sort descending
+	SortBy   string // "name", "type", "updated", "score"
+	SortDesc bool   // Sort descending
 
 	// Pagination
 	Limit  int
@@ -33,9 +33,9 @@ type ExploreOptions struct {
 
 // ExploreResult is the result of explore API.
 type ExploreResult struct {
-	Entries  []CatalogEntry `json:"entries"`
-	Total    int           `json:"total"`
-	Facets   *ExploreFacets `json:"facets,omitempty"`
+	Entries []CatalogEntry `json:"entries"`
+	Total   int            `json:"total"`
+	Facets  *ExploreFacets `json:"facets,omitempty"`
 }
 
 // ExploreFacets contains facet counts for filtering.

@@ -374,7 +374,8 @@ func runSystemCheck(cmd *cobra.Command, args []string) error {
 			} else {
 				keyOK := p.APIKey != "" ||
 					p.Type == "ollama" ||
-					p.Type == "lmstudio"
+					p.Type == "lmstudio" ||
+					p.Type == "vllm"
 				if keyOK {
 					checks = append(checks, checkItem{
 						"Provider", "pass",
