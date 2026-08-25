@@ -19,6 +19,7 @@
 #   - observability.langfuse_public_key, langfuse_secret_key
 #   - artifact.cos_secret_id, cos_secret_key
 #   - acp_server.security.auth.api_key
+#   - mcp_server.security.auth.api_key
 #   - cortex.embedding_api_key, embedding_base_url, embedding_model
 #   - cortex.reranker_api_key, reranker_base_url, reranker_model
 #   - cortex.vertical_routing.github_api_key
@@ -82,9 +83,9 @@ providers:
 
   - name: "vllm"
     type: "vllm"
-    api_key: ""                       # vllm 不需要 api_key；留空即可（代码已跳过校验）
-    base_url: "http://192.168.50.115:8888/v1"   # 必须带 /v1 后缀；vllm OpenAI 兼容端点
-    model: "deepseek-v4-flash-0731" #"claude-opus-4-8" #
+    api_key: "${VLLM_API_KEY:-}"                 # local vllm needs no api_key; left empty on purpose
+    base_url: "${VLLM_BASE_URL:-http://192.168.50.115:8888/v1}"  # must end with /v1 (vllm OpenAI-compatible endpoint)
+    model: "deepseek-v4-flash-0731"
     context_window: 131072          # match vllm serve --max-model-len; prevents 400 overflow
 
   - name: "ollama"
@@ -141,7 +142,7 @@ providers:
 agent:
   max_llm_calls: 50                  # 0 = unlimited
   max_tool_iterations: 50
-  max_run_duration: "3600s"          # wall-clock time limit (1h, 本地大模型复杂任务)
+  max_run_duration: "3600s"          # wall-clock time limit (1h, local LLM complex tasks)
   tool_call_timeout: "120s"          # per-tool-call deadline; bounds a single hung/slow tool so it can't exhaust the run budget
 
   parallel_tools: true               # concurrent independent tool calls
@@ -230,7 +231,8 @@ session:
   ttl: "0h"
   enable_summary: true
   summary_trigger: 50
-  # 记录模型实际看到的消息（含上下文富化后的），强制 "model-visible means logged" 不变式
+  # Log the messages the model actually sees (after context
+  # enrichment), enforcing the "model-visible means logged" invariant.
   enable_model_event_log: true
   redis_url: "${REDIS_URL:-}"
 
@@ -349,11 +351,12 @@ revision:
   max_command_output: 8000
   enable_semantic_search: false
   search_strategy: "include_all"
-  max_context_tokens: 24000         #保守上限。vllm qwen3.6-27b n_ctx=32768，
-                                    #留 8000+ buffer 给单次 user input + tool results。
-                                    #ContextRevisionEngine 异步触发，需预留暴涨空间，
-                                    #否则单次输入会让 prompt 突破 model n_ctx 触发 400。
-                                    #可被 providers[].context_window 进一步收紧。
+  max_context_tokens: 24000         # Conservative ceiling. vllm qwen3.6-27b n_ctx=32768;
+                                    # keep 8000+ buffer for a single user input + tool results.
+                                    # ContextRevisionEngine triggers asynchronously and needs
+                                    # headroom, otherwise one large input pushes the prompt past
+                                    # the model n_ctx and yields a 400. Can be tightened further
+                                    # via providers[].context_window.
   trim_ratio: 0.3
 
 # ===========================================================================
@@ -374,6 +377,9 @@ browser:
   scroll: false
   control_url: ""
   workers: 4
+  # Process-wide render budget shared by all browser pools (0.3.0+).
+  # 0 = auto (max(4, NumCPU)); negative disables the global cap.
+  global_render_slots: 0
   profile_dir: ""
   proxy:
     enabled: false
@@ -461,12 +467,14 @@ apps:
     proxy_enabled: false
     proxy_pool: []
     proxy_rotate_every: 10
-    # --- TLS (克隆/下载的证书校验策略) ---
-    # insecure_tls: 设为 true 才跳过证书校验（仅适用于内网/.mil/.gov 等无法
-    #               链到公共根的证书场景）。默认 false = 严格校验（安全）。
+    # --- TLS (certificate verification policy for clone/download) ---
+    # insecure_tls: set true to skip certificate verification (only for
+    #               intranet/.mil/.gov certs that cannot chain to a public
+    #               root). Default false = strict verification (safe).
     insecure_tls: false
-    # tls_ca_cert_path: 指向 PEM 格式 CA 证书包（如 DoD 根证书包），用于在保持
-    #                 严格校验的同时信任 .mil/.gov 站点证书。留空 = 用系统根。
+    # tls_ca_cert_path: PEM CA bundle (e.g. a DoD root package) used to
+    #                   trust .mil/.gov sites while keeping strict
+    #                   verification. Empty = system roots.
     tls_ca_cert_path: ""
 
   pack:
@@ -500,20 +508,21 @@ acp_server:
   address: ":9091"
   path: "/acp"
   enable_streaming: true
-  # 认证必须嵌套在 security.auth.* 下，顶层 auth_type/api_key 会被
-  # Viper 静默丢弃（无 mapstructure tag），导致认证形同虚设。
+  # Auth must be nested under security.auth.* — top-level
+  # auth_type/api_key keys are silently dropped by Viper (no
+  # mapstructure tag), leaving authentication ineffective.
   security:
     auth:
       type: ""                          # "" | "api_key" | "jwt"
-      api_key: "${ACP_API_KEY:-}"       # 与 expandSecrets 中 cfg.ACPServer.Security.Auth.APIKey 对应
+      api_key: "${ACP_API_KEY:-}"       # expanded from acp_server.security.auth.api_key
 
 acp_mcp:
   enabled: true
   address: ":3400"
   path: "/mcp"
 
-# 独立 MCP 服务器（expose agent 工具为 MCP tools）
-# security 与 acp_server.security 结构相同；留空 type 则不启用认证
+# Standalone MCP server (exposes agent tools as MCP tools).
+# Same security structure as acp_server.security; empty type = no auth.
 mcp_server:
   enabled: false
   address: ":3401"
@@ -532,7 +541,7 @@ gateway:
 
   feishu:
     enabled: false
-    app_id: "cli_aa98378746f8dcd7"
+    app_id: "${FEISHU_APP_ID:-}"
     app_secret: "${FEISHU_APP_SECRET}"
     api_base: "https://open.feishu.cn/open-apis"
     encrypt_key: "${FEISHU_ENCRYPT_KEY}"
@@ -550,7 +559,7 @@ gateway:
 # and remote A2A agents as callable tools for the main agent.
 summon:
   enabled: true                     # false = skip sub-agent delegation entirely
-  delegates_dir: ".wukong/skills"   # 子代理委派定义目录（.md 文件，每个成为一个 Delegate）
+  delegates_dir: ".wukong/skills"   # delegate definition dir (.md files, one per Delegate)
   max_concurrent: 5                 # max parallel sub-agent executions (>=0)
   a2a_remotes: []                   # remote A2A agents; OAuth2 ones get auto token-refresh
 
@@ -586,7 +595,7 @@ dify:
 # ===========================================================================
 knowledge:
   enabled: true
-  embedder_provider: ""                   # 留空 → 回退到 cortex.embedding_* (端口 8082)，再回退到 default_provider
+  embedder_provider: ""                   # empty → falls back to cortex.embedding_* (port 8082), then default_provider
   embedder_model: "bge-m3-Q8_0"
   vector_store: "inmemory"
   max_results: 5

@@ -69,7 +69,7 @@ go 1.26
 git clone <repo-url> wukong && cd wukong
 go mod download
 go build -o wukong ./cmd/wukong
-./wukong version   # 验证：Version: 0.2.9
+./wukong version   # 验证：Version: 0.3.1
 ```
 
 ---
@@ -922,7 +922,7 @@ LDFLAGS := -s -w \
     -X github.com/km269/wukong/internal/cli.BuildDate=$(BUILD_DATE)
 ```
 
-默认版本信息定义在 [version.go](../internal/util/version.go)：`Version = "0.2.9"`。
+默认版本信息定义在 [version.go](../internal/util/version.go)：`Version = "0.3.1"`。
 
 ### 14.3 Taskfile.yaml
 
@@ -992,10 +992,10 @@ docs(agent): correct CoreLoop.Run signature in developer guide
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | 系统整体架构设计 |
 | [CLI_TUI.md](./CLI_TUI.md) | 命令行与 TUI 架构 |
 | [CONFIG.md](./CONFIG.md) | 完整配置项参考 |
-| [API_REFERENCE.md](./API_REFERENCE.md) | HTTP API 参考 |
+| [API_REFERENCE.md](./API_REFERENCE.md) | Go 接口/结构体参考（CoreLoop、Provider、Extension、Security 等扩展点，非 REST API） |
 | [MEMORY_ARCHITECTURE.md](./MEMORY_ARCHITECTURE.md) | 记忆系统架构 |
 | [DEPLOYMENT.md](./DEPLOYMENT.md) | 部署指南 |
 
 ---
 
-> **版本**: v0.2.9 | **最后更新**: 2026-08-23 | **Go**: 1.26 | **直接依赖**: 29 | **测试文件**: 73+
+> **版本**: v0.3.1 | **最后更新**: 2026-08-25 | **Go**: 1.26 | **直接依赖**: 29 | **测试文件**: 73+

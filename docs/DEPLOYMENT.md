@@ -311,7 +311,7 @@ type ComponentHealth struct {
 ```json
 {
   "status": "healthy",
-  "version": "v0.2.9",
+  "version": "v0.3.1",
   "uptime": "2h13m",
   "components": [
     { "name": "database",    "status": "healthy", "message": "database is reachable", "latency_ms": 2 },
@@ -462,7 +462,7 @@ telemetry:
   exporter_type: grpc          # 默认 console
   endpoint: localhost:4317     # OTel Collector 默认地址
   service_name: wukong
-  service_version: v0.2.9
+  service_version: v0.3.1
   environment: production
   sample_rate: 1.0             # 1.0 = 全采样
 ```
@@ -731,4 +731,4 @@ cp ~/.config/wukong/wukong.db-shm /backup/ 2>/dev/null || true
 
 ---
 
-> **版本**: v0.2.9 | **最后更新**: 2026-08-23
+> **版本**: v0.3.1 | **最后更新**: 2026-08-25

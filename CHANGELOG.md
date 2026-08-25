@@ -4,6 +4,38 @@ All changes after v0.1.14 baseline.
 
 ---
 
+## [0.3.1] — 2026-08-25
+
+### 配置修复（Bug Fix）
+
+- **修复 `mcp_server.security.auth.api_key` 环境变量展开缺失**：`expandSecrets()` 此前只处理 `acp_server.security.auth.api_key`，导致 config.yaml 中 `api_key: ${MCP_API_KEY:-}` 的字面量被原样送入认证中间件（配置形同虚设）。现补齐 MCP Server 认证键的展开，并新增回归测试 `TestNewLoader_ServerAuthEnvExpansion`
+- 修正 `expandSecrets()` 中 ACP 认证键的警告标签：`acp_server.api_key` → `acp_server.security.auth.api_key`（与真实配置路径一致，避免警告信息误导排障）
+
+### 配置代码重构
+
+- `internal/cli/config.go` 的咨询性校验 `runFullValidation()` 消除与 `config.Validate()` 的规则重复：枚举/区间校验（provider type、session/memory/todo/artifact backend、permission_mode、workflow.mode、浏览器后端等）改为直接委托 `Validate()`，启动路径与 `bench`/`health` 咨询路径永不漂移；仅保留 Validate 不视为致命的咨询项（默认 provider 缺 model/缺 api_key、ACP provider 缺 agent_url、非法 planner、lightweight_provider 回退链断裂）
+- `resolveConfigPath()` 修复与 `config.NewLoader` 的平台不一致：Windows 上不再把 `/etc/wukong/config.yaml` 列为候选搜索路径
+- `internal/config/config.go` 包文档修正：文件清单从过时的 `types.go` 更新为实际的 11 个文件（config/types_*/defaults/validate），env 展开字段清单补入 `mcp_server.security.auth.api_key`
+- `defaults.go` 补齐 `mcp_server.enabled`（false）与 `mcp_server.address`（`:3401`）内置默认值，与其他服务端点（a2a/agui/acp/acp_mcp）对齐
+
+### 配置文件重构
+
+- 删除根目录孤立的 `ard.yaml`：无任何代码引用（全仓库 grep 零命中），且其 `ard:` 段取值与 config.yaml 冲突（enabled: true vs false、publish_port 8081 vs 0），误导用户以为独立生效——ARD 配置唯一入口是 config.yaml 的 `ard:` 段
+- `config.yaml` 私网地址与明文标识环境变量化（保持本地默认值不变，新增 env 覆盖能力）：vllm `base_url`/`api_key` → `${VLLM_BASE_URL:-…}`/`${VLLM_API_KEY:-}`，飞书明文 `app_id` → `${FEISHU_APP_ID:-}`（该段 `enabled: false`，无运行时影响）
+- `config.yaml` 补录 0.3.0 遗漏的 `browser.global_render_slots: 0` 模板键（带语义注释：0=自动 max(4, NumCPU)，负值禁用）；`workers` 字段补运行时兜底说明
+- `config.yaml` 注释语言统一为英文（原中英混杂 8 处：vllm、max_run_duration、model event log、max_context_tokens、TLS 策略、acp/mcp 认证、summon、knowledge），头部 env 展开清单同步补入 mcp_server
+
+### 文档重构
+
+- **统一内置扩展统计口径为 12 个**（以 `internal/extension/builtin/registry.go` 的 `RegisterBuiltins` 注册数为唯一真相源；`web` 扩展内含 aggregate_search/bing/google/searxng/tavily 五个搜索后端工具，不单独计数）：修正 `docs/ARCHITECTURE.md`（§9.1 表格 + 2 处目录树注释）、`docs/README.md` 关键数字表、根 `README.md` 扩展与互通表、`CHANGELOG.md` 0.3.0 口径注记
+- `docs/DEVELOPER_GUIDE.md` 附录修正交叉引用错误：`API_REFERENCE.md` 由"HTTP API 参考"更正为"Go 接口/结构体参考（非 REST API）"；根 `README.md` 文档索引同步澄清
+- `docs/CONFIG.md` 补录 `browser.global_render_slots` 字段说明；env 展开字段表补 MCP Server 行并移除易漂移的行号引用；`runFullValidation` 描述同步重构后语义（`docs/CLI_TUI.md` 同步）
+- 根 `README.md` 文档索引移除行数估算列（行数随编辑频繁漂移，改为主题描述）
+- `CHANGELOG.md` 补记 `docs/GATEWAY_DEPLOY.md`/`GATEWAY_CHANNEL_DESIGN.md` 两篇文档的删除去向（说明现收录于 `internal/gateway/README.md`）
+- 版本号统一对齐 0.3.1（`internal/util/version.go` + 各文档尾注）
+
+---
+
 ## [0.3.0] — 2026-08-24
 
 ### CLI
@@ -57,7 +89,7 @@ All changes after v0.1.14 baseline.
 
 - 分页：克隆层 3 种检测模式 + 游标兜底，浏览器 API 发现层 5 种 kind（替代原"6 种分页模式"表述）
 - 反爬：5 级反爬升级体系（替代原"10 层"表述）
-- 统计数字以代码为唯一真相源：`internal/` 33 个包、`pkg/` 5 个包（capability、httpclient、logutil、sandbox、zim）、内置扩展 17 个、30 个顶层 CLI 命令
+- 统计数字以代码为唯一真相源：`internal/` 33 个包、`pkg/` 5 个包（capability、httpclient、logutil、sandbox、zim）、内置扩展 12 个（`web` 扩展内含 5 个搜索后端工具，0.3.1 修正口径）、30 个顶层 CLI 命令
 
 ---
 
@@ -160,7 +192,7 @@ All changes after v0.1.14 baseline.
 - **凭证 fail-fast 校验** (`internal/gateway/feishu/channel.go`, `internal/cli/session.go`): 新增 `Validate()`，app_id/app_secret 缺失时拒绝注册 channel 并明确报错，避免运行时静默失败。
 - **限流参数放宽** (`config.yaml`, `defaults.go`, `types.go`, `gateway.go`): `rate_limit_window` 10s→60s，`rate_limit_per_user` 10→20；超限返回 200 而非 429，避免平台重试雪崩。
 - **路由精确匹配** (`internal/gateway/router.go`): 路径段边界匹配替代 `HasPrefix`，`/feishu` 不再误吃 `/feishuabc`；注册路径归一化（补 leading `/`、去 trailing `/`），修正去重检测。新增 `router_test.go` (9 用例)。
-- **文档同步** (`docs/GATEWAY_DEPLOY.md`, `docs/GATEWAY_CHANNEL_DESIGN.md`): 限流默认值、签名算法说明、文件职责表。
+- **文档同步** (曾位于 `docs/GATEWAY_DEPLOY.md`, `docs/GATEWAY_CHANNEL_DESIGN.md`，两文件已在后续重组中删除，限流/签名说明现收录于 `internal/gateway/README.md`): 限流默认值、签名算法说明、文件职责表。
 
 ### Config & Documentation Overhaul
 

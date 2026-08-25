@@ -121,7 +121,7 @@ ARD 协议实现 Agent 的双向发现（联邦搜索 + RegistryServer 发布）
 | 维度 | 方案 |
 |------|------|
 | **编排模式** | 10 种: `single` / `chain` / `parallel` / `cycle` / `graph` / `team_coordinator` / `team_swarm` / `claude_code` / `codex` / `dify` |
-| **LLM 后端** | 7 种: OpenAI / Anthropic / Google / DeepSeek / Ollama / LMStudio / ACP |
+| **LLM 后端** | 8 种: OpenAI / Anthropic / Google / DeepSeek / Ollama / LMStudio / vLLM / ACP（OpenAI 兼容云服务经 `type: openai` 接入：SiliconFlow / OpenRouter / Groq / Moonshot / 智谱等） |
 | **CoreLoop** | 四阶段执行: Prepare → Execute → Finalize → Return |
 | **Recipe 系统** | YAML 定义子 Agent + 热重载 + 版本进化 |
 | **HITL** | 人机协同，决策点原生暂停 |
@@ -161,7 +161,7 @@ ARD 协议实现 Agent 的双向发现（联邦搜索 + RegistryServer 发布）
 
 | 维度 | 方案 |
 |------|------|
-| **内置扩展** | 17 个: developer / computer_controller / memory / auto_visualiser / tutorial / top_of_mind / code_mode / apps / web / aggregate_search / agent_tools / ard / cortex / bing / google / searxng / tavily |
+| **内置扩展** | 12 个: developer / computer_controller / memory / auto_visualiser / tutorial / top_of_mind / code_mode / apps / web / agent_tools / ard / cortex（`web` 内含 aggregate_search / bing / google / searxng / tavily 五个搜索后端工具） |
 | **MCP 扩展** | MCP Broker + 独立 MCP Server (:3401) + ACP-MCP Bridge (:3400) |
 | **多协议端点** | 7 个: A2A (:9090) / ACP (:9091) / AG-UI SSE (:8080) / ACP-MCP (:3400) / MCP Server (:3401) / ANP (:9092) / Gateway (飞书 WS) |
 | **消息网关** | Gateway 插件式 Channel 架构: 飞书 WebSocket 长连接 (内部 goroutine，无独立 HTTP 端口) |
@@ -441,14 +441,14 @@ GatewayServer (transport-agnostic)
 
 ### 核心文档
 
-| 文档 | 说明 | 页数 |
-|------|------|------|
-| [系统架构](docs/ARCHITECTURE.md) | 系统架构与各子系统技术实现 · 24 ADR · 模块依赖 · 数据流 | ~750 行 |
-| [配置手册](docs/CONFIG.md) | 15 组配置 · 全字段说明 · 完整示例 | ~1000 行 |
-| [CLI & TUI 架构](docs/CLI_TUI.md) | 命令树 · TUI 架构 · 启动序列 · 事件管道 | ~800 行 |
-| [API 参考](docs/API_REFERENCE.md) | CoreLoop · Provider · Extension · Security 接口 | ~800 行 |
-| [开发者指南](docs/DEVELOPER_GUIDE.md) | 环境搭建 · 项目结构 · 常见开发任务 · 调试 | ~600 行 |
-| [部署运维](docs/DEPLOYMENT.md) | Docker · 二进制 · 配置 · 健康检查 · 故障排查 | ~800 行 |
+| 文档 | 说明 |
+|------|------|
+| [系统架构](docs/ARCHITECTURE.md) | 系统架构与各子系统技术实现 · 24 ADR · 模块依赖 · 数据流 |
+| [配置手册](docs/CONFIG.md) | 15 组配置 · 全字段说明 · 完整示例 |
+| [CLI & TUI 架构](docs/CLI_TUI.md) | 命令树 · TUI 架构 · 启动序列 · 事件管道 |
+| [API 参考](docs/API_REFERENCE.md) | CoreLoop · Provider · Extension · Security 等 Go 接口与结构体 |
+| [开发者指南](docs/DEVELOPER_GUIDE.md) | 环境搭建 · 项目结构 · 常见开发任务 · 调试 |
+| [部署运维](docs/DEPLOYMENT.md) | Docker · 二进制 · 配置 · 健康检查 · 故障排查 |
 
 ### 专题指南
 

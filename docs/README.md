@@ -2,7 +2,13 @@
 
 > 本目录包含 Wukong AI Agent 平台的所有技术文档。
 >
-> 最后更新：2026-08-23
+> 最后更新：2026-08-25 | 当前版本：v0.3.1
+>
+> **版本约定**：各文档尾注的"版本"统一跟随项目版本（权威源为
+> [internal/util/version.go](../internal/util/version.go) 与
+> [CHANGELOG.md](../CHANGELOG.md)）；OKF 等跟随外部规范的文档在尾注中
+> 同时标注规范版本。统计口径约定：内置扩展数以
+> `internal/extension/builtin/registry.go` 注册数为准（12 个）。
 
 ---
 
@@ -99,8 +105,8 @@
 | CLI 顶层命令 | 30 |
 | CLI 子命令 | 60+ |
 | 编排模式 | 10 种 |
-| LLM Provider | 7 种 |
-| 内置扩展 | 17 个 |
+| LLM Provider | 8 种（openai/anthropic/google/deepseek/ollama/lmstudio/vllm/acp） |
+| 内置扩展 | 12 个（`web` 扩展内含 5 个搜索后端工具） |
 | 反爬升级体系 | 5 级 |
 | 安全防御层 | 5 层 |
 | 服务端点 | 6 个协议 |

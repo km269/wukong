@@ -971,4 +971,4 @@ httpclient:
 
 ---
 
-> **版本**: v0.3.0 | **最后更新**: 2026-08-23 | **范围**: browser / apps(clone,pack) / search(tune/vertical/chunking) / errsignal / pkg/httpclient / pkg/zim
+> **版本**: v0.3.1 | **最后更新**: 2026-08-25 | **范围**: browser / apps(clone,pack) / search(tune/vertical/chunking) / errsignal / pkg/httpclient / pkg/zim

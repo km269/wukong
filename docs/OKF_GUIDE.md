@@ -761,4 +761,4 @@ A: 配置 `okf.injector_enabled: true` + `memoryflow.enabled: true`，`Knowledge
 
 ---
 
-> **版本**: 0.1 | **最后更新**: 2026-08-23 | **源码**: `internal/okf/` · `internal/knowledge/okf.go` · `internal/cortex/okf_*.go` · `internal/skill/` · `internal/evolution/okf.go` · `internal/ard/okf.go`
+> **版本**: v0.3.1（OKF 规范版本 0.1） | **最后更新**: 2026-08-25 | **源码**: `internal/okf/` · `internal/knowledge/okf.go` · `internal/cortex/okf_*.go` · `internal/skill/` · `internal/evolution/okf.go` · `internal/ard/okf.go`

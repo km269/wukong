@@ -344,6 +344,60 @@ providers:
 	}
 }
 
+// TestNewLoader_ServerAuthEnvExpansion verifies that the nested
+// server endpoint auth keys (acp_server.security.auth.api_key and
+// mcp_server.security.auth.api_key) are env-expanded. The MCP path
+// was historically missing from expandSecrets, silently leaving
+// ${MCP_API_KEY} literals in the auth key.
+func TestNewLoader_ServerAuthEnvExpansion(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	os.Setenv("TEST_ACP_KEY", "acp-key-value")
+	os.Setenv("TEST_MCP_KEY", "mcp-key-value")
+	defer func() {
+		os.Unsetenv("TEST_ACP_KEY")
+		os.Unsetenv("TEST_MCP_KEY")
+	}()
+
+	yamlContent := `
+acp_server:
+  enabled: true
+  security:
+    auth:
+      type: "api_key"
+      api_key: ${TEST_ACP_KEY}
+mcp_server:
+  enabled: true
+  security:
+    auth:
+      type: "api_key"
+      api_key: ${TEST_MCP_KEY}
+`
+	if err := os.WriteFile(
+		configPath, []byte(yamlContent), 0644,
+	); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	loader, err := NewLoader(configPath)
+	if err != nil {
+		t.Fatalf("NewLoader failed: %v", err)
+	}
+
+	cfg, err := loader.Load()
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if got := cfg.ACPServer.Security.Auth.APIKey; got != "acp-key-value" {
+		t.Errorf("acp_server.security.auth.api_key: expected expanded env var, got %q", got)
+	}
+	if got := cfg.MCPServer.Security.Auth.APIKey; got != "mcp-key-value" {
+		t.Errorf("mcp_server.security.auth.api_key: expected expanded env var, got %q", got)
+	}
+}
+
 func TestLoader_GetConfig(t *testing.T) {
 	loader, err := NewLoader("")
 	if err != nil {

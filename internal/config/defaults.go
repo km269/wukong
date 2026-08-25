@@ -410,6 +410,8 @@ func (l *Loader) setServerDefaults() {
 	// Security defaults to empty auth — users exposing this on a
 	// non-loopback interface MUST set security.auth.type explicitly
 	// to prevent unauthorized tools/call access.
+	l.v.SetDefault("mcp_server.enabled", false)
+	l.v.SetDefault("mcp_server.address", ":3401")
 	l.v.SetDefault("mcp_server.security.auth.type", "")
 	l.v.SetDefault("mcp_server.security.auth.api_key", "")
 }

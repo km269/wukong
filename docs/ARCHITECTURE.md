@@ -100,7 +100,7 @@
 ║  ┌────────────────────────────▼────────────────────────────────────┐  ║
 ║  │                能力层 / Capabilities                           │  ║
 ║  │                                                                 │  ║
-║  │  extension/   MCP 扩展管理 + 17 个内置工具集                    │  ║
+║  │  extension/   MCP 扩展管理 + 12 个内置工具集                    │  ║
 ║  │  browser/     双后端浏览器(chromedp+rod) + 5级反爬              │  ║
 ║  │  apps/        网站克隆 + ZIM打包 + HTML消毒 + MCP Apps          │  ║
 ║  │  search/      垂直搜索 + SPA调优 + 语义分块                     │  ║
@@ -621,7 +621,9 @@ LLM 驱动的闭环自我改进机制（定义于 [evolution/](../internal/evolu
 
 ## 9. 扩展与发现系统
 
-### 9.1 内置扩展（17 个）
+### 9.1 内置扩展（12 个）
+
+> 统计口径：以 `internal/extension/builtin/registry.go` 中 `RegisterBuiltins` 实际注册的 ToolSet 为准，共 **12 个**。其中 `web` 扩展内部聚合了 5 个搜索后端工具（aggregate_search / bing / google / searxng / tavily），不单独计数。
 
 | 扩展 | 功能 |
 |------|------|
@@ -630,14 +632,13 @@ LLM 驱动的闭环自我改进机制（定义于 [evolution/](../internal/evolu
 | `memory` | 记忆增删改查（tRPC Memory 注入） |
 | `auto_visualiser` | SVG 图表、Mermaid 图、HTML 表格 |
 | `tutorial` | 交互式教程 |
-| `web` / `aggregate_search` | 多搜索引擎聚合（DuckDuckGo/SearXNG/Tavily/Google/Bing + 浏览器回退） |
+| `web` | 多引擎搜索聚合（DuckDuckGo/SearXNG/Tavily/Google/Bing + 浏览器回退；内含 aggregate_search / bing / google / searxng / tavily 五个后端工具） |
 | `agent_tools` | code-reviewer/summarizer/code-generator 子代理 |
 | `apps` | HTML 应用全生命周期 + 网站克隆 + 打包 |
 | `ard` | ARD 资源发现与管理 |
 | `code_mode` | goja JS 沙箱执行 |
 | `cortex` | 知识图谱查询、数据导入 |
 | `top_of_mind` | 持久化指令注入 |
-| `bing` / `google` / `searxng` / `tavily` | 单引擎搜索 |
 
 ### 9.2 Summon 子代理委派
 
@@ -784,7 +785,7 @@ wukong/
 │   ├── cli/                # ★ CLI 命令层（Cobra）+ TUI（Bubbletea）
 │   ├── config/             # 配置体系（Viper, 10 个类型文件）
 │   ├── provider/           # LLM 提供商工厂（8 种）
-│   ├── extension/          # ★ MCP 扩展管理 + 17个内置工具集 + ACP-MCP桥接
+│   ├── extension/          # ★ MCP 扩展管理 + 12个内置工具集 + ACP-MCP桥接
 │   ├── browser/            # 双后端浏览器 + 5级反爬 + 15项stealth注入（asset/retry/sanitize 子包）
 │   ├── search/             # 搜索引擎（SPA调优/垂直路由/语义分块/指标）
 │   ├── cortex/             # ★ CortexDB 知识引擎（向量+FTS5+GraphRAG+MemoryFlow+GraphFlow+ImportFlow+KG工具+召回管理）

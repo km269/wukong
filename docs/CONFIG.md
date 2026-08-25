@@ -4,6 +4,13 @@
 > 配置代码: `internal/config/`（16 文件 = 3 个 `*_test.go` 测试 + 13 个核心文件：`config.go`、`defaults.go`、`validate.go` 及 10 个 `types_*.go`）
 > 配置结构: `WukongConfig` 根结构体（`config.go:97`）含 35+ 子配置段
 > 验证规则: 致命错误（`Validate()`）+ 非致命警告（`Warnings()`）| 环境变量展开: 20+ 类敏感字段
+>
+> **编号说明**：本文的 A–AM 双字母编号仅用于文档导航，按子系统细分；
+> `config.yaml` 模板内采用更粗的 **A–O 15 组**分组注释（A 全局 / B Providers /
+> C Agent / D Security / E 存储 / F Cortex 栈 / G Revision / H 功能工具 /
+> I Extensions / J 服务端点 / K Agent 互通 / L 知识与技能 / M 编排 /
+> N 可观测 / O 项目目录）。按 YAML 分组定位时请以 config.yaml 注释为准，
+> 按字段查询时以本文目录为准。
 
 ---
 
@@ -117,23 +124,24 @@ base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
 
 | 类别 | 字段 | 源码位置 |
 |------|------|---------|
-| **Providers** | `api_key`, `base_url`, `model` | `config.go:387-395` |
-| **A2A Remotes** | `api_key`, `jwt_secret`, `oauth_client_secret` | `config.go:398-406` |
-| **Gateway Feishu** | `app_secret`, `encrypt_key`, `verification_token` | `config.go:409-415` |
-| **Observability (Langfuse)** | `langfuse_public_key`, `langfuse_secret_key` | `config.go:418-423` |
-| **Artifact (COS)** | `cos_secret_id`, `cos_secret_key` | `config.go:426-429` |
-| **ACP Server** | `security.auth.api_key` | `config.go:432-434` |
-| **Cortex Embedding** | `embedding_api_key`, `embedding_base_url`, `embedding_model` | `config.go:437-442` |
-| **Cortex Reranker** | `reranker_api_key`, `reranker_base_url`, `reranker_model` | `config.go:445-450` |
-| **Cortex Vertical Routing** | `github_api_key` | `config.go:453-457` |
-| **MemoryFlow** | `planner_model`, `extractor_model` | `config.go:460-463` |
-| **GraphFlow** | `extractor_model` | `config.go:466-467` |
-| **Dify** | `api_secret` | `config.go:470-471` |
-| **Session** | `redis_url` | `config.go:474-475` |
-| **Browser Search (SearXNG)** | `url`, `api_key` | `config.go:478-483` |
-| **Browser Search (Tavily)** | `api_key` | `config.go:484-486` |
-| **Browser Search (Google)** | `api_key`, `cse_id` | `config.go:487-492` |
-| **Browser Search (Bing)** | `api_key` | `config.go:493-495` |
+| **Providers** | `api_key`, `base_url`, `model` | `config.go`（expandSecrets） |
+| **A2A Remotes** | `api_key`, `jwt_secret`, `oauth_client_secret` | `config.go`（expandSecrets） |
+| **Gateway Feishu** | `app_secret`, `encrypt_key`, `verification_token` | `config.go`（expandSecrets） |
+| **Observability (Langfuse)** | `langfuse_public_key`, `langfuse_secret_key` | `config.go`（expandSecrets） |
+| **Artifact (COS)** | `cos_secret_id`, `cos_secret_key` | `config.go`（expandSecrets） |
+| **ACP Server** | `security.auth.api_key` | `config.go`（expandSecrets） |
+| **MCP Server** | `security.auth.api_key` | `config.go`（expandSecrets，0.3.1 起支持） |
+| **Cortex Embedding** | `embedding_api_key`, `embedding_base_url`, `embedding_model` | `config.go`（expandSecrets） |
+| **Cortex Reranker** | `reranker_api_key`, `reranker_base_url`, `reranker_model` | `config.go`（expandSecrets） |
+| **Cortex Vertical Routing** | `github_api_key` | `config.go`（expandSecrets） |
+| **MemoryFlow** | `planner_model`, `extractor_model` | `config.go`（expandSecrets） |
+| **GraphFlow** | `extractor_model` | `config.go`（expandSecrets） |
+| **Dify** | `api_secret` | `config.go`（expandSecrets） |
+| **Session** | `redis_url` | `config.go`（expandSecrets） |
+| **Browser Search (SearXNG)** | `url`, `api_key` | `config.go`（expandSecrets） |
+| **Browser Search (Tavily)** | `api_key` | `config.go`（expandSecrets） |
+| **Browser Search (Google)** | `api_key`, `cse_id` | `config.go`（expandSecrets） |
+| **Browser Search (Bing)** | `api_key` | `config.go`（expandSecrets） |
 
 ---
 
@@ -141,7 +149,7 @@ base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
 
 配置加载后自动执行验证（`validate.go`），分为**致命错误**（`Validate()` 返回 error）和**非致命警告**（`Warnings()` 返回 `[]string`）。
 
-> **验证时机说明**：完整规则在两条路径中执行——**启动路径**（`session`/`server`/`run` 等 → `bootstrapSession()` → `loader.LoadAndValidate()`，警告随后打印到日志）和 **`wukong config validate` 命令**（同样调用 `loader.LoadAndValidate()` 并在终端列出全部非致命警告，致命错误时退出码 1）。两条路径行为一致；`internal/cli/config.go` 中另有一个 12 项的轻量校验函数 `runFullValidation`，仅供 `bench`/`health` 命令做咨询性检查使用。
+> **验证时机说明**：完整规则在两条路径中执行——**启动路径**（`session`/`server`/`run` 等 → `bootstrapSession()` → `loader.LoadAndValidate()`，警告随后打印到日志）和 **`wukong config validate` 命令**（同样调用 `loader.LoadAndValidate()` 并在终端列出全部非致命警告，致命错误时退出码 1）。两条路径行为一致；`internal/cli/config.go` 中另有一个轻量咨询性校验函数 `runFullValidation`（枚举/区间规则直接委托 `Validate()`，另加 provider model/api_key、ACP agent_url、planner、lightweight_provider 等咨询项），仅供 `bench`/`health` 命令使用。
 
 ### 3.1 致命错误（Validate，阻止启动）
 
@@ -169,7 +177,7 @@ base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
 | `memory.max_memories` | >= 0 | `validate.go:289-295` |
 | `revision.trim_ratio` | [0.0, 1.0] | `validate.go:297-303` |
 | `apps.clone.workers` / `apps.clone.asset_workers` | >= 1（`apps.enabled` 时） | `validate.go:305-319` |
-| `mcp_server.address` | `mcp_server.enabled` 时必填（无内置默认值） | `validate.go:321-328` |
+| `mcp_server.address` | `mcp_server.enabled` 时非空（内置默认 `:3401`，校验保留为安全网） | `validate.go:321-328` |
 | `summon.max_concurrent` | >= 0（启用时） | `validate.go:330-337` |
 | `summon.a2a_remotes[].name` / `.server_url` | 必填（启用时） | `validate.go:338-348` |
 | `summon.a2a_remotes[].auth_type` | `""`/`api_key`/`jwt`/`oauth2` | `validate.go:349-358` |
@@ -682,7 +690,8 @@ blocked_commands:
 | `viewport_height` | int | 720 | 视口高度 |
 | `scroll` | bool | false | 是否自动滚动 |
 | `control_url` | string | - | 远程调试控制 URL |
-| `workers` | int | - | Worker 数量 |
+| `workers` | int | 4（运行时兜底） | Worker 数量（<=0 时取 4） |
+| `global_render_slots` | int | 0 | 进程级全局渲染并发预算（0.3.0+）。`0` = 自动 `max(4, NumCPU)`；负值禁用全局上限；与各池 `workers` 独立（池大小为局部并发，本值为全进程渲染总量） |
 | `profile_dir` | string | - | 浏览器配置文件目录 |
 | `proxy` | ProxyConfig | - | 代理配置 |
 | `search` | SearchConfig | - | 搜索引擎配置 |
@@ -957,12 +966,12 @@ type ServerSecurityConfig struct {
 
 ## Y. MCP Server 配置
 
-**源码**: `types_server.go:53-59`（`MCPServerConfig`） | 默认值: `defaults.go:406-411`（仅注册 security 默认，**无 address 默认**）
+**源码**: `types_server.go:53-59`（`MCPServerConfig`） | 默认值: `defaults.go:409-416`
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `enabled` | bool | false | 是否启用独立 MCP 服务器（将扩展暴露为 JSON-RPC 2.0 MCP Server） |
-| `address` | string | **无内置默认值** | 监听地址。启用时必填，为空直接 fatal（`validate.go:321-328`：`mcp_server.address is required when mcp_server.enabled is true`）。`:3401` 只是 `config.yaml` 模板中的示例值，不是代码默认 |
+| `address` | string | `:3401` | 监听地址（0.3.1 起补齐内置默认值，与其他服务端点对齐）。`validate.go:321-328` 仍保留启用时非空校验作为安全网 |
 | `security.auth.type` | string | `""` | 认证类型: `""`/`api_key`/`jwt` |
 | `security.auth.api_key` | string | - | API Key（支持 `${ENV}`） |
 

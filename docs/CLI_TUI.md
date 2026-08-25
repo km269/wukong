@@ -314,7 +314,7 @@ wukong session [flags]              # 启动 TUI
 
 调用 `loader.LoadAndValidate()`（与 `bootstrapSession()` 同一入口），执行 `internal/config/validate.go` 的全部致命规则（todo/mcp_server/sandbox/端口冲突等，完整清单见 [CONFIG.md §3](./CONFIG.md#3-配置验证)），随后列出全部非致命警告（`Warnings()` + default_provider 缺失提示）。致命错误退出码 1；仅有警告时退出码 0。
 
-> 另有 12 项轻量校验函数 `runFullValidation()`（provider/planner/后端/permission_mode/workflow.mode/artifact），仅供 `bench` 与 `health` 命令做咨询性检查使用。
+> 另有轻量咨询性校验函数 `runFullValidation()`（`bench`/`health` 命令使用）：枚举与区间规则委托给 `config.WukongConfig.Validate()`（与启动路径同一份规则，永不漂移），另加 Validate 不视为致命的咨询项——默认 provider 缺 model/缺 api_key、ACP provider 缺 `agent_url`、非法 planner、`lightweight_provider` 回退链断裂。
 
 ### 4.5 `configure` — 交互式配置向导
 
@@ -1042,7 +1042,7 @@ DBPoolClose              → 最后关闭共享数据库连接池（PRAGMA wal_c
 package util
 
 var (
-    Version   = "0.2.9"
+    Version   = "0.3.1"
     GitCommit = "fix commit"
     BuildDate = "2026-08-5"
 )
@@ -1097,4 +1097,4 @@ EvolutionTracker 作为 Runner 级别插件，通过事件监听异步捕获执�
 
 ---
 
-> **版本**: v0.2.9 | **最后更新**: 2026-08-23 | **CLI 源文件**: 29 + TUI 3 = 32 | **顶层命令**: 30
+> **版本**: v0.3.1 | **最后更新**: 2026-08-25 | **CLI 源文件**: 29 + TUI 3 = 32 | **顶层命令**: 30

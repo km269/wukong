@@ -8,10 +8,19 @@
 // # File Organization
 //
 // The config package is split across multiple files for maintainability:
-//   - config.go   — WukongConfig root struct, Loader, query helpers
-//   - types.go    — All sub-configuration struct type definitions
-//   - defaults.go — Built-in default values (setDefaults)
-//   - validate.go — Configuration validation (Validate, Warnings)
+//   - config.go              — WukongConfig root struct, Loader, query helpers
+//   - types_provider.go      — Provider & extension types
+//   - types_agent.go         — Agent & security (incl. sandbox) types
+//   - types_storage.go       — Session/memory/todo/recall types
+//   - types_cortex.go        — Cortex stack & revision types
+//   - types_browser.go       — Browser/search/proxy types
+//   - types_features.go      — Feature-tool types (visualiser, code_mode, ...)
+//   - types_apps.go          — Apps (clone & pack) types
+//   - types_orchestration.go — Orchestration & discovery types
+//   - types_server.go        — Service endpoint types (A2A/ACP/MCP/AG-UI)
+//   - types_observability.go — Telemetry/eval/artifact types
+//   - defaults.go            — Built-in default values (setDefaults)
+//   - validate.go            — Configuration validation (Validate, Warnings)
 //
 // # Configuration Priority
 //
@@ -39,7 +48,8 @@
 //   - gateway.feishu.app_secret, encrypt_key, verification_token
 //   - observability.langfuse_public_key, secret_key
 //   - artifact.cos_secret_id, cos_secret_key
-//   - acp_server.api_key
+//   - acp_server.security.auth.api_key
+//   - mcp_server.security.auth.api_key
 //   - cortex.embedding_api_key, embedding_base_url, embedding_model
 //   - cortex.reranker_api_key, reranker_base_url, reranker_model
 //   - cortex.vertical_routing.github_api_key
@@ -428,10 +438,13 @@ func (l *Loader) expandSecrets(cfg *WukongConfig) {
 	cfg.Artifact.COSSecretKey = expandEnvTracked(
 		cfg.Artifact.COSSecretKey, "artifact.cos_secret_key", u)
 
-	// ACP Server API key (nested under Security.Auth).
+	// Server endpoint auth keys (nested under Security.Auth).
 	cfg.ACPServer.Security.Auth.APIKey = expandEnvTracked(
 		cfg.ACPServer.Security.Auth.APIKey,
-		"acp_server.api_key", u)
+		"acp_server.security.auth.api_key", u)
+	cfg.MCPServer.Security.Auth.APIKey = expandEnvTracked(
+		cfg.MCPServer.Security.Auth.APIKey,
+		"mcp_server.security.auth.api_key", u)
 
 	// CortexDB embedding settings.
 	cfg.Cortex.EmbeddingAPIKey = expandEnvTracked(

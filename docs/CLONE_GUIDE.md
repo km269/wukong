@@ -1219,4 +1219,4 @@ wukong apps clone https://example.com --archive-fallback
 
 ---
 
-> **版本**: v2.1 | **最后更新**: 2026-08-23 | **相关代码**: internal/apps/clone/ + internal/apps/pack/ + pkg/zim/
+> **版本**: v0.3.1 | **最后更新**: 2026-08-25 | **相关代码**: internal/apps/clone/ + internal/apps/pack/ + pkg/zim/
