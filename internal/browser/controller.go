@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"os"
 	"strings"
@@ -39,10 +40,28 @@ type Controller struct {
 	client         *httpclient.Client
 	settleTimeout  time.Duration // Network-idle settle duration.
 	stealth        bool          // Anti-detection mode enabled.
+	stealthFP      *stealth.Fingerprint
 	chromedpCtx    context.Context
 	chromedpCancel context.CancelFunc
 	allocCancel    context.CancelFunc   // browser process lifecycle
 	backend        types.BrowserBackend // Browser backend (chromedp or go-rod)
+}
+
+// stealthScript renders the session-stable stealth payload (see
+// stealth.BuildScript). The fingerprint is generated once per
+// controller so all tabs share one consistent persona; its geography
+// follows the configured geo_region (see BrowserConfig.GeoRegion).
+func (c *Controller) stealthScript() string {
+	if c.stealthFP == nil {
+		geo := ""
+		if c.cfg != nil {
+			geo = stealth.ResolveGeoCode(c.cfg.GeoRegion, "")
+		}
+		c.stealthFP = stealth.GenerateFingerprint(
+			rand.New(rand.NewSource(time.Now().UnixNano())),
+			stealth.GeoProfileByCode(geo))
+	}
+	return stealth.BuildScript(c.stealthFP, nil)
 }
 
 // NewController creates a new browser automation controller.
@@ -129,7 +148,7 @@ func (c *Controller) initChromedp() {
 
 	// Inject stealth script if enabled.
 	if c.stealth {
-		if err := stealth.Inject(ctx); err != nil {
+		if err := stealth.Inject(ctx, c.stealthScript()); err != nil {
 			logutil.Error("[wukong/browser] stealth injection failed", "error", err)
 		} else {
 			logutil.Info("[wukong/browser] stealth mode enabled")
@@ -151,7 +170,7 @@ func (c *Controller) EnableStealth() error {
 	if !c.isChromedpBackend() {
 		return fmt.Errorf("stealth requires chromedp backend")
 	}
-	if err := stealth.Inject(c.chromedpCtx); err != nil {
+	if err := stealth.Inject(c.chromedpCtx, c.stealthScript()); err != nil {
 		return fmt.Errorf("enable stealth: %w", err)
 	}
 	c.stealth = true

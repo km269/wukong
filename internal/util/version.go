@@ -4,7 +4,7 @@ package util
 
 // Version information set at build time via ldflags.
 var (
-	Version   = "0.3.1"
+	Version   = "0.3.2"
 	GitCommit = "fix commit"
-	BuildDate = "2026-08-25"
+	BuildDate = "2026-08-26"
 )

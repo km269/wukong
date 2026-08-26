@@ -32,8 +32,13 @@ type BrowserConfig struct {
 	ProfileDir        string             `mapstructure:"profile_dir"`
 	ViewportWidth     int                `mapstructure:"viewport_width"`
 	ViewportHeight    int                `mapstructure:"viewport_height"`
-	Search            SearchConfig       `mapstructure:"search"`
-	Proxy             ProxyConfig        `mapstructure:"proxy"`
+	// GeoRegion pins the browser fingerprint's geography (timezone,
+	// languages, Accept-Language) to the proxy exit region: one of
+	// cn, us-east, us-west, us-central, gb, de, fr, jp, kr, sg.
+	// Empty = infer from the proxy URL when possible, else random.
+	GeoRegion string `mapstructure:"geo_region"`
+	Search    SearchConfig       `mapstructure:"search"`
+	Proxy     ProxyConfig        `mapstructure:"proxy"`
 }
 
 // ProxyConfig defines proxy settings for browser automation.

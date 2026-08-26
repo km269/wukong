@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 )
@@ -243,11 +244,39 @@ type UAProfile struct {
 	SecChUa         string
 	SecChUaMobile   string
 	SecChUaPlatform string
+
+	// FullVersion is the complete Chrome version for high-entropy
+	// client hints (e.g. "130.0.6721.117"). Empty = unknown.
+	FullVersion string
+	// PlatformVersion for userAgentData.getHighEntropyValues
+	// (e.g. "15.0.0" on Windows 11, "10.15.7" on macOS).
+	PlatformVersion string
+	// Mobile marks mobile personas (used for UserAgentMetadata).
+	Mobile bool
+}
+
+// ChromeOnly reports whether this profile is safe to apply on a real
+// Chrome engine. Applying a Firefox or Safari UA string on Chrome's
+// TLS stack and JS engine creates a UA↔TLS↔JS mismatch that modern
+// anti-bot flags with high confidence — the UA must match the binary
+// that makes the connection.
+func (p *UAProfile) ChromeOnly() bool {
+	if p == nil {
+		return false
+	}
+	ua := p.UserAgent
+	if strings.Contains(ua, "Firefox/") || strings.Contains(ua, "Safari/") &&
+		!strings.Contains(ua, "Chrome/") {
+		return false
+	}
+	return strings.Contains(ua, "Chrome/")
 }
 
 // RotateUserAgent returns a random realistic browser User-Agent profile.
 // Used when escalation reaches LevelAggressive to diversify the
-// fingerprint seen by anti-bot systems.
+// fingerprint seen by anti-bot systems. Note: the returned profile may
+// be a Firefox/Safari persona — only use those for pure HTTP clients;
+// browser contexts should call RotateChromeUA instead.
 func (e *Escalator) RotateUserAgent() *UAProfile {
 	e.mu.Lock()
 	idx := e.rng.Intn(len(uaProfiles))
@@ -255,7 +284,20 @@ func (e *Escalator) RotateUserAgent() *UAProfile {
 	return &uaProfiles[idx]
 }
 
-// GetRandomDesktopUA returns a random desktop UA profile.
+// RotateChromeUA returns a random Chrome-family UA profile suitable
+// for browser contexts (rod/chromedp), where the UA string must stay
+// consistent with the genuine Chrome TLS fingerprint of the launched
+// binary. Firefox/Safari personas are only meaningful for HTTP-only
+// clients where no engine-level fingerprint contradicts them.
+func (e *Escalator) RotateChromeUA() *UAProfile {
+	e.mu.Lock()
+	idx := e.rng.Intn(len(chromeUAProfiles))
+	e.mu.Unlock()
+	return &chromeUAProfiles[idx]
+}
+
+// GetRandomDesktopUA returns a random desktop Chrome UA profile
+// (Chrome-family only — see RotateChromeUA for the rationale).
 func (e *Escalator) GetRandomDesktopUA() *UAProfile {
 	e.mu.Lock()
 	idx := e.rng.Intn(len(desktopUAProfiles))
@@ -373,45 +415,57 @@ var uaProfiles = []UAProfile{
 	},
 }
 
-// desktopUAProfiles contains only desktop browser profiles.
+// desktopUAProfiles contains only desktop Chrome-family profiles.
+// Firefox/Safari personas are intentionally excluded: this pool seeds
+// browser contexts whose TLS stack and JS engine are real Chrome, and
+// a UA string contradicting that engine is a high-confidence mismatch.
 var desktopUAProfiles = []UAProfile{
 	{
 		UserAgent:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
 		SecChUa:         `"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"`,
 		SecChUaMobile:   "?0",
 		SecChUaPlatform: `"Windows"`,
+		FullVersion:     "130.0.6721.117",
+		PlatformVersion: "15.0.0",
+	},
+	{
+		UserAgent:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+		SecChUa:         `"Chromium";v="129", "Google Chrome";v="129", "Not?A_Brand";v="99"`,
+		SecChUaMobile:   "?0",
+		SecChUaPlatform: `"Windows"`,
+		FullVersion:     "129.0.6668.100",
+		PlatformVersion: "15.0.0",
 	},
 	{
 		UserAgent:       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
 		SecChUa:         `"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"`,
 		SecChUaMobile:   "?0",
 		SecChUaPlatform: `"macOS"`,
+		FullVersion:     "130.0.6721.117",
+		PlatformVersion: "10.15.7",
 	},
 	{
 		UserAgent:       "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
 		SecChUa:         `"Chromium";v="130", "Google Chrome";v="130", "Not?A_Brand";v="99"`,
 		SecChUaMobile:   "?0",
 		SecChUaPlatform: `"Linux"`,
-	},
-	{
-		UserAgent:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
-		SecChUa:         `"Not A(Brand";v="8", "Chromium";v="132", "Firefox";v="132"`,
-		SecChUaMobile:   "?0",
-		SecChUaPlatform: `"Windows"`,
-	},
-	{
-		UserAgent:       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
-		SecChUa:         `"Not_A Brand";v="8", "Chromium";v="130", "Safari";v="605.1.15"`,
-		SecChUaMobile:   "?0",
-		SecChUaPlatform: `"macOS"`,
+		FullVersion:     "130.0.6721.117",
+		PlatformVersion: "6.8.0",
 	},
 	{
 		UserAgent:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0",
 		SecChUa:         `"Chromium";v="130", "Microsoft Edge";v="130", "Not?A_Brand";v="99"`,
 		SecChUaMobile:   "?0",
 		SecChUaPlatform: `"Windows"`,
+		FullVersion:     "130.0.2849.68",
+		PlatformVersion: "15.0.0",
 	},
 }
+
+// chromeUAProfiles is the Chrome-family pool used by RotateChromeUA
+// for browser-context rotation (Chrome desktop/mobile + Edge, all
+// engine-consistent with a real Chrome binary).
+var chromeUAProfiles = append([]UAProfile{}, desktopUAProfiles...)
 
 // Reset clears escalation state (useful when restarting a clone).
 func (e *Escalator) Reset() {

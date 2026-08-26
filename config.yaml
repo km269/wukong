@@ -381,6 +381,11 @@ browser:
   # 0 = auto (max(4, NumCPU)); negative disables the global cap.
   global_render_slots: 0
   profile_dir: ""
+  # Pin the fingerprint geography (timezone/languages/Accept-Language)
+  # to the proxy exit region — one of: cn, us-east, us-west, us-central,
+  # gb, de, fr, jp, kr, sg. Empty = infer from the proxy URL
+  # (e.g. user-country-jp credentials / gateway TLD), else random.
+  geo_region: ""
   proxy:
     enabled: false
     pool: []

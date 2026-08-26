@@ -8,6 +8,20 @@ import (
 	"strings"
 )
 
+// isChromiumBinary reports whether the launched binary is an
+// open-source Chromium build (Alpine/Debian distro packages, snap).
+// Distro Chromium strips proprietary codecs (h264/aac — visible via
+// canPlayType) and lags official Chrome by 1-2 majors: both are
+// binary-level downgrades no launcher flag can fix. Microsoft Edge
+// paths are NOT flagged: Edge is a shipping Google-signed browser
+// whose behaviour genuinely matches an Edge persona.
+func isChromiumBinary(path string) bool {
+	if path == "" {
+		return false
+	}
+	return strings.Contains(strings.ToLower(filepath.ToSlash(path)), "chromium")
+}
+
 func isContainerized() bool {
 	if _, err := os.Stat("/.dockerenv"); err == nil {
 		return true

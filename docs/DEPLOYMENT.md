@@ -36,7 +36,7 @@ Wukong（module `github.com/km269/wukong`，Go 1.26）是一个**本地优先**�
 ├─────────────────┼──────────────────┼──────────────────┼───────────────────┤
 │ wukong session  │ wukong server    │ ghcr.io/km269/   │ GitHub Releases   │
 │ wukong run      │ 暴露多协议端口    │   wukong:latest  │ 6 目标 tar.xz/zip │
-│                 │ +:8086 健康检查   │ alpine+chromium  │                   │
+│                 │ +:8086 健康检查   │ debian+chrome     │                   │
 ├─────────────────┴──────────────────┴──────────────────┴───────────────────┤
 │              存储：单 wukong.db (WAL 强制)  +  可选 Redis/COS              │
 │              可观测：OpenTelemetry (OTLP)  +  Langfuse (LLM 专用)         │
@@ -112,8 +112,9 @@ docker pull ghcr.io/km269/wukong:latest-arm64
 | 层 | 内容 |
 |----|------|
 | builder | `golang:1.26-alpine`，`CGO_ENABLED=0 go build -ldflags="-s -w"` |
-| runtime | `alpine:3.21` + `chromium nss freetype harfbuzz ttf-freefont ca-certificates` |
-| 环境变量 | `CHROME_BIN=/usr/bin/chromium-browser`、`CHROMIUM_FLAGS="--no-sandbox --disable-gpu --disable-dev-shm-usage"` |
+| runtime（默认） | `debian:bookworm-slim` + google 官方源 `google-chrome-stable` + `fonts-liberation`（真实 Chrome JA3/编解码器/字体，见 docs/ANTIBOT_GUIDE.md §0.5） |
+| runtime（slim 变体） | `--build-arg CHROME_FLAVOR=slim` → Debian + 发行版 `chromium`（更小，但属反爬降级模式） |
+| 环境变量 | `CHROME_BIN=/usr/local/bin/wukong-browser`（flavor 无关软链）、`CHROMIUM_FLAGS="--disable-dev-shm-usage"` |
 | 目录 | `/data`（数据）、`/out`（输出） |
 | 入口 | `ENTRYPOINT ["wukong"]`、`CMD ["session"]` |
 

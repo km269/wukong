@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
+	"github.com/go-rod/rod/lib/launcher/flags"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/km269/wukong/internal/browser/antibot"
 	"github.com/km269/wukong/internal/browser/behavior"
@@ -42,6 +43,10 @@ type Options struct {
 	// verification is the default; enable only for intranet/.mil hosts
 	// whose certs chain to a non-public root CA.
 	InsecureTLS bool
+	// GeoRegion pins the fingerprint geography (timezone/languages/
+	// Accept-Language) to the proxy exit region. Empty = infer from
+	// Proxy, else random — see stealth.ResolveGeoCode.
+	GeoRegion string
 }
 
 type Pool struct {
@@ -55,6 +60,24 @@ type Pool struct {
 	behaviorSimulator  *behavior.Simulator
 	escalator          *antibot.Escalator
 	currentUA          *antibot.UAProfile
+	// stealthFP is the session-stable browser fingerprint (GPU,
+	// screen, canvas/audio/font seeds, geo persona). Generated once
+	// in New() and never regenerated mid-session: a GPU that changes
+	// between two navigations does not exist and is a classic
+	// cross-page fingerprint-jump signal.
+	stealthFP *stealth.Fingerprint
+	// realChromeVer is the version of the actually-launched binary
+	// (e.g. "132.0.6834.110"), read once via Browser.getVersion and
+	// immutable afterwards. UA personas get their version rewritten
+	// to this value so the spoofed UA, client hints and the binary's
+	// version-linked TLS/JS behaviour can never contradict each other.
+	realChromeVer string
+	// binaryIsChromium marks a distro-Chromium build: Edge personas
+	// are excluded (the binary cannot back Edge-specific behaviour)
+	// and the runtime self-check expects the codec downgrade.
+	binaryIsChromium bool
+	// selfCheckOnce guards the one-shot runtime stealth self-check.
+	selfCheckOnce sync.Once
 
 	refererMu    sync.Mutex
 	refererUseMu sync.Mutex
@@ -95,14 +118,19 @@ func New(ctx context.Context, opts Options) (*Pool, error) {
 	}
 
 	var controlURL string
+	// Launched binary path (empty when connecting to a remote ControlURL):
+	// drives the distro-Chromium downgrade warning and persona filtering.
+	var binPath string
 	if opts.ControlURL != "" {
 		controlURL = opts.ControlURL
 	} else {
 		l := launcher.New()
-		if opts.ChromeBin != "" {
-			l = l.Bin(opts.ChromeBin)
-		} else if chromePath := FindChromePath(); chromePath != "" {
-			l = l.Bin(chromePath)
+		binPath = opts.ChromeBin
+		if binPath == "" {
+			binPath = FindChromePath()
+		}
+		if binPath != "" {
+			l = l.Bin(binPath)
 		}
 		// Use new headless mode (Chrome 112+) which behaves much closer
 		// to a real browser and is less likely to trigger detection.
@@ -115,6 +143,10 @@ func New(ctx context.Context, opts Options) (*Pool, error) {
 		l = l.Set("disable-ipv6", "")
 		l = l.Set("disable-gpu", "")
 		l = l.Set("disable-http-cache", "")
+		// Hide the AutomationControlled blink runtime feature so
+		// navigator.webdriver is undefined regardless of JS patches —
+		// the flag works at the C++ layer and survives reloads.
+		l = l.Set("disable-blink-features", "AutomationControlled")
 		// Only ignore certificate errors when InsecureTLS is enabled —
 		// .mil/.gov sites use DoD certificates not in the standard store.
 		// Otherwise Chrome performs strict (default) verification.
@@ -151,6 +183,12 @@ func New(ctx context.Context, opts Options) (*Pool, error) {
 		l = l.Devtools(false)
 		if opts.Proxy != "" {
 			l = l.Proxy(opts.Proxy)
+			// WebRTC leak prevention under proxying: force WebRTC to
+			// use the proxy instead of raw UDP, which would expose the
+			// real public IP behind the proxy.
+			for _, f := range antibot.WebRTCProtectionFlags() {
+				l = l.Set(flags.Flag(f.Name), f.Value)
+			}
 		}
 		var err error
 		// Retry launch up to 3 times with short delays. The most common failure
@@ -184,12 +222,53 @@ func New(ctx context.Context, opts Options) (*Pool, error) {
 		}
 	}
 
-	browserInstance := rod.New().ControlURL(controlURL).MustConnect()
+	// Distro-Chromium downgrade warning: stripped codecs (canPlayType
+	// answers "") and version lag are binary-level gaps no flag can
+	// close. Point the operator at the real fix once, at startup.
+	binaryIsChromium := isChromiumBinary(binPath)
+	if binaryIsChromium {
+		logutil.Warn("[rod] distro-Chromium binary detected (JA3/codec " +
+			"downgrade mode): install official Google Chrome or set " +
+			"browser.path / CHROME_PATH for full coherence")
+	}
+
+	// Connect via the audit-capable path (see connectCDP): identical
+	// behaviour to ControlURL().MustConnect(), plus optional command
+	// logging under WUKONG_CDP_AUDIT=1. The connection uses a
+	// background context on purpose — its lifecycle belongs to
+	// Browser.Close, not to the caller's cancellation.
+	cdpConn, err := connectCDP(context.Background(), controlURL)
+	if err != nil {
+		return nil, fmt.Errorf("connect to browser: %w", err)
+	}
+	browserInstance := rod.New().Client(cdpConn).MustConnect()
+
+	// Binary version discovery: personas adopt the real version (see
+	// alignUAWithBinary) so the UA claim never contradicts the
+	// version-linked TLS/JS behaviour of the running binary. A failed
+	// probe simply leaves personas at their pool defaults.
+	realVer := ""
+	if v, verr := browserInstance.Version(); verr == nil {
+		realVer = binaryChromeVersion(v.Product)
+	}
 
 	lifeCtx, lifeCancel := context.WithCancel(ctx)
 
 	escalator := antibot.NewEscalator(antibot.DefaultEscalatorConfig())
-	currentUA := escalator.GetRandomDesktopUA()
+	// Geo↔proxy coherence: the fingerprint's timezone/languages must
+	// match the exit IP's geography or GeoIP checks (Cloudflare/
+	// DataDome) flag the session instantly. Explicit config wins,
+	// then best-effort proxy-URL inference, else a random persona.
+	geoCode := stealth.ResolveGeoCode(opts.GeoRegion, opts.Proxy)
+	if geoCode != "" {
+		logutil.Debug("[rod] geo persona pinned",
+			slog.String("geo", geoCode))
+	}
+	// Session-stable fingerprint: one GPU/screen/canvas persona per
+	// browser lifetime; UA rotation rebuilds only the identity part.
+	stealthFP := stealth.GenerateFingerprint(
+		rand.New(rand.NewSource(time.Now().UnixNano())),
+		stealth.GeoProfileByCode(geoCode))
 
 	p := &Pool{
 		opts:              opts,
@@ -198,9 +277,12 @@ func New(ctx context.Context, opts Options) (*Pool, error) {
 		disp:              renderkit.NewDispatcher(opts.Workers),
 		behaviorSimulator: behavior.New(behavior.DefaultConfig()),
 		escalator:         escalator,
-		currentUA:         currentUA,
+		stealthFP:         stealthFP,
+		realChromeVer:     realVer,
+		binaryIsChromium:  binaryIsChromium,
 		refererPages:      make(map[string]*rod.Page),
 	}
+	p.currentUA = p.pickBrowserUA()
 
 	for i := 0; i < opts.Workers; i++ {
 		p.workers = append(p.workers, &worker{idx: i})
@@ -223,14 +305,22 @@ func New(ctx context.Context, opts Options) (*Pool, error) {
 
 func (p *Pool) getCurrentUA() *antibot.UAProfile {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.currentUA
+	ua := p.currentUA
+	p.mu.Unlock()
+	// Adopt the real binary version in both the UA string and the
+	// client-hints persona: version-linked binary behaviour (TLS
+	// details, feature set) makes any static version claim falsifiable.
+	// realChromeVer is immutable after New(), safe to read unlocked.
+	return p.alignUAWithBinary(ua)
 }
 
 func (p *Pool) RotateUA() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.currentUA = p.escalator.RotateUserAgent()
+	// Browser contexts rotate within the Chrome family only (see
+	// pickBrowserUA): a Firefox/Safari persona on a Chromium TLS/JS
+	// engine is an instant contradiction.
+	p.currentUA = p.pickBrowserUA()
 }
 
 // CollectsAssets reports the render-time network tracking capability:
@@ -263,22 +353,22 @@ func (p *Pool) Screenshot(
 	defer page.Close()
 	page = page.Context(ssCtx)
 
+	ua := p.getCurrentUA()
+
 	// Inject stealth scripts to hide automation indicators.
 	if p.opts.Stealth {
 		_, err := proto.PageAddScriptToEvaluateOnNewDocument{
-			Source: stealth.Script,
+			Source: p.buildStealthScript(ua),
 		}.Call(page)
 		if err != nil {
 			logutil.Warn("screenshot stealth injection warning", slog.Any("error", err))
 		}
 	}
 
-	ua := p.getCurrentUA()
 	if ua != nil {
-		uaOverride := proto.NetworkSetUserAgentOverride{
-			UserAgent: ua.UserAgent,
-		}
-		uaOverride.Call(page)
+		// Full CDP override (UA + Accept-Language + UserAgentMetadata)
+		// keeps Sec-CH-UA-* headers coherent with the spoofed UA.
+		p.uaOverrideFor(ua).Call(page)
 
 		proto.NetworkSetExtraHTTPHeaders{
 			Headers: proto.NetworkHeaders{
@@ -332,9 +422,9 @@ func (p *Pool) renderJob(w *worker, job *renderkit.RenderJob) {
 			return
 		}
 		if p.opts.Stealth {
-			// 注入我们增强的 stealth 脚本
+			// 注入我们增强的 stealth 脚本（含会话级稳定指纹 + UA 身份段）
 			_, err := proto.PageAddScriptToEvaluateOnNewDocument{
-				Source: stealth.Script,
+				Source: p.buildStealthScript(p.getCurrentUA()),
 			}.Call(page)
 			if err != nil {
 				logutil.Warn("stealth script injection warning", slog.Any("error", err))
@@ -391,16 +481,9 @@ func (p *Pool) renderJob(w *worker, job *renderkit.RenderJob) {
 
 	// Simulate a real browser typing URL in the address bar.
 	// Do NOT set Sec-Fetch-* headers manually — Chrome sets these automatically.
-	// Setting them manually can trigger Chrome's security checks and cause
-	// ERR_BLOCKED_BY_CLIENT. Use the same minimal-header pattern as
-	// downloadAssetViaNavigation for consistency.
-	uaOverride := proto.NetworkSetUserAgentOverride{
-		UserAgent: ua.UserAgent,
-	}
-	if ua.SecChUa != "" {
-		uaOverride.AcceptLanguage = "en-US,en;q=0.9"
-	}
-	uaOverride.Call(page)
+	// The full override carries Accept-Language and UserAgentMetadata so
+	// the Sec-CH-UA-* headers stay coherent with the spoofed UA string.
+	p.uaOverrideFor(ua).Call(page)
 
 	headers := proto.NetworkHeaders{
 		"Accept":                    gson.New("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"),
@@ -409,6 +492,12 @@ func (p *Pool) renderJob(w *worker, job *renderkit.RenderJob) {
 	proto.NetworkSetExtraHTTPHeaders{
 		Headers: headers,
 	}.Call(page)
+
+	// CDP timing jitter: a real user takes a moment between opening a
+	// tab and typing the URL. Breaking the fixed setup→navigate burst
+	// also breaks the "connect then fire everything" command rhythm
+	// that anti-bot reads as a driving-style signature.
+	time.Sleep(time.Duration(p.behaviorSimRand(80, 250)) * time.Millisecond)
 
 	if err := page.Navigate(job.URL); err != nil {
 		job.ResultCh <- renderkit.RenderResultOrErr{Err: fmt.Errorf("navigate: %w", err)}
@@ -422,6 +511,13 @@ func (p *Pool) renderJob(w *worker, job *renderkit.RenderJob) {
 
 	if p.opts.Settle > 0 {
 		page.WaitRequestIdle(p.opts.Settle, nil, nil, nil)
+	}
+
+	// One-shot runtime coherence self-check (debug diagnostics):
+	// verifies the baked-in persona survived a real page load and that
+	// the binary's capabilities match the persona's claims.
+	if p.opts.Stealth {
+		p.selfCheckOnce.Do(func() { p.runStealthSelfCheck(page) })
 	}
 
 	// 如果启用了行为模拟
@@ -758,9 +854,9 @@ func (p *Pool) EnableStealth() error {
 			if err != nil {
 				continue
 			}
-			// 注入我们增强的 stealth 脚本
+			// 注入我们增强的 stealth 脚本（含会话级稳定指纹 + UA 身份段）
 			_, err = proto.PageAddScriptToEvaluateOnNewDocument{
-				Source: stealth.Script,
+				Source: p.buildStealthScript(p.getCurrentUA()),
 			}.Call(page)
 			if err != nil {
 				logutil.Warn("stealth script injection warning", slog.Any("error", err))
@@ -807,7 +903,7 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 	// Inject stealth scripts to hide automation indicators.
 	if p.opts.Stealth {
 		_, err := proto.PageAddScriptToEvaluateOnNewDocument{
-			Source: stealth.Script,
+			Source: p.buildStealthScript(p.getCurrentUA()),
 		}.Call(page)
 		if err != nil {
 			logutil.Warn("DownloadAsset stealth injection warning", slog.Any("error", err))
@@ -816,9 +912,7 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 
 	ua := p.getCurrentUA()
 	if ua != nil {
-		proto.NetworkSetUserAgentOverride{
-			UserAgent: ua.UserAgent,
-		}.Call(page)
+		p.uaOverrideFor(ua).Call(page)
 	}
 
 	// Enable downloads for asset download pages.
@@ -1709,13 +1803,9 @@ func (p *Pool) getOrCreateRefererPage(referer string, ua *antibot.UAProfile) *ro
 	// Do NOT set Sec-Fetch-* headers manually — Chrome sets these automatically,
 	// matching the pattern in downloadAssetViaNavigation for consistency.
 	if ua != nil {
-		uaOverride := proto.NetworkSetUserAgentOverride{
-			UserAgent: ua.UserAgent,
-		}
-		if ua.SecChUa != "" {
-			uaOverride.AcceptLanguage = "en-US,en;q=0.9"
-		}
-		uaOverride.Call(rp)
+		// Full override keeps Sec-CH-UA-* headers coherent with the
+		// spoofed UA string (Accept-Language follows the geo persona).
+		p.uaOverrideFor(ua).Call(rp)
 	}
 
 	minimalHeaders := proto.NetworkHeaders{

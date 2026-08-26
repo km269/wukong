@@ -1,13 +1,14 @@
 # 浏览器引擎与反反爬技术指南
 
 > 双后端: Rod (优先) + Chromedp (备用) | 反爬升级: 5 级递进
-> 隐身欺骗: 15 类指纹伪造 | WAF 识别: 22 种签名 | UA 池: 15 种配置 (另 6 种桌面专用)
-> 探测维度: 5 维并行 | TLS 指纹: 5 种配置 | 行为模拟: 贝塞尔曲线鼠标
+> 隐身欺骗: 会话级稳定指纹 (16 类) | WAF 识别: 22 种签名 | UA 池: 浏览器上下文 Chrome-only
+> 探测维度: 5 维并行 | TLS 指纹: 3 种真实配置 + WebRTC 防泄漏 | 行为模拟: 贝塞尔曲线鼠标 (trusted CDP 输入)
 
 ---
 
 ## 目录
 
+0. [2026 检测三层战场与本系统对策](#0-2026-检测三层战场与本系统对策)
 1. [浏览器双后端架构](#1-浏览器双后端架构)
 2. [Chrome 检测与容器适配](#2-chrome-检测与容器适配)
 3. [API 发现与分页检测](#3-api-发现与分页检测)
@@ -25,6 +26,80 @@
 15. [错误信号分类 (errsignal)](#15-错误信号分类-errsignal)
 16. [配置参考](#16-配置参考)
 17. [常见问题](#17-常见问题)
+
+---
+
+## 0. 2026 检测三层战场与本系统对策
+
+现代反爬（Cloudflare/Akamai/DataDome 级）已不再依赖单一 JS 探针，而是在**三个互相独立的层面**同时采集证据。任何一层穿帮即整场失败：
+
+### 0.1 第一层：CDP 协议指纹（"驾驶风格"）
+
+**检测原理**：自动化驱动（Playwright/Puppeteer/rod）通过 CDP 控制浏览器，启动时会发送 `Runtime.enable`、`Target.setAutoAttach`、`Page.addScriptToEvaluateOnNewDocument` 等命令。这些命令的**时序、参数组合、发送节奏**构成"驾驶风格"指纹——服务端在 JS 挑战中采集 CDP 注入痕迹（如 `Runtime.enable` 引起的 console binding、`debugger` 语义变化），无需检查任何 `navigator` 属性即可判定自动化。
+
+**本系统对策**：
+
+| 对策 | 实现 |
+|------|------|
+| 最小 CDP 命令面 | rod 后端仅启用必要 domain（Network 资产追踪、Page 渲染），不发送 Playwright 式的全套 auto-attach |
+| `AutomationControlled` blink 特性禁用 | `--disable-blink-features=AutomationControlled`（双后端统一，rod 侧 0.3.2 补齐），C++ 层抹除 webdriver 痕迹 |
+| 注入脚本原生码掩码 | 所有补丁函数经 `_mask()` + WeakMap 包装，`Function.prototype.toString` 仍返回 `[native code]`，检测方无法从源码发现补丁 |
+| 真实 Chrome 二进制 | `FindChromePath()` 优先系统 Chrome（非 Chromium），配合完整 UA/client-hints 身份 |
+
+**残余风险**：CDP 协议层指纹无法被 JS 补丁修复，只能靠"少发命令 + 系统二进制"降低显著性。基准测试中 nodriver（绕过 CDP 直改源码）28/0 硬封优于 Playwright 补丁系（24/5），印证此层是当前天花板。
+
+### 0.2 第二层：TLS / JA3 指纹
+
+**检测原理**：Chromium 与系统 Chrome 的 TLS ClientHello（密码套件顺序、GREASE 值、扩展列表）与 HTTP/2 SETTINGS 帧存在微妙差异；Go 标准库 TLS 与 Chrome 差异更大。Cloudflare 在 **TCP 握手阶段**就完成首次分类——请求还没到 HTTP 层，JS 层伪装再完美也已出局。
+
+**本系统对策**：
+
+| 对策 | 实现 |
+|------|------|
+| HTTP 客户端 UTLS | `proxy_pool`/HTTP 抓取路径用 `utls.HelloChrome_Auto` 复制 Chrome ClientHello（见 §7/§12） |
+| 系统 Chrome 渲染路径 | 浏览器上下文的 TLS 由 Chrome 二进制本身发出，天然一致 |
+| 诚实边界 | launcher flag **无法**修复 Chromium↔Chrome 的 ClientHello 微差——`tls_profile.go` 的 3 个 profile 只做 TLS 版本/特性调节，0.3.2 已删除两个含伪造 feature 名（`AsyncTLS`/`EncryptedClientHello`）的假 profile。要 JA3 完全一致，用系统 Chrome（`browser.path` / `ChromeBin`） |
+
+### 0.3 第三层：行为统计建模
+
+**检测原理**：不再检测"鼠标是否移动"，而是对贝塞尔曲线特征、键盘停顿分布、滚动加速度模式做**统计级一致性检查**：完美直线是机器、每次完全相同的曲线也是机器、`isTrusted=false` 的事件更是机器。合成 `dispatchEvent` 一秒钟穿帮。
+
+**本系统对策**：
+
+| 对策 | 实现 |
+|------|------|
+| trusted 输入事件 | `simulateHumanBehavior()` 经 CDP `Input.dispatchMouseEvent` 发送鼠标/滚轮事件，页面侧 `isTrusted=true`（见 §11） |
+| 贝塞尔 + 微颤 | `behavior` 包三次贝塞尔路径 + 逐点速度缓动 + 随机微停顿，路径与节奏均不重复 |
+| 滚动加速度模型 | 加速→匀速→减速三角延迟 profile，滚轮以 80-120px/格的真实格距发送 |
+| 阅读式停顿 | 页面加载后 150-500ms 随机悬停，模拟人类扫读 |
+
+### 0.4 贯穿三层的横切原则：一致性
+
+三层之上还有一条铁律——**任何自相矛盾的信号组合都比单一弱信号更致命**：
+
+| 一致性维度 | 0.3.2 实现 |
+|-----------|-----------|
+| UA ↔ Client Hints ↔ Platform | `NetworkSetUserAgentOverride` 携带完整 `UserAgentMetadata`；脚本内 `navigator.platform`/`userAgentData` 与 UA 同步轮换（见 §6.4/§10） |
+| 时区 ↔ 语言 ↔ Geo ↔ **代理出口** | `Fingerprint.Geo` persona 按 `browser.geo_region` 配置或代理解析选定（0.3.2 后续优化），`Intl`/`Date`/`Accept-Language` 全部跟随（DST 由 `Intl.DateTimeFormat` 实时推算）。选择优先级：**显式配置 > 代理 URL 推断 > 随机**——`stealth.GeoCodeFromProxyURL` 解析住宅代理凭据中的地区参数（`user-country-jp`/`cc=kr`/`region-de` 等）与网关主机 TLD（`.jp`/`.uk→gb`）；无法判断时宁可随机也不乱猜 |
+| 指纹跨页稳定 | 会话级种子（Canvas/Audio/Font），不再每文档重掷 |
+| UA 家族 ↔ 引擎 | 浏览器上下文 Chrome-only 池；Firefox/Safari persona 只给 HTTP 客户端 |
+| 代理 IP ↔ 环境坐标 | 代理启用时叠加 WebRTC 防泄漏 flags，防 UDP 绕过代理暴露真实 IP |
+
+### 0.5 残余风险攻坚（0.3.2 P0 已落地）
+
+两个"JS/flag 不可修复"项的原子级拆解与攻坚状态：
+
+| 子向量 | 可修性 | 状态 |
+|--------|--------|------|
+| localhost DevTools 端口探测（CDP 指纹中唯一页面 JS 可直接探测的向量） | 需 `--remote-debugging-pipe`，rod v0.116 **不支持** pipe 传输（已核实：transport 仅 websocket） | **接受残余**：随机高端口 + 仅监听 127.0.0.1 + Chrome 111+ Origin 校验，检测方须全端口扫描，成本高误报高，属概率型低风险。跟踪 rod 上游 pipe 支持 |
+| CDP 命令时序"驾驶风格" | 命令面收敛 + 时机抖动 | **已落地**：rod 惰性 enable 架构使本系统命令面天然小于 Playwright（`WaitLoad` 走 `Runtime.evaluate` 而非 `Page.enable`；从不发送 `Runtime.enable`/`Target.setAutoAttach`）；renderJob 在 setup→navigate 之间加 80-250ms 随机抖动打散固定节奏 |
+| UA↔二进制版本矛盾（版本可证伪） | 版本对齐引擎 | **已落地**：`New()` 经 `Browser.getVersion` 读取真实二进制版本（如 132.0.6834.83），`alignUAWithBinary` 把 persona 的 UA 串改写为 `Chrome/132.0.0.0`（真实 Chrome 冻结次版本号格式）+ `FullVersion` 采用完整真版本——伪装版本号不如采用真版本号，版本关联的 TLS/JS 行为无法说谎 |
+| Chromium↔Chrome JA3 微差 + 编解码器差异 | 仅二进制替换可修 | **双重落地**：①启动告警——`isChromiumBinary` 检测发行版 Chromium（Alpine/Debian/snap 包）即 warn"JA3/codec 降级模式"并指引 `browser.path`/`CHROME_PATH`；②容器基座——Dockerfile 默认 Debian + google-chrome-stable 官方源（`CHROME_FLAVOR=slim` 保留发行版 Chromium 变体）。运行时自检（`runStealthSelfCheck`）用 `canPlayType('video/mp4; codecs="avc1"')` 复核——官方 Chrome 返回 `probably`、剥离编解码器的 Chromium 返回空串 |
+| 发行版 Chromium 上的 Edge persona | persona 过滤 | **已落地**：`pickBrowserUA` 在 `binaryIsChromium` 时剔除 `Edg/` persona（该构建无法支撑 Edge 专有行为，声称即穿帮）；官方 Chrome 二进制上 Edge persona 照常可用 |
+| CDP 命令面不可见 | 审计模式 | **已落地**：`WUKONG_CDP_AUDIT=1` 时 `auditClient`（[cdp_audit.go](../internal/browser/rodbackend/cdp_audit.go)）经 rod `Client()` 注入点记录每条命令的方法名/时长（debug 级，不记 payload）——命令序列即驾驶风格审计所需，先可见再收敛 |
+| nodriver 级 CDP 绕过（28/0 硬封基准） | 自研 rod transport 替代品 | **明确不做**：工程量等于重写并永久维护协议层，收益仅在最严站点从 ~25→28；硬封站点走既有逃生通道（`--no-headless` 人工过 Turnstile + 住宅代理池） |
+
+另：`no-pings`/`disable-component-update`/`disable-background-networking` 使浏览器零后台流量（真实 Chrome 会发 Safe Browsing ping 等）——"过分安静"是已知弱信号，属性能/可控性与仿真度的有意权衡，文档明示不改。
 
 ---
 
@@ -384,27 +459,25 @@ ShouldRetry(reason)? ──否──→ 放弃
 
 ### 6.4 UA 轮换
 
-15 个真实浏览器配置的 UA 池（`uaProfiles`，含桌面与移动平台）：
+两套池分工（0.3.2 起浏览器上下文严格 Chrome-only）：
 
-| 浏览器 | 平台 | 版本示例 |
-|--------|------|---------|
-| Chrome | Windows / macOS / Linux / Android | 128 / 129 / 130 |
-| Firefox | Windows / macOS | 132 |
-| Safari | macOS / iPhone | 18 |
-| Edge | Windows / macOS | 130 |
-| Opera | Windows | 114 |
-| Brave | Windows | 1.69 |
+| 池 | 内容 | 使用方 |
+|----|------|--------|
+| `uaProfiles` (15 个) | Chrome/Firefox/Safari/Edge/Opera/Brave × 多平台 | HTTP 客户端（无 JS 引擎，无 TLS-引擎耦合约束） |
+| `chromeUAProfiles` (5 个) | Win Chrome 130/129、Mac Chrome 130、Linux Chrome 130、Win Edge 130——均带 `FullVersion`/`PlatformVersion` | 浏览器上下文（rod + chromedp） |
 
 ```go
-// 轮换触发: 升级到 LevelAggressive 时自动轮换
+// 浏览器上下文轮换: RotateChromeUA() 只从 Chrome-only 池取
+// (Gecko/WebKit UA 配 Chromium TLS/JS 引擎是即时矛盾, 见 §0.4)
+func (e *Escalator) RotateChromeUA() *UAProfile
+
+// 全量池轮换: HTTP 客户端专用
 func (e *Escalator) RotateUserAgent() *UAProfile
 
-// 桌面专用池: desktopUAProfiles 共 6 个
-// (Chrome Win/macOS/Linux、Firefox Win、Safari macOS、Edge Win)
-func (e *Escalator) GetRandomDesktopUA() *UAProfile
+// 桌面池随机: GetRandomDesktopUA()
 ```
 
-**一致性原则**：User-Agent 与 Sec-CH-UA、Sec-CH-UA-Mobile、Sec-CH-UA-Platform 头必须匹配，不一致的指纹会被反爬系统立即标记。
+**三方一致性原则**：UA 字符串 ↔ `Sec-CH-UA`/`Sec-CH-UA-Mobile`/`Sec-CH-UA-Platform` 头 ↔ `navigator.userAgentData`/`navigator.platform` 必须同时轮换。rod 后端经 `NetworkSetUserAgentOverride` 携带完整 `UserAgentMetadata`（Brands/FullVersionList/Platform/PlatformVersion/Architecture/Bitness），CDP 层与注入脚本层共享同一 `UAIdentity`，任何一处不一致都是高置信度 bot 信号。
 
 ### 6.5 每 URL 重试追踪
 
@@ -420,19 +493,43 @@ type Escalator struct {
 
 ## 7. TLS 指纹配置 (tls_profile)
 
-### 7.1 五种 TLS 配置
+### 7.1 三种真实 TLS 配置
 
-`tls_profile.go` 定义 5 种 TLS ClientHello 指纹：
+`tls_profile.go` 定义 3 种 TLS 版本/特性调节 profile（0.3.2 起口径）：
 
 | 配置 | 说明 | 适用等级 |
 |------|------|---------|
-| `chrome_modern` | 现代 Chrome TLS 指纹 | LevelStealth (默认) |
-| `chrome_conservative` | 保守 Chrome 指纹 | LevelFlags |
+| `chrome_modern` | 现代 Chrome TLS 特性（TLS1.3 优先） | LevelStealth (默认) |
+| `chrome_conservative` | 保守兼容指纹 | LevelFlags |
 | `legacy_compatible` | 传统兼容指纹 | LevelNone |
-| `aggressive` | 激进多变性指纹 | LevelAggressive |
-| `privacy` | 隐私优化指纹 | 特殊场景 |
 
-### 7.2 UTLS 集成
+> **0.3.2 清理**：删除了 `chrome_aggressive`/`chrome_privacy` 两个 profile——其 `AsyncTLS`/`EncryptedClientHello` 并非真实 Chrome feature 名，无效 flags 只增加命令行指纹噪音。
+
+### 7.2 WebRTC 防泄漏 Flags
+
+`WebRTCProtectionFlags()` 在代理启用时叠加到 launcher：
+
+```
+--force-webrtc-ip-handling-policy=disable_non_proxied_udp
+--webrtc-ip-handling-policy=disable_non_proxied_udp
+```
+
+防止 WebRTC 经原始 UDP 直连绕过 HTTP 代理，把真实公网 IP 暴露给 STUN 探测（见 §0.4 一致性原则）。
+
+### 7.3 诚实边界：launcher flag 无法修复 JA3
+
+Chromium 二进制与系统 Chrome 的 TLS ClientHello（密码套件顺序、GREASE、HTTP/2 SETTINGS 帧）存在**编译层差异**，任何 `--flag` 都无法抹平。基准数据（Cloudflare 严管站点 30 URL）：
+
+| 驱动 | 通过 | 硬封 |
+|------|------|------|
+| nodriver（CDP 绕过 + 源码级补丁） | 28 | 0 |
+| CloakBrowser（humanize+geoip） | 26 | - |
+| Patchright + `channel="chrome"`（系统 Chrome） | 25 | - |
+| Playwright 原生 | 24 | 5 |
+
+结论：**系统 Chrome 二进制 > 一切 JS 补丁**。本系统 `FindChromePath()` 默认优先系统安装的 Chrome（`browser.path` 可显式指定），这是 JA3 一致性的第一道保障；UTLS 只用于纯 HTTP 客户端路径（见 §12.4）。
+
+### 7.4 UTLS 集成（HTTP 客户端路径）
 
 使用 `utls` 库模拟真实浏览器的 TLS ClientHello：
 
@@ -581,104 +678,161 @@ if matchServer(sig, resp)   { confidence += 0.2 }
 
 ## 10. 隐身指纹伪造 (Stealth)
 
-### 10.1 15 类指纹伪造
+### 10.1 架构：会话级稳定指纹 + 模板渲染
 
-`internal/browser/stealth/stealth.go` (约 500 行) 实现 15 类浏览器指纹伪造：
+0.3.2 重构后，stealth 不再是静态脚本常量，而是**两级结构**：
+
+```
+Go 侧 (fingerprint.go)                      JS 侧 (stealth.go 模板)
+─────────────────────                       ──────────────────────
+GenerateFingerprint(rng, geo)               BuildScript(fp, uaIdentity)
+  │  会话开始时生成一次                        │  strings.NewReplacer 烘入
+  │  · Geo persona (10 地区)                  │  __CANVAS_SEED__ __TZ__
+  │  · 屏幕/任务栏保留高度                     │  __LANGS__ __SCREEN_W__
+  │  · GPU (6 个 ANGLE 真实格式)              │  __GPU_VENDOR__ __GPU_RENDERER__
+  │  · 核数/内存/RTT/电池                      │  __UA_SECTION__ (可选身份段)
+  │  · Canvas/Audio/Font 种子                  ▼
+  ▼                                        Page.addScriptToEvaluateOnNewDocument
+Pool.stealthFP (会话持有)                    (每个新文档加载前执行)
+  │  UA 轮换只重建身份段,
+  │  硬件指纹永不重掷
+```
+
+**为什么指纹必须会话级稳定**：GPU 在两次导航之间"变化"的浏览器不存在。旧实现每个新文档重掷随机值，跨页对比即暴露"指纹跳变"——这本身就是高置信度自动化信号。噪声用 mulberry32 种子 PRNG：同一会话内确定可复现，噪声不再制造新的不一致。
+
+### 10.2 16 类指纹伪造清单
+
+`internal/browser/stealth/`（`fingerprint.go` + `stealth.go`）实现 16 类伪装：
 
 ```
 注入方式: Page.addScriptToEvaluateOnNewDocument
 (在每个新文档加载前执行, 确保 DOM 构建前完成)
 
-┌─────────────────────────────────────────────────────┐
-│                  Stealth (15 类指纹)                 │
-├──────────────┬──────────────────────────────────────┤
-│ 1. webdriver │ navigator.webdriver → false          │
-│    隐藏      │ (最基础的反检测)                       │
-├──────────────┼──────────────────────────────────────┤
-│ 2. chrome    │ window.chrome.runtime 模拟           │
-│    .runtime  │ (真实 Chrome 有此对象)                │
-├──────────────┼──────────────────────────────────────┤
-│ 3. plugins   │ navigator.plugins 模拟真实插件列表     │
-├──────────────┼──────────────────────────────────────┤
-│ 4. languages │ navigator.languages 设置真实语言       │
-├──────────────┼──────────────────────────────────────┤
-│ 5. permissions│ Permissions API 查询返回正确结果      │
-├──────────────┼──────────────────────────────────────┤
-│ 6. hardware  │ navigator.hardwareConcurrency        │
-│ Concurrency  │ 设置合理 CPU 核心数                    │
-├──────────────┼──────────────────────────────────────┤
-│ 7. device    │ navigator.deviceMemory               │
-│    Memory    │ 设置合理内存大小                       │
-├──────────────┼──────────────────────────────────────┤
-│ 8. connection│ navigator.connection.rtt             │
-│    RTT       │ 设置网络往返时间                       │
-├──────────────┼──────────────────────────────────────┤
-│ 9. screen    │ screen.width/height                  │
-│    size      │ 设置常见屏幕分辨率                     │
-├──────────────┼──────────────────────────────────────┤
-│ 10. canvas   │ Canvas 指纹添加微小噪声                │
-│     noise    │ (每次生成略有不同, 防指纹追踪)         │
-├──────────────┼──────────────────────────────────────┤
-│ 11. WebGL    │ WebGL vendor/renderer 伪装            │
-│     vendor   │ (8 种 GPU 配置可选)                   │
-├──────────────┼──────────────────────────────────────┤
-│ 12. Audio    │ AudioContext 指纹随机化               │
-│ Context      │ (修改采样结果)                        │
-├──────────────┼──────────────────────────────────────┤
-│ 13. Inter-   │ IntersectionObserver 模拟             │
-│     section  │ (确保懒加载正常工作)                   │
-│ Observer     │                                      │
-├──────────────┼──────────────────────────────────────┤
-│ 14. Battery  │ Battery API 模拟                     │
-│     API      │ (提供合理的电池信息)                   │
-├──────────────┼──────────────────────────────────────┤
-│ 15. Timezone │ 时区一致性设置                         │
-│              │ (与 IP 地理位置/语言匹配)              │
-└──────────────┴──────────────────────────────────────┘
+┌──────────────────────┬───────────────────────────────────────┐
+│ 0. 原生码掩码         │ _mask(fn,name) + WeakMap: 所有补丁函数 │
+│    (§0 新增)         │ Function.prototype.toString 仍返回      │
+│                      │ "[native code]", 源码级检测失效         │
+├──────────────────────┼───────────────────────────────────────┤
+│ 1. webdriver 隐藏    │ navigator.webdriver → undefined        │
+├──────────────────────┼───────────────────────────────────────┤
+│ 2. chrome.runtime    │ window.chrome.runtime 模拟             │
+├──────────────────────┼───────────────────────────────────────┤
+│ 3. plugins           │ navigator.plugins 模拟真实插件列表     │
+│                      │ (PluginSet 由指纹种子选定, 会话稳定)     │
+├──────────────────────┼───────────────────────────────────────┤
+│ 4. languages         │ navigator.languages ← Geo persona      │
+│                      │ (如 jp 地区 → ["ja-JP","ja","en-US"])  │
+├──────────────────────┼───────────────────────────────────────┤
+│ 5. permissions       │ Permissions API 查询返回正确结果        │
+├──────────────────────┼───────────────────────────────────────┤
+│ 6. hardware          │ navigator.hardwareConcurrency          │
+│    Concurrency       │ ← 指纹核数池 (4/6/8/12/16)             │
+├──────────────────────┼───────────────────────────────────────┤
+│ 7. deviceMemory      │ navigator.deviceMemory ← 指纹内存池     │
+├──────────────────────┼───────────────────────────────────────┤
+│ 8. connection RTT    │ navigator.connection.rtt ← 指纹网络池   │
+├──────────────────────┼───────────────────────────────────────┤
+│ 9. screen size +     │ screen.* ← 指纹屏幕池 +                │
+│    outerWidth/Height │ window.outerWidth/outerHeight          │
+│    (§9 扩展)         │ (headless 下报 0 的经典泄漏点)          │
+├──────────────────────┼───────────────────────────────────────┤
+│ 10. canvas noise     │ toDataURL/getImageData 按种子确定性    │
+│                      │ 扰动 (同会话同画布同噪声)               │
+├──────────────────────┼───────────────────────────────────────┤
+│ 11. WebGL vendor     │ UNMASKED_VENDOR/RENDERER ← 6 个 ANGLE  │
+│                      │ 真实格式 GPU 配置, MAX_TEXTURE_SIZE 联动 │
+├──────────────────────┼───────────────────────────────────────┤
+│ 12. AudioContext     │ AnalyserNode 频率数据按种子确定性随机化  │
+├──────────────────────┼───────────────────────────────────────┤
+│ 13. 字体度量噪声      │ measureText.width 按 hash(font+text,   │
+│    (§13 新增)        │ FontSeed) 加 ±0.02px 确定性抖动         │
+│                      │ (字体枚举指纹此前完全裸奔)              │
+├──────────────────────┼───────────────────────────────────────┤
+│ 14. Intersection-    │ IntersectionObserver 模拟 (懒加载)      │
+│     Observer/Battery │ + Battery API 合理读数                 │
+├──────────────────────┼───────────────────────────────────────┤
+│ 15. 时区 (DST 正确)  │ Intl.DateTimeFormat.formatToParts 实时 │
+│    (§16b 重写)       │ 推算偏移, 而非静态表 (夏令时自动正确)    │
+├──────────────────────┼───────────────────────────────────────┤
+│ 16. UA 身份段        │ navigator.platform + userAgentData     │
+│    (§16 新增)        │ (brands/mobile/platform/               │
+│                      │  getHighEntropyValues 高熵完整实现)     │
+└──────────────────────┴───────────────────────────────────────┘
 ```
 
-### 10.2 WebGL GPU 配置 (8 种)
+### 10.3 Geo 一致 Persona
+
+10 个地区 persona，语言/时区/UTC 偏移作为一个整体选定（`fingerprint.go`）：
+
+| 地区代码 | 语言 | 时区 |
+|---------|------|------|
+| cn | zh-CN, zh, en-US | Asia/Shanghai |
+| us-east / us-west / us-central | en-US, en | America/New_York 等 |
+| gb | en-GB, en | Europe/London |
+| de | de-DE, de, en-US | Europe/Berlin |
+| fr | fr-FR, fr, en-US | Europe/Paris |
+| jp | ja-JP, ja, en-US | Asia/Tokyo |
+| kr | ko-KR, ko, en-US | Asia/Seoul |
+| sg | en-SG, en, zh-CN | Asia/Singapore |
+
+联动链路：`Fingerprint.Geo` → 脚本 `__LANGS__`/`__TZ__`（navigator.languages、Intl、Date）→ CDP `AcceptLanguage` → 与代理出口 IP 的地理期望对齐。地区选择：`browser.geo_region` 显式指定 > `GeoCodeFromProxyURL` 从代理 URL 推断（凭据内 `country=`/`cc-`/`region=` 参数、网关 TLD；`uk→gb`、`us→us-east` 归一化）> 随机。代理已启用却推断不出地区时打日志提示配置 `geo_region`。
+
+### 10.4 WebGL GPU 配置 (6 种 ANGLE 真实格式)
+
+```go
+// 6 个 ANGLE 真实格式 GPU 配置 (fingerprint.go gpuSpecs),
+// 会话开始时选定一个, MAX_TEXTURE_SIZE 联动
+var gpuSpecs = []GPUSpec{
+    {Vendor: "Google Inc. (Intel)",  Renderer: "ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)", MaxTex: 16384},
+    {Vendor: "Google Inc. (Intel)",  Renderer: "ANGLE (Intel, Intel(R) Iris(R) Xe Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)", MaxTex: 16384},
+    {Vendor: "Google Inc. (NVIDIA)", Renderer: "ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)", MaxTex: 16384},
+    {Vendor: "Google Inc. (NVIDIA)", Renderer: "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0, D3D11)", MaxTex: 16384},
+    {Vendor: "Google Inc. (AMD)",    Renderer: "ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)", MaxTex: 8192},
+    {Vendor: "Google Inc. (AMD)",    Renderer: "ANGLE (AMD, AMD Radeon RX 580 Direct3D11 vs_5_0 ps_5_0, D3D11)", MaxTex: 16384},
+}
+```
+
+> 旧实现的 8 配置池混入了 macOS 专属的 `OpenGL Engine` renderer 与 `VMware SVGA II`（虚拟机显卡——在非虚拟机 persona 上是矛盾信号），且每次注入随机重选。新池统一为 Windows ANGLE/D3D11 格式（与 Windows 主流 persona 一致），会话级稳定。
+
+### 10.5 Canvas 噪声原理（会话级种子）
 
 ```javascript
-// 8 种常见 GPU 配置, 随机选择一种 (vendor / renderer 均取自真实设备)
-const gpuConfigs = [
-    {vendor:"Google Inc. (Intel)",    renderer:"ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)"},
-    {vendor:"Google Inc. (NVIDIA)",   renderer:"ANGLE (NVIDIA, NVIDIA GeForce GTX 1650 Direct3D11 vs_5_0 ps_5_0, D3D11)"},
-    {vendor:"Google Inc. (AMD)",      renderer:"ANGLE (AMD, AMD Radeon(TM) Graphics Direct3D11 vs_5_0 ps_5_0, D3D11)"},
-    {vendor:"Intel Inc.",             renderer:"Intel(R) Iris(TM) Plus Graphics"},
-    {vendor:"NVIDIA Corporation",     renderer:"NVIDIA GeForce RTX 3060/PCIe/SSE2"},
-    {vendor:"ATI Technologies Inc.",  renderer:"AMD Radeon Pro 5500M OpenGL Engine"},
-    {vendor:"Microsoft Corporation",  renderer:"Microsoft Basic Display Adapter"},
-    {vendor:"VMware, Inc.",           renderer:"VMware SVGA II"},
-];
-// 同时保持 MAX_TEXTURE_SIZE 与所选 GPU 一致
+// Canvas 指纹噪声: 对 toDataURL/getImageData 输出按 CanvasSeed
+// 确定性扰动 —— 同一会话内同一画布输出恒定 (跨页不跳变),
+// 不同会话之间不同 (不可跨站关联)
+const seeded = mulberry32(CANVAS_SEED);
+// 像素级 ±1 微扰 + getImageData 读取扰动
 ```
 
-### 10.3 Canvas 噪声原理
-
-```javascript
-// Canvas 指纹噪声: 对 toDataURL/toBlob 输出添加微小扰动
-const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
-HTMLCanvasElement.prototype.toDataURL = function(...args) {
-    const ctx = this.getContext('2d');
-    if (ctx) {
-        // 获取原始像素数据
-        const imageData = ctx.getImageData(0, 0, this.width, this.height);
-        // 对少量像素添加 ±1 的微小变化
-        for (let i = 0; i < imageData.data.length; i += 4) {
-            // 随机选择的像素, 微小扰动
-        }
-        ctx.putImageData(imageData, 0, 0);
-    }
-    return originalToDataURL.apply(this, args);
-};
-```
+> 与旧实现的区别：旧版用 `Math.random()`，同一会话每次读取结果都不同，页面重绘一次指纹就变——检测方仅需两次采样即可判定噪声注入。种子化后噪声在会话内是**常量函数**，与真实设备的确定性输出行为一致。
 
 ---
 
 ## 11. 行为模拟 (Behavior)
 
-### 11.1 贝塞尔曲线鼠标移动
+### 11.1 trusted 输入：合成 JS 事件 → CDP 输入通道（0.3.2）
+
+**核心问题**：合成事件（`element.dispatchEvent(new MouseEvent(...))`）的 `isTrusted` 属性**永远为 false**，且不可伪造（浏览器内核只对真实输入通道置 true）。这是最著名的自动化 tell，任何依赖合成事件的"行为模拟"在 `isTrusted` 检查面前一秒钟穿帮。
+
+**本系统实现**（`rodbackend/identity.go` 的 `simulateHumanBehavior()`）：
+
+```
+行为链路 (全部经 CDP Input domain, isTrusted=true):
+
+1. 贝塞尔鼠标扫掠
+   behavior.MouseMove(start, end) 生成路径点
+   → 逐点 page.Mouse.MoveTo(pt)     [Input.dispatchMouseEvent]
+   → 步进间隔 = 总时长/点数 (速度缓动)
+   → 150-500ms 阅读式悬停
+
+2. 缓动滚轮
+   总滚动 220-600px → 2-6 格 (每格 80-120px, 真实滚轮格距)
+   → page.Mouse.Scroll(0, deltaY)   [Input.dispatchMouseEvent]
+   → 三角延迟 profile: 加速 → 匀速 → 减速
+     delayMs = 40 + 90×(1-progress²) + jitter
+```
+
+### 11.2 贝塞尔曲线鼠标移动
 
 `internal/browser/behavior/behavior.go` 使用三次贝塞尔曲线模拟人类鼠标移动：
 
@@ -698,14 +852,16 @@ HTMLCanvasElement.prototype.toDataURL = function(...args) {
   · 速度变化: 慢→快→慢 (符合人类习惯)
 ```
 
-### 11.2 行为模拟组成
+> 0.3.2 之前该贝塞尔库从未被接线（实际只注入两段合成 JS 滚动/鼠标脚本）；现在经 trusted CDP 输入通道真正投入使用。
+
+### 11.3 行为模拟组成
 
 | 行为 | 实现 | 说明 |
 |------|------|------|
-| **鼠标移动** | 三次贝塞尔曲线 | 控制点随机，路径自然 |
+| **鼠标移动** | 三次贝塞尔 + CDP trusted 输入 | isTrusted=true，控制点随机 |
+| **滚动** | 三角延迟 profile 滚轮 | 加速→匀速→减速，真实格距 |
 | **打字延迟** | 每次按键随机延迟 | 模拟人类打字速度 |
-| **随机停顿** | 页面浏览时随机暂停 | 模拟阅读/查看行为 |
-| **页面探索** | 滚动和悬停 | 模拟浏览探索 |
+| **随机停顿** | 阅读式悬停 150-500ms | 模拟阅读/查看行为 |
 
 ---
 
@@ -1082,15 +1238,16 @@ UTLS HelloChrome_Auto:
 |------|------|
 | 浏览器接口 | `internal/browser/types/` |
 | 浏览器后端与池 | `internal/browser/` (含 Chromedp `pool.go`) |
-| Rod 后端 (含 Chrome 检测、API 发现) | `internal/browser/rodbackend/` |
+| Rod 后端 (含 Chrome 检测、API 发现、UA/行为身份层) | `internal/browser/rodbackend/` (含 `identity.go`) |
 | 反爬引擎 (检测/升级/TLS 指纹) | `internal/browser/antibot/` |
 | 多维探测器 (含 WAF 签名库) | `internal/browser/antibot/prober/` |
-| 隐身注入 | `internal/browser/stealth/` |
-| 行为模拟 | `internal/browser/behavior/` |
+| 会话级指纹生成 | `internal/browser/stealth/fingerprint.go` |
+| 隐身注入 (模板渲染) | `internal/browser/stealth/stealth.go` |
+| 行为模拟 (贝塞尔库) | `internal/browser/behavior/` |
 | 代理池 | `internal/browser/proxy_pool.go` |
 | 网络空闲 | `internal/browser/settle/` |
 | 错误分类 | `internal/errsignal/` |
 
 ---
 
-> **版本**: v0.3.1 | **最后更新**: 2026-08-25 | **相关代码**: internal/browser/ + internal/errsignal/
+> **版本**: v0.3.2 | **最后更新**: 2026-08-26 | **相关代码**: internal/browser/ + internal/errsignal/

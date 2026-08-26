@@ -4,6 +4,61 @@ All changes after v0.1.14 baseline.
 
 ---
 
+## [0.3.2] — 2026-08-26
+
+### 反反爬体系升级（对照 2026 反爬检测三层战场：CDP 协议指纹 / TLS-JA3 指纹 / 行为统计建模）
+
+**指纹从"每页重掷"改为"会话级稳定"（新增 `stealth/fingerprint.go`）**
+
+- 新增 `Fingerprint` 会话级稳定指纹：Geo persona（10 地区 × 语言/时区/UTC 偏移联动）、屏幕池（含任务栏保留高度）、6 个 ANGLE 真实格式 GPU 配置、硬件并发/内存/网络 RTT、电池、以及 Canvas/Audio/Font 三个会话级种子。`GenerateFingerprint()` 在浏览器池 `New()` 时生成一次并持有——GPU 在两次导航间"变化"不存在，跨页指纹跳变本身就是高置信度机器信号，旧实现每文档重掷恰是该反模式
+- `stealth.Script` 静态常量重构为 `BuildScript(fp, uaIdentity)` 模板渲染：种子/地区/屏幕/GPU 烘入脚本，UA 轮换只重建身份段
+- 脚本新增 §0 原生码掩码（`_mask` + WeakMap，所有补丁函数 `toString()` 仍返回 `[native code]`，消除"补丁函数源码可见"这一经典检测点）、§13 `measureText` 字体噪声（hash(font+text, seed) → ±0.02px 确定性抖动，此前字体指纹完全裸奔）、§9 `window.outerWidth/outerHeight`（headless 下报 0 的泄漏点）、§16b DST 正确时区（`Intl.DateTimeFormat.formatToParts` 实时推算，替代错误的静态偏移表）、§16 `navigator.platform` + `navigator.userAgentData`（brands/mobile/platform/getHighEntropyValues 全套，随 UA 轮换联动）
+- mulberry32 种子 PRNG 替代 Math.random：同一会话内噪声确定可复现，噪声本身不再是指纹跳变源
+
+**UA ↔ Client Hints ↔ Platform 三方一致（`rodbackend/identity.go` 新增）**
+
+- `NetworkSetUserAgentOverride` 现携带完整 `UserAgentMetadata`（Brands/FullVersionList/Platform/PlatformVersion/Architecture/Bitness）与 geo 联动的 `AcceptLanguage`——旧实现只覆写 UA 字符串，Chrome 真实的 Sec-CH-UA-* 头与假 UA 直接矛盾，等于自报家门
+- `UAProfile` 新增 `FullVersion`/`PlatformVersion` 字段；浏览器上下文专用 `RotateChromeUA()`：UA 池收窄为 Chrome-only（Win Chrome130/129、Mac、Linux、Edge），Firefox/Safari persona 仅保留给 HTTP 客户端——Gecko UA 配 Chromium TLS/JS 引擎是即时矛盾
+- Screenshot/renderJob/DownloadAsset/img-on-referer/referer 页 5 处 UA 覆写点全部接入完整 metadata
+
+**行为模拟：合成 JS 事件 → trusted CDP 输入**
+
+- `simulateHumanBehavior()`：贝塞尔鼠标扫掠经 `Input.dispatchMouseEvent`（`Mouse.MoveTo` 逐点 + 速度缓动 + 阅读式悬停）+ 加速-匀速-减速滚轮（三角延迟 profile）。合成 `dispatchEvent` 的 `isTrusted` 永远为 false，是最著名的自动化 tell；CDP 输入通道事件 `isTrusted=true`
+- 此前 `behavior` 包的贝塞尔库从未被接线，实际只发两个合成 JS 事件——现在贝塞尔库真正投入使用
+
+**启动 flags 修正**
+
+- rod 后端补 `disable-blink-features=AutomationControlled`（此前仅 chromedp 有，rod 路径 navigator.webdriver 裸奔）；代理启用时叠加 `WebRTCProtectionFlags()`（`force-webrtc-ip-handling-policy=disable_non_proxied_udp`，防 WebRTC 泄漏代理后真实 IP）
+- 删除 `chrome_aggressive`/`chrome_privacy` 两个假 TLS profile：`AsyncTLS`/`EncryptedClientHello` 并非真实 Chrome feature 名，无效 flags 只增加指纹噪音。保留 3 个真实 TLS 版本调节 profile，并明确注释：launcher flag 层无法修复 Chromium↔系统 Chrome 的 ClientHello 微差（密码套件顺序/GREASE/HTTP2 SETTINGS 帧），使用系统 Chrome 二进制（`ChromeBin`）才是正解
+
+**chromedp 备用后端同步适配**：`stealth.Inject(ctx, script)` 新签名 + 会话级指纹持有；`RotateUA` 同样收敛到 Chrome-only 池
+
+**文档**：`docs/ANTIBOT_GUIDE.md` 新增"2026 检测三层战场"章节（CDP 协议指纹/TLS 指纹/行为建模的检测原理与本系统对策映射），§7/§10/§11 重写对齐新实现
+
+### 残余风险攻坚（P0，同版本内）
+
+- **版本对齐引擎**：`New()` 经 `Browser.getVersion` 读取真实二进制版本，`alignUAWithBinary` 将 UA persona 的版本改写为二进制真版本（UA 串按真实 Chrome 惯例冻结为 `major.0.0.0`，`FullVersion`/Client Hints 采用完整真版本）——消除"UA 报 130、二进制 132"这类可被版本关联行为证伪的矛盾；`getCurrentUA` 出口统一对齐，5 处 UA 覆写点与 stealth 身份段自动继承
+- **运行时一致性自检**（`runStealthSelfCheck`，每会话首个 stealth 渲染后一次性执行）：11 项页面侧断言（webdriver/plugins/languages/outerSize/screen/timezone/UA-CH/原生 toString/GPU/编解码器）+ Go 侧 persona 交叉核对（时区/屏幕），失败项 warn 级输出；`canPlayType` 探测到剥离编解码器的 Chromium 构建时明确提示"JA3/codec 降级模式，装官方 Chrome（browser.path）"
+- **CDP 命令时机抖动**：renderJob 在 setup→navigate 之间加 80-250ms 随机间隔，打散"连接即全套命令"的固定驾驶节奏
+- 事实核查入档：rod v0.116 不支持 `--remote-debugging-pipe`（transport 仅 websocket，localhost 端口探测残余按概率型低风险接受）；rod 惰性 enable 架构（`WaitLoad` 走 `Runtime.evaluate`、从不发送 `Runtime.enable`/`autoAttach`）使本系统 CDP 命令面天然小于 Playwright——已写入 ANTIBOT_GUIDE §0.5
+- 新增 `identity_test.go`（版本解析/对齐克隆不变性/Edge 双 token 改写/身份段一致性）
+
+### 残余风险攻坚（P1，同版本内）
+
+- **发行版 Chromium 启动告警**：`isChromiumBinary` 识别 Alpine/Debian/snap 的 Chromium 包路径，命中即 warn"JA3/codec 降级模式"并指引 `browser.path`/`CHROME_PATH`（Edge 路径不误报——Edge 是可正当支撑 Edge persona 的正式浏览器）
+- **Edge persona 过滤**：`pickBrowserUA` 在 Chromium 二进制上剔除 `Edg/` persona（该构建无法支撑 Edge 专有行为，声称即穿帮）；官方 Chrome 上照常可用。浏览器上下文的 UA 选择统一收敛到该出口
+- **CDP 审计模式**（`WUKONG_CDP_AUDIT=1`，新增 [cdp_audit.go](internal/browser/rodbackend/cdp_audit.go)）：经 rod `Client()` 注入点（与 `ControlURL` 互斥，故改为自行 `cdp.StartWithURL` 建连）包装 `CDPClient`，逐命令记录方法名/会话/时长（debug 级，刻意不记 payload）——命令序列即"驾驶风格"审计所需，命令面从不可见变为可审计
+- **容器官方 Chrome 基座**：Dockerfile 由 Alpine+chromium 改为 Debian bookworm + google-chrome-stable 官方源（真实 JA3 + h264/aac 编解码 + 完整字体），`--build-arg CHROME_FLAVOR=slim` 保留发行版 Chromium 小镜像变体；统一 `CHROME_BIN=/usr/local/bin/wukong-browser` 软链消除 flavor 差异
+- 新增测试：`isChromiumBinary` 路径判定（含 Windows 反斜杠/Edge 不误报）、`pickBrowserUA` 在 Chromium/Chrome 二进制下的 Edge persona 过滤与放行（各 200 次采样）
+
+### Geo↔代理联动 + 容器 headful（同版本内）
+
+- **Geo persona 与代理出口地区联动**（文章 geoip 一致性的直接落地，此前随机掷地区——配日本代理却可能掷出巴西时区，GeoIP 检查直接穿帮）：`stealth.ResolveGeoCode` 三级优先——`browser.geo_region` 显式配置 > `GeoCodeFromProxyURL` 从代理 URL 最佳推断（住宅代理凭据中的 `country=`/`cc-`/`region=` 参数、网关主机 TLD；`uk→gb`、`us→us-east` 归一化，未知地区宁可随机也不乱猜）> 随机。全链路打通：config → backend → rod/chromedp 双后端指纹生成
+- **容器 headful 能力**（文章"headless 降低通过率"）：Dockerfile 两种 flavor 均加装 xvfb，文档给出 `xvfb-run -a --server-args="-screen 0 1920x1080x24" wukong ...`（配合 `browser.headless=false`）的加固目标用法
+- 新增 `geo_test.go`：凭据参数 6 形态/TLD 推断/未知地区拒判/三级优先级/指纹 geo 应用
+
+---
+
 ## [0.3.1] — 2026-08-25
 
 ### 配置修复（Bug Fix）

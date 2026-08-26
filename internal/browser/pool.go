@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	"math/rand"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -42,6 +43,9 @@ type Options struct {
 	// verification is the default; enable only for intranet/.mil hosts
 	// whose certs chain to a non-public root CA.
 	InsecureTLS bool
+	// GeoRegion pins the fingerprint geography to the proxy exit
+	// region. Empty = infer from Proxy, else random.
+	GeoRegion string
 }
 
 type Pool struct {
@@ -56,6 +60,17 @@ type Pool struct {
 	behaviorSimulator  *behavior.Simulator
 	escalator          *antibot.Escalator
 	currentUA          *antibot.UAProfile
+	// stealthFP is the session-stable fingerprint shared by every tab
+	// (GPU/screen/canvas persona + geo). Generated once in New().
+	stealthFP *stealth.Fingerprint
+}
+
+// stealthScript renders the session-stable stealth payload. The
+// chromedp backend sets the UA via HTTP headers, so no client-hints
+// identity section is baked in here (nil keeps genuine platform
+// values, which stay coherent with the Chrome-only UA pool).
+func (p *Pool) stealthScript() string {
+	return stealth.BuildScript(p.stealthFP, nil)
 }
 
 // Compile-time capability assertions.
@@ -191,7 +206,13 @@ func New(ctx context.Context, opts Options) *Pool {
 	allocCtx, allocCl := chromedp.NewExecAllocator(lifeCtx, allocOpts...)
 
 	escalator := antibot.NewEscalator(antibot.DefaultEscalatorConfig())
-	currentUA := escalator.GetRandomDesktopUA()
+	// Geo↔proxy coherence (see rodbackend.Pool.New): the persona's
+	// timezone/languages must match the exit IP's geography.
+	geoCode := stealth.ResolveGeoCode(opts.GeoRegion, opts.Proxy)
+	// Session-stable fingerprint: one persona per browser lifetime.
+	stealthFP := stealth.GenerateFingerprint(
+		rand.New(rand.NewSource(time.Now().UnixNano())),
+		stealth.GeoProfileByCode(geoCode))
 
 	p := &Pool{
 		opts:              opts,
@@ -201,13 +222,14 @@ func New(ctx context.Context, opts Options) *Pool {
 		disp:              renderkit.NewDispatcher(opts.Workers),
 		behaviorSimulator: behavior.New(behavior.DefaultConfig()),
 		escalator:         escalator,
-		currentUA:         currentUA,
+		stealthFP:         stealthFP,
 	}
+	p.currentUA = escalator.GetRandomDesktopUA()
 
 	for i := 0; i < opts.Workers; i++ {
 		wCtx, wCancel := chromedp.NewContext(allocCtx)
 		if opts.Stealth {
-			stealth.Inject(wCtx)
+			stealth.Inject(wCtx, p.stealthScript())
 		}
 		p.workers = append(p.workers, &worker{idx: i, ctx: wCtx, cancel: wCancel})
 	}
@@ -235,7 +257,10 @@ func (p *Pool) getCurrentUA() *antibot.UAProfile {
 func (p *Pool) RotateUA() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.currentUA = p.escalator.RotateUserAgent()
+	// Browser contexts rotate within the Chrome family only: a Firefox
+	// or Safari persona on a Chromium TLS/JS engine is an instant
+	// contradiction (JA3 mismatch + missing Gecko/WebKit JS quirks).
+	p.currentUA = p.escalator.RotateChromeUA()
 }
 
 // Screenshot navigates to url in a fresh tab and captures a real pixel
@@ -270,7 +295,7 @@ func (p *Pool) Screenshot(
 
 	// Inject stealth once per fresh tab.
 	if p.opts.Stealth {
-		_ = stealth.Inject(tabCtx)
+		_ = stealth.Inject(tabCtx, p.stealthScript())
 	}
 
 	ua := p.getCurrentUA()
@@ -505,7 +530,7 @@ func (p *Pool) DownloadAsset(ctx context.Context, assetURL string, referer strin
 
 		// Inject stealth once per fresh tab.
 		if p.opts.Stealth {
-			stealth.Inject(tc)
+			stealth.Inject(tc, p.stealthScript())
 		}
 
 		return tc, tcCancel, timeoutCancel

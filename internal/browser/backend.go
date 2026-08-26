@@ -49,6 +49,10 @@ type BackendOptions struct {
 	// every pool (first caller to install it wins). 0 = auto
 	// (max(4, NumCPU)); negative disables the global budget entirely.
 	GlobalRenderSlots int
+	// GeoRegion pins the fingerprint geography to the proxy exit
+	// region (timezone/languages/Accept-Language coherence — see
+	// stealth.GeoProfile). Empty = infer from Proxy, else random.
+	GeoRegion string
 }
 
 // NewBackend creates the selected browser backend. The pool's
@@ -76,6 +80,7 @@ func NewBackend(ctx context.Context, backendType BackendType, opts BackendOption
 			DisableDownloads: opts.DisableDownloads,
 			Proxy:            opts.Proxy,
 			InsecureTLS:      opts.InsecureTLS,
+			GeoRegion:        opts.GeoRegion,
 		})
 		if err != nil {
 			logutil.Warn("rod backend failed, falling back to chromedp",
@@ -93,6 +98,7 @@ func NewBackend(ctx context.Context, backendType BackendType, opts BackendOption
 				DisableDownloads: opts.DisableDownloads,
 				Proxy:            opts.Proxy,
 				InsecureTLS:      opts.InsecureTLS,
+				GeoRegion:        opts.GeoRegion,
 			}), nil
 		}
 		return rodBackend, nil
@@ -109,6 +115,7 @@ func NewBackend(ctx context.Context, backendType BackendType, opts BackendOption
 			DisableDownloads: opts.DisableDownloads,
 			Proxy:            opts.Proxy,
 			InsecureTLS:      opts.InsecureTLS,
+			GeoRegion:        opts.GeoRegion,
 		}), nil
 	}
 }
@@ -161,5 +168,6 @@ func NewBackendFromConfig(ctx context.Context, cfg *config.BrowserConfig) (types
 		DisableDownloads:  true,
 		Proxy:             proxy,
 		GlobalRenderSlots: cfg.GlobalRenderSlots,
+		GeoRegion:         cfg.GeoRegion,
 	})
 }
