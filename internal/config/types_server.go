@@ -1,18 +1,14 @@
 package config
 
 import (
-	"github.com/km269/wukong/internal/gateway"
 	"github.com/km269/wukong/internal/server"
 )
 
 // ServerSecurityConfig is a type alias to the server package's
 // ServerSecurityConfig. This keeps the dependency direction clean
-// (config → server) while avoiding circular imports.
+// (config → server) while avoiding circular imports. The nested
+// TLS/Auth/RateLimit types are used through this alias directly.
 type ServerSecurityConfig = server.ServerSecurityConfig
-
-type ServerTLSConfig = server.ServerTLSConfig
-type ServerAuthConfig = server.ServerAuthConfig
-type ServerRateLimitConfig = server.ServerRateLimitConfig
 
 // ============================================================================
 // Service Endpoint Configuration
@@ -57,7 +53,3 @@ type MCPServerConfig struct {
 	Address  string               `mapstructure:"address"`
 	Security ServerSecurityConfig `mapstructure:"security"`
 }
-
-// GatewayConfig embeds the gateway package's GatewayConfig.
-// The concrete type lives in internal/gateway/config.go.
-type GatewayConfig = gateway.GatewayConfig

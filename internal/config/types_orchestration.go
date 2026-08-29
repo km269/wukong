@@ -29,14 +29,14 @@ type A2ARemoteConfig struct {
 	Description       string `mapstructure:"description"`
 	ServerURL         string `mapstructure:"server_url"`
 	AuthType          string `mapstructure:"auth_type"`
-	APIKey            string `mapstructure:"api_key"`
+	APIKey            string `mapstructure:"api_key" envexpand:"true"`
 	APIKeyHeader      string `mapstructure:"api_key_header"`
-	JWTSecret         string `mapstructure:"jwt_secret"`
+	JWTSecret         string `mapstructure:"jwt_secret" envexpand:"true"`
 	JWTAudience       string `mapstructure:"jwt_audience"`
 	JWTIssuer         string `mapstructure:"jwt_issuer"`
 	OAuthTokenURL     string `mapstructure:"oauth_token_url"`
 	OAuthClientID     string `mapstructure:"oauth_client_id"`
-	OAuthClientSecret string `mapstructure:"oauth_client_secret"`
+	OAuthClientSecret string `mapstructure:"oauth_client_secret" envexpand:"true"`
 }
 
 // ANPConfig defines Agent Network Protocol (ANP) integration settings.
@@ -102,8 +102,8 @@ type OKFConfig struct {
 // DifyConfig defines the Dify AI platform integration settings.
 type DifyConfig struct {
 	Enabled         bool          `mapstructure:"enabled"`
-	BaseURL         string        `mapstructure:"base_url"`
-	APISecret       string        `mapstructure:"api_secret"`
+	BaseURL         string        `mapstructure:"base_url" envexpand:"true"`
+	APISecret       string        `mapstructure:"api_secret" envexpand:"true"`
 	AgentName       string        `mapstructure:"agent_name"`
 	EnableStreaming bool          `mapstructure:"enable_streaming"`
 	Timeout         time.Duration `mapstructure:"timeout"`

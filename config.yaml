@@ -5,27 +5,31 @@
 # Loading priority (high to low):
 #   1. CLI flags (--provider, --model, --temperature, --max-tokens, --config)
 #   2. Env vars (WUKONG_ prefix, e.g. WUKONG_DEFAULT_PROVIDER)
-#   3. --config CLI-specified file
-#   4. ./config.yaml (current directory)
-#   5. ~/.config/wukong/config.yaml
-#   6. /etc/wukong/config.yaml (non-Windows)
-#   7. Built-in defaults (internal/config/defaults.go)
+#   3. YAML config file — either the --config flag argument or the first
+#      match on the search path: ./config.yaml → ~/.config/wukong/config.yaml
+#      → /etc/wukong/config.yaml (non-Windows)
+#   4. Built-in defaults (internal/config/defaults.go — single source of
+#      truth; `wukong config show` prints the fully merged result)
 #
-# Env var expansion: ${ENV_VAR} and ${VAR:-default} syntax supported
-# in the following fields:
+# NOTE: values in this template that intentionally deviate from the
+# built-in defaults (tuned for a local vLLM deployment) are annotated
+# with "≠ default". Remove the key to inherit the default instead.
+#
+# Env var expansion: ${ENV_VAR} and ${VAR:-default} syntax is supported
+# in every string field whose Go struct tag carries envexpand:"true":
 #   - providers[].api_key, base_url, model
 #   - summon.a2a_remotes[].api_key, jwt_secret, oauth_client_secret
 #   - gateway.feishu.app_secret, encrypt_key, verification_token
+#   - *.security.auth.api_key / jwt_secret (a2a/agui/acp_server/mcp_server)
 #   - observability.langfuse_public_key, langfuse_secret_key
 #   - artifact.cos_secret_id, cos_secret_key
-#   - acp_server.security.auth.api_key
-#   - mcp_server.security.auth.api_key
 #   - cortex.embedding_api_key, embedding_base_url, embedding_model
 #   - cortex.reranker_api_key, reranker_base_url, reranker_model
 #   - cortex.vertical_routing.github_api_key
+#   - memory.extractor_provider, extractor_model, extractor_prompt
 #   - memoryflow.planner_model, memoryflow.extractor_model
 #   - graphflow.extractor_model
-#   - dify.api_secret
+#   - dify.base_url, dify.api_secret
 #   - session.redis_url
 #   - browser.search.searxng.url, searxng.api_key
 #   - browser.search.tavily.api_key
@@ -141,8 +145,8 @@ providers:
 # ===========================================================================
 agent:
   max_llm_calls: 50                  # 0 = unlimited
-  max_tool_iterations: 50
-  max_run_duration: "3600s"          # wall-clock time limit (1h, local LLM complex tasks)
+  max_tool_iterations: 50            # ≠ default 30 (local LLMs need more turns)
+  max_run_duration: "3600s"          # ≠ default 900s (1h wall clock for local LLM complex tasks)
   tool_call_timeout: "120s"          # per-tool-call deadline; bounds a single hung/slow tool so it can't exhaust the run budget
 
   parallel_tools: true               # concurrent independent tool calls
@@ -161,12 +165,12 @@ agent:
   # thinking_enabled: true
   # thinking_tokens: 4096
 
-  tool_search_enabled: true
+  tool_search_enabled: true           # ≠ default false
   tool_search_max_tools: 20
 
-  context_compaction: true
+  context_compaction: true            # ≠ default false
   context_compaction_tool_result_max_tokens: 1024
-  context_compaction_oversized_max_tokens: 8192
+  context_compaction_oversized_max_tokens: 8192   # ≠ default 0 (disabled)
   context_compaction_keep_recent: 1
 
   session_recall_enabled: false
@@ -174,7 +178,7 @@ agent:
 
   json_repair_enabled: false
 
-  agent_tools_enabled: false
+  agent_tools_enabled: false         # ≠ default true (template keeps the loop lean)
   agent_tools_stream: false
 
   system_prompt_dir: "~/.config/wukong/prompts/"
@@ -242,8 +246,8 @@ memory:
   max_memories: 100
   auto_extract: true
   extract_timeout: "300s"
-  extractor_provider: ""
-  extractor_model: ""
+  extractor_provider: "deepseek"     # ≠ no default (empty falls back to lightweight provider)
+  extractor_model: "deepseek-chat"   # ≠ no default (empty falls back to lightweight model)
   extractor_prompt: ""
 
   recency_weight: 0.4
@@ -275,18 +279,18 @@ recall:
 # F. CortexDB Memory Stack — Vector + FTS5 + Knowledge Graph
 # ===========================================================================
 cortex:
-  enabled: true
+  enabled: true                      # ≠ default false (template enables the full CortexDB stack)
   db_path: "wukong.db"
   max_results: 10
   max_messages_per_session: 200
-  embedding_base_url: "${EMBEDDING_BASE_URL:-http://192.168.50.97:8082/v1}"
-  embedding_api_key: "${EMBEDDING_API_KEY:-vllm}"
-  embedding_model: "${EMBEDDING_MODEL:-bge-m3-Q8_0}"
+  embedding_base_url: "${EMBEDDING_BASE_URL:-http://192.168.50.97:8082/v1}"   # ≠ no default (local embedding server)
+  embedding_api_key: "${EMBEDDING_API_KEY:-vllm}"                             # ≠ default ""
+  embedding_model: "${EMBEDDING_MODEL:-bge-m3-Q8_0}"                          # ≠ default text-embedding-3-small
   # Cross-Encoder reranker (optional; empty = disabled)
   # Reuses embedding_base_url/api_key when reranker_* not set.
-  reranker_base_url: "${RERANKER_BASE_URL:-http://192.168.50.97:8083}"
-  reranker_api_key: "${RERANKER_API_KEY:-vllm}"
-  reranker_model: "${RERANKER_MODEL:-bge-reranker-v2-m3-FP16}"
+  reranker_base_url: "${RERANKER_BASE_URL:-http://192.168.50.97:8083}"        # ≠ no default (local reranker server)
+  reranker_api_key: "${RERANKER_API_KEY:-vllm}"                                # ≠ default ""
+  reranker_model: "${RERANKER_MODEL:-bge-reranker-v2-m3-FP16}"                 # ≠ default "" (empty disables reranking)
   # Search strategy tuning (optional)
   search_strategy:
     recall_mode: "hybrid"          # lexical | vector | hybrid
@@ -320,22 +324,22 @@ cortex:
     min_size: 100                  # merge chunks smaller than this
 
 memoryflow:
-  enabled: true
+  enabled: true                      # ≠ default false (template enables memory flow)
   db_path: "wukong.db"
   namespace: "assistant"
   embedding_dimensions: 0
-  planner_model: "${VLLM_MODEL:-qwen3.6-27b}"
-  extractor_model: "${VLLM_MODEL:-qwen3.6-27b}"
+  planner_model: "${VLLM_MODEL:-deepseek-v4-flash-0731}"
+  extractor_model: "${VLLM_MODEL:-deepseek-v4-flash-0731}"
 
 graphflow:
-  enabled: true
+  enabled: true                      # ≠ default false (template enables graph flow)
   db_path: "wukong.db"
   max_chars_per_doc: 8000
-  auto_extract: true
-  extractor_model: "${VLLM_MODEL:-qwen3.6-27b}"
+  auto_extract: true                 # ≠ default false (auto-extract entities/relations on import)
+  extractor_model: "${VLLM_MODEL:-deepseek-v4-flash-0731}"
 
 importflow:
-  enabled: true
+  enabled: true                      # ≠ default false (template enables import flow)
   db_path: "wukong.db"
 
 # ===========================================================================
@@ -345,13 +349,13 @@ revision:
   enabled: true
   revision_provider: ""
   revision_model: ""
-  enable_llm_summarize: true
+  enable_llm_summarize: true         # ≠ default false
   summary_cooldown: "120s"
   summary_timeout: "30s"
   max_command_output: 8000
   enable_semantic_search: false
   search_strategy: "include_all"
-  max_context_tokens: 24000         # Conservative ceiling. vllm qwen3.6-27b n_ctx=32768;
+  max_context_tokens: 24000         # ≠ default 64000. Conservative ceiling. vllm qwen3.6-27b n_ctx=32768;
                                     # keep 8000+ buffer for a single user input + tool results.
                                     # ContextRevisionEngine triggers asynchronously and needs
                                     # headroom, otherwise one large input pushes the prompt past
@@ -368,7 +372,7 @@ browser:
   backend: "rod"                     # chromedp | rod — browser automation backend
   headless: true
   browser_path: ""
-  stealth: true
+  stealth: true                      # ≠ default false
   cache_dir: ".wukong/cache"
   max_download_size: 104857600
   timeout: "60s"
@@ -392,11 +396,11 @@ browser:
     rotate_every: 10
   search:
     duckduckgo:
-      enabled: false
+      enabled: false                 # ≠ default true (searxng used instead)
       url: "https://api.duckduckgo.com/"
     searxng:
-      enabled: true
-      url: "${SEARXNG_URL:-http://43.167.226.121:8080/}"
+      enabled: true                  # ≠ default false
+      url: "${SEARXNG_URL:-http://43.167.226.121:8080/}"   # ≠ default localhost:8080 (self-hosted instance)
       api_key: "${SEARXNG_API_KEY:-}"
     tavily:
       enabled: false
@@ -441,8 +445,8 @@ apps:
     scope_prefix: ""
     workers: 4
     asset_workers: 8
-    timeout: 60                    # seconds — page navigation deadline
-    render_timeout: 30             # seconds — single render wait
+    timeout: 60                    # seconds — page navigation deadline; ≠ default 300
+    render_timeout: 30             # seconds — single render wait; ≠ default 120
     settle: 1500                   # milliseconds — network idle wait
     scroll: false
     user_agent: ""
@@ -459,7 +463,7 @@ apps:
     mobile_readable: true
     enable_resume: true
     persist: true
-    incremental: true
+    incremental: true              # ≠ default false (re-clone only changed pages)
     cache_max_age: 86400           # seconds — cache TTL
     headless: true
     stealth: true
@@ -498,18 +502,18 @@ extensions: []
 # J. Service Endpoints — Multi-protocol server ports
 # ===========================================================================
 a2a_server:
-  enabled: true
+  enabled: true                      # ≠ default false (template exposes the A2A endpoint)
   address: ":9090"
   agent_name: "wukong"
   agent_description: "Wukong AI Agent — A2A endpoint"
 
 agui:
-  enabled: true
+  enabled: true                      # ≠ default false (template exposes the AG-UI endpoint)
   address: ":8080"
   path: "/agui"
 
 acp_server:
-  enabled: true
+  enabled: true                      # ≠ default false (template exposes the ACP endpoint)
   address: ":9091"
   path: "/acp"
   enable_streaming: true
@@ -527,7 +531,8 @@ acp_mcp:
   path: "/mcp"
 
 # Standalone MCP server (exposes agent tools as MCP tools).
-# Same security structure as acp_server.security; empty type = no auth.
+# Same security structure as acp_server.security; empty type = no auth —
+# MUST set security.auth.type when binding to a non-loopback interface.
 mcp_server:
   enabled: false
   address: ":3401"
@@ -554,7 +559,7 @@ gateway:
     stream_card_enabled: true
     stream_card_update_interval: "500ms"
     max_message_length: 4096
-    enable_file_receive: true
+    enable_file_receive: true         # ≠ default false
 
 # ===========================================================================
 # K. Agent-to-Agent Communication
@@ -599,16 +604,16 @@ dify:
 # L. Knowledge & Skill Management
 # ===========================================================================
 knowledge:
-  enabled: true
+  enabled: true                      # ≠ default false (template enables knowledge tooling)
   embedder_provider: ""                   # empty → falls back to cortex.embedding_* (port 8082), then default_provider
-  embedder_model: "bge-m3-Q8_0"
+  embedder_model: "bge-m3-Q8_0"           # ≠ default text-embedding-3-small (local embedding model)
   vector_store: "inmemory"
   max_results: 5
   enable_source_sync: false
   search_tool_name: "knowledge_search"
 
 okf:
-  enabled: true
+  enabled: true                      # ≠ default false (template enables OKF bundles)
   bundle_dir: ".wukong/okf"
   injector_enabled: false
   enrichment_enabled: false
@@ -620,7 +625,7 @@ skill:
   skills_dir: ".wukong/skills"
 
 evolution:
-  enabled: true
+  enabled: true                      # ≠ default false (template enables self-evolution)
   auto_patch: false
   analysis_provider: ""
   analysis_model: ""

@@ -1,7 +1,7 @@
 # Wukong 系统架构
 
 > 本文档基于全量源码深度扫描，描述 Wukong 的分层架构、启动流程、核心数据流、各子系统的技术实现细节与设计原则。
-> 最后更新：2026-08-23
+> 最后更新：2026-08-29
 
 ---
 
@@ -451,7 +451,7 @@ Recipe 是 YAML 定义的"结构化子 Agent"，从 `.wukong/recipes/*.yaml` 加
 | `deepseek` | api.deepseek.com | `openai.New` |
 | `ollama` | localhost:11434/v1 | `openai.New` |
 | `lmstudio` | localhost:1234/v1 | `openai.New` |
-| `vllm` | localhost:8888/v1 | `openai.New` |
+| `vllm` | localhost:8000/v1 | `openai.New` |
 | `acp` | 自定义 agent_url | `NewACPProvider` |
 
 ### 5.2 ACP Provider

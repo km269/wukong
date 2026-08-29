@@ -122,7 +122,8 @@ wukong/
 │   ├── topofmind/                    # Top-of-Mind 持久指令
 │   └── util/                         # 通用工具（Logger/DB/指针/version）
 │
-├── pkg/                              # 可复用公共库（4 个包）
+├── pkg/                              # 可复用公共库（5 个包）
+│   ├── capability/                   #   命令能力分析 + Shell 沙箱逃逸检测
 │   ├── httpclient/                   #   HTTP 客户端（DNS 缓存 + 限流）
 │   ├── logutil/                      #   日志工具
 │   ├── sandbox/                      #   跨平台文件沙箱
@@ -922,7 +923,7 @@ LDFLAGS := -s -w \
     -X github.com/km269/wukong/internal/cli.BuildDate=$(BUILD_DATE)
 ```
 
-默认版本信息定义在 [version.go](../internal/util/version.go)：`Version = "0.3.1"`。
+默认版本信息定义在 [version.go](../internal/util/version.go)：`Version = "0.3.3"`。
 
 ### 14.3 Taskfile.yaml
 
@@ -998,4 +999,4 @@ docs(agent): correct CoreLoop.Run signature in developer guide
 
 ---
 
-> **版本**: v0.3.1 | **最后更新**: 2026-08-25 | **Go**: 1.26 | **直接依赖**: 29 | **测试文件**: 73+
+> **版本**: v0.3.3 | **最后更新**: 2026-08-29 | **Go**: 1.26 | **直接依赖**: 29 | **测试文件**: 73+

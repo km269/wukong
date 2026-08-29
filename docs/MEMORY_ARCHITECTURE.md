@@ -2,8 +2,8 @@
 
 > 本文档基于源码深度扫描，描述 Wukong 的多层记忆与知识检索系统（记忆栈单主题深潜文档）。
 > 所有结论均与源码逐行核对，附文件路径与行号引用。
-> 搜索管线的完整参数与算法（SearchGenome 13 参数、调优引擎、五步分块）见 [WEB_OPERATIONS_ANALYSIS.md](WEB_OPERATIONS_ANALYSIS.md) 搜索管线章节，本文仅保留记忆栈视角的简表与交叉引用。
-> 最后更新：2026-08-23
+> 搜索管线的完整参数与算法（SearchGenome 12 参数、调优引擎、五步分块）见 [WEB_OPERATIONS_ANALYSIS.md](WEB_OPERATIONS_ANALYSIS.md) 搜索管线章节，本文仅保留记忆栈视角的简表与交叉引用。
+> 最后更新：2026-08-29
 
 ---
 
@@ -152,7 +152,7 @@ Search(query, userID, limit)
 | `MMRLambda` | MMR 多样性/相关性权衡（`EffectiveMMRLambda()`） |
 | Reranker 开关 | Cross-Encoder 重排（可选，失败降级保留融合序） |
 
-> SearchGenome 完整 13 参数定义、RobustScore 复合评分与 SPA 调优引擎详见 [WEB_OPERATIONS_ANALYSIS.md](WEB_OPERATIONS_ANALYSIS.md) 搜索管线章节（§5 搜索调优引擎）。
+> SearchGenome 完整 12 参数定义、RobustScore 复合评分与 SPA 调优引擎详见 [WEB_OPERATIONS_ANALYSIS.md](WEB_OPERATIONS_ANALYSIS.md) 搜索管线章节（§5 搜索调优引擎）。
 
 ### 2.5 长消息语义分块（存储侧约定）
 

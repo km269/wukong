@@ -39,34 +39,30 @@
 //
 // # Environment Variable Expansion
 //
-// API keys, secrets, URLs, models, and other configurable fields support
-// ${ENV_VAR} syntax for runtime expansion via expandSecrets().
-// Bash-style ${VAR:-default} fallback is also supported.
-// This applies to:
-//   - providers[].api_key, base_url, model
-//   - summon.a2a_remotes[].api_key, jwt_secret, oauth_client_secret
-//   - gateway.feishu.app_secret, encrypt_key, verification_token
-//   - observability.langfuse_public_key, secret_key
-//   - artifact.cos_secret_id, cos_secret_key
-//   - acp_server.security.auth.api_key
-//   - mcp_server.security.auth.api_key
-//   - cortex.embedding_api_key, embedding_base_url, embedding_model
-//   - cortex.reranker_api_key, reranker_base_url, reranker_model
-//   - cortex.vertical_routing.github_api_key
-//   - memoryflow.planner_model, extractor_model
-//   - graphflow.extractor_model
-//   - dify.api_secret
-//   - session.redis_url
-//   - browser.search.searxng.url, api_key
-//   - browser.search.tavily.api_key
-//   - browser.search.google.api_key, cse_id
-//   - browser.search.bing.api_key
+// API keys, secrets, URLs, models, and other configurable string fields
+// support ${ENV_VAR} syntax for runtime expansion via expandSecrets().
+// Bash-style ${VAR:-default} fallback is also supported. Unresolved
+// ${VAR} references (no fallback, VAR unset) are surfaced via Warnings()
+// so typos like ${OEPNAI_API_KEY} are visible.
+//
+// Expansion is tag-driven: every string field whose struct tag includes
+// envexpand:"true" participates automatically. The walk is recursive
+// (nested structs, pointers to structs, and slices of structs), so a
+// field opts in exactly once at its definition site — no separate
+// field list to keep in sync. Currently tagged fields include
+// providers[].{api_key,base_url,model}, summon.a2a_remotes[].secrets,
+// gateway.feishu secrets, server endpoint security.auth.{api_key,
+// jwt_secret}, cortex.{embedding,reranker,vertical_routing} settings,
+// memoryflow/graphflow models, dify.{base_url,api_secret},
+// session.redis_url, memory.extractor_*, and all browser.search
+// backend keys.
 package config
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
@@ -103,7 +99,7 @@ func ResolvePath(rawPath string) string {
 // subsystem configurations for the wukong AI agent platform.
 //
 // Each field corresponds to a YAML section in config.yaml. Sub-config
-// struct types are defined in types.go.
+// struct types are defined in the types_*.go files.
 type WukongConfig struct {
 	// DefaultProvider is the name of the default LLM provider.
 	// Must match a ProviderConfig.Name in the Providers list.
@@ -268,12 +264,6 @@ type WukongConfig struct {
 	// surfaced via Warnings() so users can spot typos like
 	// ${OEPNAI_API_KEY}. Not populated from YAML directly.
 	unresolvedEnvVars []string `mapstructure:"-"`
-
-	// deprecationWarnings tracks usage of deprecated config keys
-	// that have been renamed or removed. Populated by
-	// migrateDeprecatedFields during Load() and surfaced via
-	// Warnings() so users know to update their config files.
-	deprecationWarnings []string `mapstructure:"-"`
 }
 
 // ============================================================================
@@ -383,129 +373,92 @@ func expandEnvTracked(s, field string, unresolved *[]string) string {
 	return expandEnv(s)
 }
 
-// expandSecrets expands ${ENV_VAR} references in all secret fields
-// that support environment variable injection. This is a security
-// measure that keeps secrets out of config files and version control.
+// expandSecrets expands ${ENV_VAR} references in all string fields
+// tagged envexpand:"true". This is a security measure that keeps
+// secrets out of config files and version control.
+//
+// The walk is reflection-based and driven entirely by struct tags:
+// adding envexpand:"true" to a new string field (including fields in
+// nested structs, pointer structs, or slices of structs owned by other
+// packages such as gateway and server) is sufficient — there is no
+// parallel field list to maintain.
 //
 // Unresolved ${VAR} references (no :-default, VAR unset) are recorded
 // in cfg.unresolvedEnvVars and surfaced via Warnings() so users can
 // spot typos like ${OEPNAI_API_KEY}.
 func (l *Loader) expandSecrets(cfg *WukongConfig) {
-	u := &cfg.unresolvedEnvVars
+	expandEnvFields(reflect.ValueOf(cfg).Elem(), "",
+		&cfg.unresolvedEnvVars)
+}
 
-	// Provider API keys, base URLs, and models.
-	for i := range cfg.Providers {
-		p := &cfg.Providers[i]
-		p.APIKey = expandEnvTracked(p.APIKey,
-			"providers["+p.Name+"].api_key", u)
-		p.BaseURL = expandEnvTracked(p.BaseURL,
-			"providers["+p.Name+"].base_url", u)
-		p.Model = expandEnvTracked(p.Model,
-			"providers["+p.Name+"].model", u)
+// expandEnvFields recursively walks a configuration struct and expands
+// every settable string field tagged envexpand:"true". prefix is the
+// dotted config path of v (empty at the root); it is used only to
+// build human-readable diagnostics.
+func expandEnvFields(v reflect.Value, prefix string, unresolved *[]string) {
+	if v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return
+		}
+		expandEnvFields(v.Elem(), prefix, unresolved)
+		return
+	}
+	if v.Kind() != reflect.Struct {
+		return
 	}
 
-	// A2A remote secrets.
-	for i := range cfg.Summon.A2ARemotes {
-		r := &cfg.Summon.A2ARemotes[i]
-		r.APIKey = expandEnvTracked(r.APIKey,
-			"summon.a2a_remotes["+r.Name+"].api_key", u)
-		r.JWTSecret = expandEnvTracked(r.JWTSecret,
-			"summon.a2a_remotes["+r.Name+"].jwt_secret", u)
-		r.OAuthClientSecret = expandEnvTracked(r.OAuthClientSecret,
-			"summon.a2a_remotes["+r.Name+"].oauth_client_secret", u)
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if field.PkgPath != "" {
+			continue // unexported
+		}
+		tag, ok := field.Tag.Lookup("mapstructure")
+		if !ok {
+			continue
+		}
+		key := strings.Split(tag, ",")[0]
+		if key == "" || key == "-" {
+			continue
+		}
+
+		fv := v.Field(i)
+		path := key
+		if prefix != "" {
+			path = prefix + "." + key
+		}
+
+		if _, expand := field.Tag.Lookup("envexpand"); expand &&
+			fv.Kind() == reflect.String && fv.CanSet() {
+			fv.SetString(expandEnvTracked(fv.String(), path, unresolved))
+			continue
+		}
+
+		switch fv.Kind() {
+		case reflect.Struct:
+			expandEnvFields(fv, path, unresolved)
+		case reflect.Ptr, reflect.Slice:
+			if fv.Type().Elem().Kind() != reflect.Struct {
+				continue
+			}
+			if fv.Kind() == reflect.Ptr {
+				expandEnvFields(fv, path, unresolved)
+				continue
+			}
+			for j := 0; j < fv.Len(); j++ {
+				elem := fv.Index(j)
+				// Prefer a human-readable element identifier
+				// (the element's Name field) over a bare index.
+				id := fmt.Sprintf("%d", j)
+				if n := elem.FieldByName("Name"); n.IsValid() &&
+					n.Kind() == reflect.String && n.String() != "" {
+					id = n.String()
+				}
+				expandEnvFields(elem,
+					fmt.Sprintf("%s[%s]", path, id), unresolved)
+			}
+		}
 	}
-
-	// Gateway Feishu channel secrets.
-	cfg.Gateway.Feishu.AppSecret = expandEnvTracked(
-		cfg.Gateway.Feishu.AppSecret, "gateway.feishu.app_secret", u)
-	cfg.Gateway.Feishu.EncryptKey = expandEnvTracked(
-		cfg.Gateway.Feishu.EncryptKey, "gateway.feishu.encrypt_key", u)
-	cfg.Gateway.Feishu.VerificationToken = expandEnvTracked(
-		cfg.Gateway.Feishu.VerificationToken,
-		"gateway.feishu.verification_token", u)
-
-	// Observability (Langfuse) secrets.
-	cfg.Observability.LangfusePublicKey = expandEnvTracked(
-		cfg.Observability.LangfusePublicKey,
-		"observability.langfuse_public_key", u)
-	cfg.Observability.LangfuseSecretKey = expandEnvTracked(
-		cfg.Observability.LangfuseSecretKey,
-		"observability.langfuse_secret_key", u)
-
-	// Artifact COS credentials.
-	cfg.Artifact.COSSecretID = expandEnvTracked(
-		cfg.Artifact.COSSecretID, "artifact.cos_secret_id", u)
-	cfg.Artifact.COSSecretKey = expandEnvTracked(
-		cfg.Artifact.COSSecretKey, "artifact.cos_secret_key", u)
-
-	// Server endpoint auth keys (nested under Security.Auth).
-	cfg.ACPServer.Security.Auth.APIKey = expandEnvTracked(
-		cfg.ACPServer.Security.Auth.APIKey,
-		"acp_server.security.auth.api_key", u)
-	cfg.MCPServer.Security.Auth.APIKey = expandEnvTracked(
-		cfg.MCPServer.Security.Auth.APIKey,
-		"mcp_server.security.auth.api_key", u)
-
-	// CortexDB embedding settings.
-	cfg.Cortex.EmbeddingAPIKey = expandEnvTracked(
-		cfg.Cortex.EmbeddingAPIKey, "cortex.embedding_api_key", u)
-	cfg.Cortex.EmbeddingBaseURL = expandEnvTracked(
-		cfg.Cortex.EmbeddingBaseURL, "cortex.embedding_base_url", u)
-	cfg.Cortex.EmbeddingModel = expandEnvTracked(
-		cfg.Cortex.EmbeddingModel, "cortex.embedding_model", u)
-
-	// CortexDB reranker settings.
-	cfg.Cortex.RerankerAPIKey = expandEnvTracked(
-		cfg.Cortex.RerankerAPIKey, "cortex.reranker_api_key", u)
-	cfg.Cortex.RerankerBaseURL = expandEnvTracked(
-		cfg.Cortex.RerankerBaseURL, "cortex.reranker_base_url", u)
-	cfg.Cortex.RerankerModel = expandEnvTracked(
-		cfg.Cortex.RerankerModel, "cortex.reranker_model", u)
-
-	// Vertical routing GitHub API key.
-	if cfg.Cortex.VerticalRouting != nil {
-		cfg.Cortex.VerticalRouting.GitHubAPIKey = expandEnvTracked(
-			cfg.Cortex.VerticalRouting.GitHubAPIKey,
-			"cortex.vertical_routing.github_api_key", u)
-	}
-
-	// MemoryFlow model settings.
-	cfg.MemoryFlow.PlannerModel = expandEnvTracked(
-		cfg.MemoryFlow.PlannerModel, "memoryflow.planner_model", u)
-	cfg.MemoryFlow.ExtractorModel = expandEnvTracked(
-		cfg.MemoryFlow.ExtractorModel, "memoryflow.extractor_model", u)
-
-	// GraphFlow model settings.
-	cfg.GraphFlow.ExtractorModel = expandEnvTracked(
-		cfg.GraphFlow.ExtractorModel, "graphflow.extractor_model", u)
-
-	// Dify API secret.
-	cfg.Dify.APISecret = expandEnvTracked(
-		cfg.Dify.APISecret, "dify.api_secret", u)
-
-	// Session Redis URL.
-	cfg.Session.RedisURL = expandEnvTracked(
-		cfg.Session.RedisURL, "session.redis_url", u)
-
-	// Search provider secrets.
-	cfg.Browser.Search.SearXNG.URL = expandEnvTracked(
-		cfg.Browser.Search.SearXNG.URL,
-		"browser.search.searxng.url", u)
-	cfg.Browser.Search.SearXNG.APIKey = expandEnvTracked(
-		cfg.Browser.Search.SearXNG.APIKey,
-		"browser.search.searxng.api_key", u)
-	cfg.Browser.Search.Tavily.APIKey = expandEnvTracked(
-		cfg.Browser.Search.Tavily.APIKey,
-		"browser.search.tavily.api_key", u)
-	cfg.Browser.Search.Google.APIKey = expandEnvTracked(
-		cfg.Browser.Search.Google.APIKey,
-		"browser.search.google.api_key", u)
-	cfg.Browser.Search.Google.CSEID = expandEnvTracked(
-		cfg.Browser.Search.Google.CSEID,
-		"browser.search.google.cse_id", u)
-	cfg.Browser.Search.Bing.APIKey = expandEnvTracked(
-		cfg.Browser.Search.Bing.APIKey,
-		"browser.search.bing.api_key", u)
 }
 
 // Load parses the configuration into a WukongConfig.
@@ -545,6 +498,35 @@ func (l *Loader) LoadAndValidate() (*WukongConfig, error) {
 // Returns nil if Load has not been called yet.
 func (l *Loader) GetConfig() *WukongConfig {
 	return l.config
+}
+
+// ConfigFileUsed returns the path of the config file the loader
+// actually read, or "" when running purely on built-in defaults.
+// Delegates to Viper so callers (e.g. `wukong config show`) never
+// need to re-implement the search-path priority.
+func (l *Loader) ConfigFileUsed() string {
+	return l.v.ConfigFileUsed()
+}
+
+// Defaults returns a WukongConfig populated exclusively from the
+// built-in default values — no YAML file and no environment
+// overrides are consulted. It is the single source of truth for
+// code-level defaults; callers that need a "fresh default config"
+// (e.g. the `wukong configure` wizard) must use it instead of
+// hand-maintaining a second copy that would drift.
+func Defaults() *WukongConfig {
+	v := viper.New()
+	l := &Loader{v: v}
+	l.setDefaults()
+
+	var cfg WukongConfig
+	if err := v.Unmarshal(&cfg); err != nil {
+		// Defaults are plain literals; unmarshal cannot fail.
+		// Panic is the only sane reaction to a programming error
+		// this early, before any caller could handle it.
+		panic(fmt.Sprintf("config: unmarshal built-in defaults: %v", err))
+	}
+	return &cfg
 }
 
 // ============================================================================

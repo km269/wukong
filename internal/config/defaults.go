@@ -3,7 +3,13 @@
 // This file registers all built-in default values with Viper.
 // These are used when no config file or environment variable
 // provides a value. Defaults are organized by subsystem, matching
-// the struct categories in types.go.
+// the struct categories in the types_*.go files.
+//
+// NOTE: Viper's AutomaticEnv only resolves keys it already knows
+// about (via SetDefault, the config file, or BindEnv). Registering
+// a default here — even an empty-string one — is what makes the
+// key overridable through WUKONG_* environment variables, so every
+// documented key should have a corresponding SetDefault entry.
 package config
 
 import "github.com/km269/wukong/internal/gateway"
@@ -121,6 +127,8 @@ func (l *Loader) setStorageDefaults() {
 	l.v.SetDefault("session.ttl", "0h")
 	l.v.SetDefault("session.enable_summary", true)
 	l.v.SetDefault("session.summary_trigger", 50)
+	// Registered (empty) so WUKONG_SESSION_REDIS_URL overrides work.
+	l.v.SetDefault("session.redis_url", "")
 	// Model-visible event log: records the messages the model
 	// actually sees after context enrichment, enforcing the
 	// "model-visible means logged" invariant. Distinct from the
@@ -133,6 +141,11 @@ func (l *Loader) setStorageDefaults() {
 	l.v.SetDefault("memory.max_memories", 100)
 	l.v.SetDefault("memory.auto_extract", true)
 	l.v.SetDefault("memory.extract_timeout", "300s")
+	// Extractor LLM selection; empty falls back to the lightweight
+	// provider/model. Registered so WUKONG_MEMORY_* overrides work.
+	l.v.SetDefault("memory.extractor_provider", "")
+	l.v.SetDefault("memory.extractor_model", "")
+	l.v.SetDefault("memory.extractor_prompt", "")
 
 	// Memory scoring weights
 	l.v.SetDefault("memory.recency_weight", 0.4)
@@ -172,20 +185,32 @@ func (l *Loader) setCortexStackDefaults() {
 	l.v.SetDefault("cortex.db_path", "wukong.db")
 	l.v.SetDefault("cortex.max_results", 10)
 	l.v.SetDefault("cortex.max_messages_per_session", 200)
+	l.v.SetDefault("cortex.embedding_base_url", "")
+	l.v.SetDefault("cortex.embedding_api_key", "")
 	l.v.SetDefault("cortex.embedding_model",
 		"text-embedding-3-small")
+	// Empty reranker_* disables cross-encoder reranking (base
+	// URL/key reuse the embedding values); registered so env
+	// overrides work.
+	l.v.SetDefault("cortex.reranker_base_url", "")
+	l.v.SetDefault("cortex.reranker_api_key", "")
+	l.v.SetDefault("cortex.reranker_model", "")
 
 	// MemoryFlow
 	l.v.SetDefault("memoryflow.enabled", false)
 	l.v.SetDefault("memoryflow.db_path", "wukong.db")
 	l.v.SetDefault("memoryflow.namespace", "assistant")
 	l.v.SetDefault("memoryflow.embedding_dimensions", 0)
+	// Registered (empty) so WUKONG_MEMORYFLOW_* overrides work.
+	l.v.SetDefault("memoryflow.planner_model", "")
+	l.v.SetDefault("memoryflow.extractor_model", "")
 
 	// GraphFlow
 	l.v.SetDefault("graphflow.enabled", false)
 	l.v.SetDefault("graphflow.db_path", "wukong.db")
 	l.v.SetDefault("graphflow.max_chars_per_doc", 8000)
 	l.v.SetDefault("graphflow.auto_extract", false)
+	l.v.SetDefault("graphflow.extractor_model", "")
 
 	// ImportFlow
 	l.v.SetDefault("importflow.enabled", false)
@@ -195,6 +220,9 @@ func (l *Loader) setCortexStackDefaults() {
 // setRevisionDefaults registers context revision defaults.
 func (l *Loader) setRevisionDefaults() {
 	l.v.SetDefault("revision.enabled", true)
+	// Registered (empty) so WUKONG_REVISION_* overrides work.
+	l.v.SetDefault("revision.revision_provider", "")
+	l.v.SetDefault("revision.revision_model", "")
 	l.v.SetDefault("revision.enable_llm_summarize", false)
 	l.v.SetDefault("revision.summary_cooldown", "120s")
 	l.v.SetDefault("revision.summary_timeout", "30s")
@@ -231,6 +259,20 @@ func (l *Loader) setFeatureDefaults() {
 	l.v.SetDefault("browser.search.searxng.api_key", "")
 	l.v.SetDefault("browser.search.tavily.enabled", false)
 	l.v.SetDefault("browser.search.tavily.api_key", "")
+	l.v.SetDefault("browser.search.google.enabled", false)
+	l.v.SetDefault("browser.search.google.api_key", "")
+	l.v.SetDefault("browser.search.google.cse_id", "")
+	l.v.SetDefault("browser.search.bing.enabled", false)
+	l.v.SetDefault("browser.search.bing.api_key", "")
+
+	// Browser automation extras
+	l.v.SetDefault("browser.workers", 4)
+	l.v.SetDefault("browser.browser_path", "")
+	l.v.SetDefault("browser.scroll", false)
+	l.v.SetDefault("browser.control_url", "")
+	l.v.SetDefault("browser.profile_dir", "")
+	l.v.SetDefault("browser.global_render_slots", 0)
+	l.v.SetDefault("browser.geo_region", "")
 
 	// Visualiser
 	l.v.SetDefault("visualiser.enabled", true)
@@ -295,6 +337,9 @@ func (l *Loader) setAppsDefaults() {
 	l.v.SetDefault("apps.clone.max_asset_bytes", 52428800)
 	l.v.SetDefault("apps.clone.cookie_file", "")
 	l.v.SetDefault("apps.clone.user_agent", "")
+	l.v.SetDefault("apps.clone.browser_backend", "rod")
+	l.v.SetDefault("apps.clone.insecure_tls", false)
+	l.v.SetDefault("apps.clone.tls_ca_cert_path", "")
 	l.v.SetDefault("apps.clone.proxy_enabled", false)
 	l.v.SetDefault("apps.clone.proxy_pool", []string{})
 	l.v.SetDefault("apps.clone.proxy_rotate_every", 10)
@@ -353,6 +398,7 @@ func (l *Loader) setOrchestrationDefaults() {
 
 	// Knowledge
 	l.v.SetDefault("knowledge.enabled", false)
+	l.v.SetDefault("knowledge.embedder_provider", "")
 	l.v.SetDefault("knowledge.embedder_model",
 		"text-embedding-3-small")
 	l.v.SetDefault("knowledge.vector_store", "inmemory")
@@ -365,12 +411,18 @@ func (l *Loader) setOrchestrationDefaults() {
 	l.v.SetDefault("workflow.mode", "single")
 	l.v.SetDefault("workflow.max_iterations", 10)
 	l.v.SetDefault("workflow.cycle_mode", "default")
+	// Registered (empty) so WUKONG_WORKFLOW_* overrides work.
+	l.v.SetDefault("workflow.claude_code_bin", "")
+	l.v.SetDefault("workflow.codex_bin", "")
 
 	// Dify
 	l.v.SetDefault("dify.enabled", false)
 	l.v.SetDefault("dify.agent_name", "dify")
 	l.v.SetDefault("dify.enable_streaming", false)
 	l.v.SetDefault("dify.timeout", "120s")
+	// Registered (empty) so WUKONG_DIFY_* overrides work.
+	l.v.SetDefault("dify.base_url", "")
+	l.v.SetDefault("dify.api_secret", "")
 }
 
 // setServerDefaults registers service endpoint defaults
@@ -428,9 +480,15 @@ func (l *Loader) setObservabilityDefaults() {
 
 	// Artifact
 	l.v.SetDefault("artifact.backend", "inmemory")
+	l.v.SetDefault("artifact.cos_bucket_url", "")
+	l.v.SetDefault("artifact.cos_secret_id", "")
+	l.v.SetDefault("artifact.cos_secret_key", "")
 
 	// Observability
 	l.v.SetDefault("observability.langfuse_enabled", false)
+	l.v.SetDefault("observability.langfuse_host", "")
+	l.v.SetDefault("observability.langfuse_public_key", "")
+	l.v.SetDefault("observability.langfuse_secret_key", "")
 
 	// Telemetry
 	l.v.SetDefault("telemetry.enabled", false)

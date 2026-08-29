@@ -13,14 +13,14 @@ type CortexConfig struct {
 	DBPath                string `mapstructure:"db_path"`
 	MaxResults            int    `mapstructure:"max_results"`
 	MaxMessagesPerSession int    `mapstructure:"max_messages_per_session"`
-	EmbeddingBaseURL      string `mapstructure:"embedding_base_url"`
-	EmbeddingAPIKey       string `mapstructure:"embedding_api_key"`
-	EmbeddingModel        string `mapstructure:"embedding_model"`
+	EmbeddingBaseURL      string `mapstructure:"embedding_base_url" envexpand:"true"`
+	EmbeddingAPIKey       string `mapstructure:"embedding_api_key" envexpand:"true"`
+	EmbeddingModel        string `mapstructure:"embedding_model" envexpand:"true"`
 	// Reranker config. When RerankerModel is empty, reranking is
 	// disabled. RerankerBaseURL/APIKey default to embedding values.
-	RerankerBaseURL string `mapstructure:"reranker_base_url"`
-	RerankerAPIKey  string `mapstructure:"reranker_api_key"`
-	RerankerModel   string `mapstructure:"reranker_model"`
+	RerankerBaseURL string `mapstructure:"reranker_base_url" envexpand:"true"`
+	RerankerAPIKey  string `mapstructure:"reranker_api_key" envexpand:"true"`
+	RerankerModel   string `mapstructure:"reranker_model" envexpand:"true"`
 	// SearchStrategy defines the retrieval parameter space.
 	// When nil/empty, defaults to hybrid 70/30.
 	SearchStrategy *SearchStrategyConfig `mapstructure:"search_strategy"`
@@ -51,7 +51,7 @@ type VerticalRoutingConfig struct {
 	Enabled      bool          `mapstructure:"enabled"`
 	TopN         int           `mapstructure:"top_n"`
 	Timeout      time.Duration `mapstructure:"timeout"`
-	GitHubAPIKey string        `mapstructure:"github_api_key"`
+	GitHubAPIKey string        `mapstructure:"github_api_key" envexpand:"true"`
 	// MergeMode controls how vertical results combine with local
 	// retrieval: "prepend" (vertical first), "append" (local first),
 	// "replace" (vertical only). Default "prepend".
@@ -83,8 +83,8 @@ type MemoryFlowConfig struct {
 	DBPath              string `mapstructure:"db_path"`
 	Namespace           string `mapstructure:"namespace"`
 	EmbeddingDimensions int    `mapstructure:"embedding_dimensions"`
-	PlannerModel        string `mapstructure:"planner_model"`
-	ExtractorModel      string `mapstructure:"extractor_model"`
+	PlannerModel        string `mapstructure:"planner_model" envexpand:"true"`
+	ExtractorModel      string `mapstructure:"extractor_model" envexpand:"true"`
 }
 
 // GraphFlowConfig defines the CortexDB GraphFlow settings for
@@ -92,7 +92,7 @@ type MemoryFlowConfig struct {
 type GraphFlowConfig struct {
 	Enabled        bool   `mapstructure:"enabled"`
 	DBPath         string `mapstructure:"db_path"`
-	ExtractorModel string `mapstructure:"extractor_model"`
+	ExtractorModel string `mapstructure:"extractor_model" envexpand:"true"`
 	MaxCharsPerDoc int    `mapstructure:"max_chars_per_doc"`
 	AutoExtract    bool   `mapstructure:"auto_extract"`
 }

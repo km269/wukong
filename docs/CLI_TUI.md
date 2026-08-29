@@ -1042,7 +1042,7 @@ DBPoolClose              → 最后关闭共享数据库连接池（PRAGMA wal_c
 package util
 
 var (
-    Version   = "0.3.1"
+    Version   = "0.3.3"
     GitCommit = "fix commit"
     BuildDate = "2026-08-5"
 )
@@ -1097,4 +1097,4 @@ EvolutionTracker 作为 Runner 级别插件，通过事件监听异步捕获执�
 
 ---
 
-> **版本**: v0.3.1 | **最后更新**: 2026-08-25 | **CLI 源文件**: 29 + TUI 3 = 32 | **顶层命令**: 30
+> **版本**: v0.3.3 | **最后更新**: 2026-08-29 | **CLI 源文件**: 29 + TUI 3 = 32 | **顶层命令**: 30

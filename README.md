@@ -135,7 +135,7 @@ ARD 协议实现 Agent 的双向发现（联邦搜索 + RegistryServer 发布）
 | **中期记忆** | CortexStore: HNSW 向量索引 + FTS5 全文检索 |
 | **长期记忆** | tRPC Memory: AutoExtract + SmartCleanup |
 | **结构化记忆** | GraphFlow: 实体抽取 → RDF 图谱 → SPARQL 查询 |
-| **知识格式** | OKF v0.1: 6 包集成 (okf/ard/cortex/evolution/knowledge/skill) |
+| **知识格式** | OKF v0.1: 6 包 7 集成点 (okf/ard/cortex×2/evolution/knowledge/skill) |
 
 ### 安全与沙箱
 
@@ -163,7 +163,7 @@ ARD 协议实现 Agent 的双向发现（联邦搜索 + RegistryServer 发布）
 |------|------|
 | **内置扩展** | 12 个: developer / computer_controller / memory / auto_visualiser / tutorial / top_of_mind / code_mode / apps / web / agent_tools / ard / cortex（`web` 内含 aggregate_search / bing / google / searxng / tavily 五个搜索后端工具） |
 | **MCP 扩展** | MCP Broker + 独立 MCP Server (:3401) + ACP-MCP Bridge (:3400) |
-| **多协议端点** | 7 个: A2A (:9090) / ACP (:9091) / AG-UI SSE (:8080) / ACP-MCP (:3400) / MCP Server (:3401) / ANP (:9092) / Gateway (飞书 WS) |
+| **多协议端点** | 7 个（6 监听 + 1 出站）: A2A (:9090) / ACP (:9091) / AG-UI SSE (:8080) / ACP-MCP (:3400) / MCP Server (:3401) / ANP (:9092) / Gateway (飞书 WS 出站) |
 | **消息网关** | Gateway 插件式 Channel 架构: 飞书 WebSocket 长连接 (内部 goroutine，无独立 HTTP 端口) |
 | **Agent 互通** | ANP 协议栈: DID 身份 + 能力协商 + E2EE 加密 + HTTP 签名 |
 | **双向发现** | ARD: 联邦搜索 + 本地 Catalog + RegistryServer 发布 |
@@ -443,7 +443,7 @@ GatewayServer (transport-agnostic)
 
 | 文档 | 说明 |
 |------|------|
-| [系统架构](docs/ARCHITECTURE.md) | 系统架构与各子系统技术实现 · 24 ADR · 模块依赖 · 数据流 |
+| [系统架构](docs/ARCHITECTURE.md) | 系统架构与各子系统技术实现 · 模块依赖 · 数据流 |
 | [配置手册](docs/CONFIG.md) | 15 组配置 · 全字段说明 · 完整示例 |
 | [CLI & TUI 架构](docs/CLI_TUI.md) | 命令树 · TUI 架构 · 启动序列 · 事件管道 |
 | [API 参考](docs/API_REFERENCE.md) | CoreLoop · Provider · Extension · Security 等 Go 接口与结构体 |

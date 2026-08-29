@@ -114,6 +114,17 @@ func (c *WukongConfig) Validate() error {
 		)
 	}
 
+	// Validate agent planner.
+	switch c.Agent.Planner {
+	case "", "builtin", "react":
+		// Valid. Empty disables the planner.
+	default:
+		return fmt.Errorf(
+			"agent.planner %q is invalid; use builtin or react",
+			c.Agent.Planner,
+		)
+	}
+
 	// Validate workflow mode.
 	switch WorkflowMode(c.Workflow.Mode) {
 	case WorkflowModeSingle, WorkflowModeChain, WorkflowModeParallel,

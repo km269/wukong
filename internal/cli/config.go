@@ -5,8 +5,6 @@ package cli
 import (
 	"fmt"
 	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -65,25 +63,25 @@ Examples:
 func runConfigValidate(cmd *cobra.Command, args []string) error {
 	configPath, _ := cmd.Flags().GetString("config")
 
-	// Try to locate the config file
-	resolvedPath := resolveConfigPath(configPath)
-	if resolvedPath != "" {
-		if _, err := os.Stat(resolvedPath); err != nil {
-			fmt.Printf("⚠ config file not found: %s\n", resolvedPath)
-		} else {
-			fmt.Printf("📄 config file: %s\n", resolvedPath)
-		}
-	}
-
 	// Load configuration and run the full validation rules —
 	// the same path as startup (bootstrapSession →
 	// loader.LoadAndValidate), so todo/mcp_server/sandbox/port
-	// conflict and all other fatal checks in validate.go apply
-	// here too.
+	// conflict, planner and all other fatal checks in validate.go
+	// apply here too.
 	loader, err := config.NewLoader(configPath)
 	if err != nil {
 		fmt.Printf("✗ failed to create config loader: %v\n", err)
 		return fmt.Errorf("config load: %w", err)
+	}
+
+	// The loader reports the file it actually read, so the
+	// search-path priority lives in exactly one place.
+	if used := loader.ConfigFileUsed(); used != "" {
+		if _, err := os.Stat(used); err != nil {
+			fmt.Printf("⚠ config file not found: %s\n", used)
+		} else {
+			fmt.Printf("📄 config file: %s\n", used)
+		}
 	}
 
 	wukongCfg, err := loader.LoadAndValidate()
@@ -124,22 +122,24 @@ func runConfigValidate(cmd *cobra.Command, args []string) error {
 // config.WukongConfig.Validate() so this advisory path (used by
 // bench/health) and the startup path can never drift apart. Only
 // advisory checks that Validate() deliberately does not treat as
-// fatal (missing model, missing API key, ACP agent_url, planner,
+// fatal (missing model, missing API key, ACP agent_url,
 // lightweight_provider fallback) are implemented here.
 func runFullValidation(cfg *config.WukongConfig) []string {
 	var issues []string
 
-	// 1. Default provider must be set
+	// 1. Delegate enum/range/fatal rules to the canonical validator.
+	// This always runs — a missing default_provider must not mask
+	// other fatal problems (port conflicts, invalid enums, ...).
+	if err := cfg.Validate(); err != nil {
+		issues = append(issues, err.Error())
+	}
+
+	// 2. Default provider must be set (advisory here; startup can
+	// still be launched with --provider).
 	if cfg.DefaultProvider == "" {
 		issues = append(issues,
 			"default_provider is not set — "+
 				"use --provider flag or set in config.yaml")
-		return issues // Can't validate further without provider
-	}
-
-	// 2. Delegate enum/range/fatal rules to the canonical validator.
-	if err := cfg.Validate(); err != nil {
-		issues = append(issues, err.Error())
 	}
 
 	// 3. Default provider must have a model configured
@@ -166,18 +166,7 @@ func runFullValidation(cfg *config.WukongConfig) []string {
 		}
 	}
 
-	// 6. Planner validation
-	if cfg.Agent.Planner != "" {
-		validPlanners := map[string]bool{"builtin": true, "react": true}
-		if !validPlanners[cfg.Agent.Planner] {
-			issues = append(issues,
-				fmt.Sprintf("unknown planner %q; "+
-					"supported: builtin, react",
-					cfg.Agent.Planner))
-		}
-	}
-
-	// 7. Lightweight model fallback chain check
+	// 6. Lightweight model fallback chain check
 	if cfg.LightweightProvider != "" &&
 		cfg.FindProvider(cfg.LightweightProvider) == nil {
 		issues = append(issues,
@@ -219,18 +208,18 @@ Examples:
 func runConfigShow(cmd *cobra.Command, args []string) error {
 	configPath, _ := cmd.Flags().GetString("config")
 
-	// Show config file location
-	resolvedPath := resolveConfigPath(configPath)
-	if resolvedPath != "" {
-		if _, err := os.Stat(resolvedPath); err == nil {
-			fmt.Printf("# Config file: %s\n", resolvedPath)
-		}
-	}
-
 	// Load configuration
 	loader, err := config.NewLoader(configPath)
 	if err != nil {
 		return fmt.Errorf("create config loader: %w", err)
+	}
+
+	// The loader reports the file it actually read; empty means the
+	// output below is pure built-in defaults + env overrides.
+	if used := loader.ConfigFileUsed(); used != "" {
+		if _, err := os.Stat(used); err == nil {
+			fmt.Printf("# Config file: %s\n", used)
+		}
 	}
 
 	wukongCfg, err := loader.Load()
@@ -246,47 +235,4 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 
 	fmt.Println(string(data))
 	return nil
-}
-
-// ==========================================================================
-// Helpers
-// ==========================================================================
-
-// resolveConfigPath resolves the effective config file path from the
-// given user-specified path or auto-discovery. Returns empty string
-// if the config file cannot be determined.
-func resolveConfigPath(userPath string) string {
-	if userPath != "" {
-		if info, err := os.Stat(userPath); err == nil {
-			if info.IsDir() {
-				return filepath.Join(userPath, "config.yaml")
-			}
-			return userPath
-		}
-		return userPath
-	}
-
-	// Auto-discovery: same priority as Viper
-	candidates := []string{
-		"config.yaml",
-	}
-
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		candidates = append(candidates,
-			filepath.Join(homeDir, ".config", "wukong", "config.yaml"))
-	}
-
-	// Mirror config.NewLoader: /etc/wukong is only meaningful on
-	// Unix-like systems; skip it on Windows.
-	if runtime.GOOS != "windows" {
-		candidates = append(candidates, "/etc/wukong/config.yaml")
-	}
-
-	for _, c := range candidates {
-		if _, err := os.Stat(c); err == nil {
-			return c
-		}
-	}
-
-	return ""
 }

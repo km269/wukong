@@ -24,7 +24,7 @@ type GatewayConfig struct {
 	Enabled bool `mapstructure:"enabled"`
 
 	// DefaultTimeout is the maximum duration for an agent run
-	// triggered by a platform message. Default: "120s".
+	// triggered by a platform message. Default: "900s".
 	DefaultTimeout time.Duration `mapstructure:"default_timeout"`
 
 	// MaxConcurrentSessions limits concurrent agent sessions
@@ -62,7 +62,7 @@ type FeishuChannelConfig struct {
 	// establish the WebSocket long-connection and to obtain the
 	// tenant_access_token for sending replies.
 	// Supports ${ENV_VAR} expansion.
-	AppSecret string `mapstructure:"app_secret"`
+	AppSecret string `mapstructure:"app_secret" envexpand:"true"`
 
 	// APIBase is the base URL for the Feishu/Lark Open API.
 	// Default: "https://open.feishu.cn/open-apis".
@@ -73,14 +73,14 @@ type FeishuChannelConfig struct {
 	// settings. Required only if the app's encryption strategy is
 	// enabled (the SDK uses it to decrypt event payloads received
 	// over the long-connection). Supports ${ENV_VAR} expansion.
-	EncryptKey string `mapstructure:"encrypt_key"`
+	EncryptKey string `mapstructure:"encrypt_key" envexpand:"true"`
 
 	// VerificationToken is the legacy event subscription
 	// verification token. In long-connection mode the SDK no
 	// longer verifies it; the field is retained for backward
 	// config compatibility. Supports ${ENV_VAR} expansion.
 	// Deprecated: has no effect in long-connection mode.
-	VerificationToken string `mapstructure:"verification_token"`
+	VerificationToken string `mapstructure:"verification_token" envexpand:"true"`
 
 	// StreamCardEnabled enables streaming card replies for
 	// real-time display. When disabled, a single text reply is

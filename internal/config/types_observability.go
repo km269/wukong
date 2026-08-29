@@ -19,8 +19,8 @@ type TelemetryConfig struct {
 type ObservabilityConfig struct {
 	LangfuseEnabled   bool   `mapstructure:"langfuse_enabled"`
 	LangfuseHost      string `mapstructure:"langfuse_host"`
-	LangfusePublicKey string `mapstructure:"langfuse_public_key"`
-	LangfuseSecretKey string `mapstructure:"langfuse_secret_key"`
+	LangfusePublicKey string `mapstructure:"langfuse_public_key" envexpand:"true"`
+	LangfuseSecretKey string `mapstructure:"langfuse_secret_key" envexpand:"true"`
 }
 
 // EvalConfig configures the evaluation/regression testing system.
@@ -41,6 +41,6 @@ type EvalMetricConfig struct {
 type ArtifactConfig struct {
 	Backend      string `mapstructure:"backend"`
 	COSBucketURL string `mapstructure:"cos_bucket_url"`
-	COSSecretID  string `mapstructure:"cos_secret_id"`
-	COSSecretKey string `mapstructure:"cos_secret_key"`
+	COSSecretID  string `mapstructure:"cos_secret_id" envexpand:"true"`
+	COSSecretKey string `mapstructure:"cos_secret_key" envexpand:"true"`
 }

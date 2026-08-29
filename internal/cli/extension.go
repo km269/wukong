@@ -506,18 +506,18 @@ Examples:
 func runExtensionRemove(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
-	// Resolve the config file path first
-	resolvedCfg := resolveConfigPath("")
+	// Load configuration; the loader reports the file it actually
+	// read, so removal can fail early when running purely on
+	// built-in defaults (nothing on disk to edit).
+	loader, err := config.NewLoader("")
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	resolvedCfg := loader.ConfigFileUsed()
 	if resolvedCfg == "" {
 		return fmt.Errorf(
 			"config file not found — extension removal requires " +
 				"a config.yaml to write changes")
-	}
-
-	// Load configuration
-	loader, err := config.NewLoader("")
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
 	}
 	wukongCfg, err := loader.Load()
 	if err != nil {

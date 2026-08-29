@@ -15,7 +15,7 @@ type SessionConfig struct {
 	TTL            time.Duration `mapstructure:"ttl"`
 	EnableSummary  bool          `mapstructure:"enable_summary"`
 	SummaryTrigger int           `mapstructure:"summary_trigger"`
-	RedisURL       string        `mapstructure:"redis_url"`
+	RedisURL       string        `mapstructure:"redis_url" envexpand:"true"`
 	// EnableModelEventLog turns on the Wukong-level model-visible
 	// event log (wukong_model_events table). This is distinct from
 	// the framework session service's own event log: it records the
@@ -32,9 +32,9 @@ type MemoryConfig struct {
 	MaxMemories             int           `mapstructure:"max_memories"`
 	AutoExtract             bool          `mapstructure:"auto_extract"`
 	ExtractTimeout          time.Duration `mapstructure:"extract_timeout"`
-	ExtractorProvider       string        `mapstructure:"extractor_provider"`
-	ExtractorModel          string        `mapstructure:"extractor_model"`
-	ExtractorPrompt         string        `mapstructure:"extractor_prompt"`
+	ExtractorProvider       string        `mapstructure:"extractor_provider" envexpand:"true"`
+	ExtractorModel          string        `mapstructure:"extractor_model" envexpand:"true"`
+	ExtractorPrompt         string        `mapstructure:"extractor_prompt" envexpand:"true"`
 	RecencyWeight           float64       `mapstructure:"recency_weight"`
 	ReferenceWeight         float64       `mapstructure:"reference_weight"`
 	ImportanceWeight        float64       `mapstructure:"importance_weight"`

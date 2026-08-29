@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -42,7 +41,13 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	fmt.Println("=== Wukong Configuration Wizard ===")
 	fmt.Println()
 
-	cfg := defaultConfig()
+	// Start from the single source of truth for built-in defaults
+	// (internal/config defaults.go) instead of a second hand-
+	// maintained copy that would silently drift.
+	cfg := config.Defaults()
+	cfg.DefaultProvider = ""
+	cfg.Providers = nil
+	cfg.Extensions = nil
 
 	reader := bufio.NewReader(os.Stdin)
 
@@ -169,109 +174,6 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	fmt.Println("Run 'wukong session' to start using wukong!")
 
 	return nil
-}
-
-// defaultConfig returns a configuration with sensible defaults.
-func defaultConfig() *config.WukongConfig {
-	return &config.WukongConfig{
-		DefaultProvider: "lmstudio",
-		Session: config.SessionConfig{
-			Backend:        "sqlite",
-			DBPath:         "wukong.db",
-			EventLimit:     500,
-			TTL:            0, // unlimited
-			EnableSummary:  true,
-			SummaryTrigger: 50,
-		},
-		Memory: config.MemoryConfig{
-			Backend:     "sqlite",
-			DBPath:      "wukong.db",
-			MaxMemories: 100,
-			AutoExtract: true,
-		},
-		Todo: config.TodoConfig{
-			Backend: "sqlite",
-			DBPath:  "wukong.db",
-		},
-		Agent: config.AgentConfig{
-			MaxLLMCalls:            50,
-			MaxToolIterations:      30,
-			ParallelTools:          true,
-			Streaming:              true,
-			MaxRunDuration:         300 * time.Second,
-			Temperature:            0.7,
-			MaxTokens:              4096,
-			ToolRetryEnabled:       true,
-			ToolRetryMaxAttempts:   3,
-			ToolRetryInitialWait:   time.Second,
-			ToolRetryBackoffFactor: 2.0,
-			EnablePostToolPrompt:   true,
-		},
-		Security: config.SecurityConfig{
-			MalwareScanEnabled:     true,
-			BlockDangerousCommands: true,
-			DefaultTimeout:         30 * time.Second,
-			MaxTimeout:             300 * time.Second,
-			BlockedCommands: []string{
-				"rm -rf /", "dd if=/dev/zero",
-				"mkfs.", "> /dev/sda", "fork bomb",
-			},
-		},
-		Revision: config.RevisionConfig{
-			Enabled:              true,
-			RevisionProvider:     "",
-			RevisionModel:        "",
-			MaxCommandOutput:     8000,
-			EnableSemanticSearch: false,
-			SearchStrategy:       "include_all",
-			MaxContextTokens:     64000,
-			TrimRatio:            0.3,
-		},
-		Browser: config.BrowserConfig{
-			Enabled:         true,
-			BrowserType:     "chromium",
-			Headless:        true,
-			CacheDir:        ".wukong/cache",
-			MaxDownloadSize: 104857600, // 100MB
-			Timeout:         60 * time.Second,
-		},
-		Recall: config.RecallConfig{
-			Enabled:               true,
-			Backend:               "sqlite",
-			DBPath:                "wukong.db",
-			MaxResults:            10,
-			MaxMessagesPerSession: 200,
-		},
-		Visualiser: config.VisualiserConfig{
-			Enabled:   true,
-			OutputDir: ".wukong/visuals",
-			MaxWidth:  1200,
-			MaxHeight: 800,
-		},
-		Tutorial: config.TutorialConfig{
-			Enabled:  true,
-			Language: "zh",
-		},
-		TopOfMind: config.TopOfMindConfig{
-			Enabled:         true,
-			InstructionFile: ".wukong/instructions.md",
-			MaxLength:       2000,
-		},
-		CodeMode: config.CodeModeConfig{
-			Enabled:     true,
-			Timeout:     10 * time.Second,
-			MaxMemoryMB: 128,
-		},
-		Apps: config.AppsConfig{
-			Enabled: true,
-			AppDir:  ".wukong/apps",
-		},
-		Summon: config.SummonConfig{
-			Enabled:       true,
-			DelegatesDir:  ".wukong/skills",
-			MaxConcurrent: 5,
-		},
-	}
 }
 
 // readLine reads a line from the reader, returning a default if empty.

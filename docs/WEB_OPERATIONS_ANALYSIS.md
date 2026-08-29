@@ -394,7 +394,7 @@ fetchAndConvertPage(url) → (title, text, markdown)
 
 ## 5. 搜索调优引擎
 
-### 5.1 SearchGenome — 13 参数策略基因组（`internal/search/genome.go`）
+### 5.1 SearchGenome — 12 参数策略基因组（`internal/search/genome.go`）
 
 ```go
 type SearchGenome struct {
@@ -971,4 +971,4 @@ httpclient:
 
 ---
 
-> **版本**: v0.3.1 | **最后更新**: 2026-08-25 | **范围**: browser / apps(clone,pack) / search(tune/vertical/chunking) / errsignal / pkg/httpclient / pkg/zim
+> **版本**: v0.3.3 | **最后更新**: 2026-08-29 | **范围**: browser / apps(clone,pack) / search(tune/vertical/chunking) / errsignal / pkg/httpclient / pkg/zim

@@ -22,9 +22,11 @@ type ServerTLSConfig struct {
 }
 
 type ServerAuthConfig struct {
-	Type      string `mapstructure:"type"`
-	APIKey    string `mapstructure:"api_key"`
-	JWTSecret string `mapstructure:"jwt_secret"`
+	Type string `mapstructure:"type"`
+	// APIKey and JWTSecret support ${ENV_VAR} expansion; the tag is
+	// consumed by the config package's tag-driven expandSecrets walk.
+	APIKey    string `mapstructure:"api_key" envexpand:"true"`
+	JWTSecret string `mapstructure:"jwt_secret" envexpand:"true"`
 }
 
 type ServerRateLimitConfig struct {

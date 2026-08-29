@@ -242,7 +242,7 @@ session:
 | AG-UI SSE | `:8080` `/agui` | `agui.address` / `agui.path` | 禁用 |
 | ACP Server | `:9091` `/acp` | `acp_server.address` / `acp_server.path` | 禁用 |
 | **ACP MCP Bridge** | `:3400` `/mcp` | `acp_mcp.address` / `acp_mcp.path` | **默认启用** |
-| Standalone MCP Server | 无内置默认（config.yaml 模板为 `:3401`，`mcp_server.enabled: true` 时 `address` 必填） | `mcp_server.address` | 禁用 |
+| Standalone MCP Server | `:3401` | `mcp_server.address` | 禁用 |
 | ANP Server | `:9092` | `anp.port` | 禁用 |
 | ARD Registry | 动态 / `0` | `ard.publish_port` | 禁用 |
 | Health HTTP | `:8086` | 硬编码（仅 server 模式） | server 模式自动启用 |
@@ -463,7 +463,7 @@ telemetry:
   exporter_type: grpc          # 默认 console
   endpoint: localhost:4317     # OTel Collector 默认地址
   service_name: wukong
-  service_version: v0.3.1
+  service_version: v0.3.3
   environment: production
   sample_rate: 1.0             # 1.0 = 全采样
 ```
@@ -732,4 +732,4 @@ cp ~/.config/wukong/wukong.db-shm /backup/ 2>/dev/null || true
 
 ---
 
-> **版本**: v0.3.1 | **最后更新**: 2026-08-25
+> **版本**: v0.3.3 | **最后更新**: 2026-08-29

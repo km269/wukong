@@ -4,6 +4,42 @@ All changes after v0.1.14 baseline.
 
 ---
 
+## [0.3.3] — 2026-08-29
+
+### 配置体系重构（tag 驱动，消除三份默认值体系与 120 行样板）
+
+**环境变量展开：120 行手工枚举 → tag 驱动反射遍历**
+
+- 新增 `envexpand:"true"` 结构体标签：`expandSecrets` 改为递归反射遍历整棵配置树，带标签的 string 字段自动执行 `${VAR}` / `${VAR:-default}` 展开。此前每接入一个新密钥字段都要在 `expandSecrets` 手工加一行，遗漏即静默不展开；此后新增字段只需打标签，零维护成本
+- 全面盘点并补齐标签：provider（BaseURL/APIKey/Model）、a2a 远端三密钥、dify、cortex 嵌入/reranker/垂直路由/双 flow 模型、session.redis_url、memory extractor、四家搜索、langfuse、COS、gateway.feishu 三密钥，以及 `server/security.go` 的服务端点鉴权键（agui/acp/mcp 鉴权键从"部分可展开"升级为全集可展开）
+
+**Viper AutomaticEnv 盲区修复（~25 个键）**
+
+- Viper 的已知行为：未 `SetDefault` 注册的键无法被 `WUKONG_*` 环境变量覆盖。补齐 memory.extractor_*、session.redis_url、cortex.embedding_base_url/api_key、cortex.reranker_*、browser 搜索（google/bing 全部、workers=4）、apps.clone TLS、anp.did_*、knowledge.embedder_provider、workflow 双 bin、dify、artifact.cos_*、observability.langfuse_*、revision 等——环境变量覆盖能力从"部分生效"变为全量生效
+- 刻意不注册 `cortex.vertical_routing` / `search_strategy` / `chunking` 的默认值：三者均为指针字段，`nil` 即"未启用"语义，注册默认值会改变 opt-in 行为
+
+**单一事实源：`config.Defaults()`**
+
+- 删除 `cli/configure.go` 中 ~100 行硬编码 `defaultConfig()`（第三份默认值副本，已与 defaults.go 漂移），改为从内置默认值 Unmarshal；`wukong configure` 从此与实际加载路径同源
+
+**配置加载与校验去重**
+
+- 新增 `Loader.ConfigFileUsed()`，删除 `resolveConfigPath`（~35 行与 Loader 重复的搜索逻辑）；env/extension/config show-validate 四处调用方统一
+- `agent.planner` 枚举校验提升为 `Validate()` 致命项（此前仅在 `wukong config validate` 附加检查，库调用路径不生效）；`runFullValidation` 不再因缺 default_provider 提前返回而跳过其余致命检查
+- 清理死代码：`deprecationWarnings` 字段（对应迁移函数从未存在）、types_server.go 中 4 个未使用类型别名；修复 120s/900s、`types.go` 等注释与代码不符
+
+**config.yaml 模板重写注释**
+
+- 头部加载优先级说明修正为实际 4 级模型（flags > `WUKONG_*` > YAML > 内置默认值），说明 tag 驱动的 env 展开机制
+- 全量标注模板值与内置默认值的偏差（~25 处 `# ≠ default`，如 `agent.max_tool_iterations: 50 # ≠ default 30`）：模板中的功能值全部保持不变，仅让偏差显式可见
+
+**文档口径统一**
+
+- 修正事实错误：vLLM 默认端口 8888→8000、独立 MCP server 默认地址补 `:3401`、`pkg/` 模块数补 capability、SearchGenome 参数数 13→12、移除"24 ADR"失实描述
+- 统一监听端口（6 个）与 OKF 集成口径；8+ 文档版本尾注统一至 v0.3.3
+
+---
+
 ## [0.3.2] — 2026-08-26
 
 ### 反反爬体系升级（对照 2026 反爬检测三层战场：CDP 协议指纹 / TLS-JA3 指纹 / 行为统计建模）

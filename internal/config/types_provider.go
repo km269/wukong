@@ -26,9 +26,9 @@ const (
 type ProviderConfig struct {
 	Name     string `mapstructure:"name"`
 	Type     string `mapstructure:"type"`
-	BaseURL  string `mapstructure:"base_url"`
-	APIKey   string `mapstructure:"api_key"`
-	Model    string `mapstructure:"model"`
+	BaseURL  string `mapstructure:"base_url" envexpand:"true"`
+	APIKey   string `mapstructure:"api_key" envexpand:"true"`
+	Model    string `mapstructure:"model" envexpand:"true"`
 	AgentURL string `mapstructure:"agent_url"`
 	MCPPort  string `mapstructure:"mcp_port"`
 	// ContextWindow is the model's maximum context token count

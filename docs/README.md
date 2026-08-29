@@ -2,7 +2,7 @@
 
 > 本目录包含 Wukong AI Agent 平台的所有技术文档。
 >
-> 最后更新：2026-08-25 | 当前版本：v0.3.1
+> 最后更新：2026-08-29 | 当前版本：v0.3.3
 >
 > **版本约定**：各文档尾注的"版本"统一跟随项目版本（权威源为
 > [internal/util/version.go](../internal/util/version.go) 与
@@ -35,6 +35,7 @@
 | [反反爬技术详解](ANTIBOT_GUIDE.md) | 5 级反爬升级体系详解 | Antibot、Escalator、Stealth、Proxy Pool |
 | [记忆系统架构](MEMORY_ARCHITECTURE.md) | 双引擎三层记忆详解 | MemoryFlow、CortexDB、GraphFlow、SmartCleanup |
 | [OKF 知识格式](OKF_GUIDE.md) | OKF v0.1 规范与集成 | Bundle、Concept、Skill、Knowledge、Evolution |
+| [配置体系重构记录](REFACTOR_NOTES.md) | v0.3.3 配置重构变更明细与操作基线 | envexpand、defaults.go、偏差标注、口径速查 |
 
 ### 其他
 
@@ -109,7 +110,7 @@
 | 内置扩展 | 12 个（`web` 扩展内含 5 个搜索后端工具） |
 | 反爬升级体系 | 5 级 |
 | 安全防御层 | 5 层 |
-| 服务端点 | 6 个协议 |
+| 服务端点 | 7 个协议（6 监听 + 飞书 Gateway 出站 WS） |
 | 记忆层级 | 4 层 |
 | 克隆层分页检测 | 3 种检测模式 + 游标兜底 |
 | 浏览器 API 发现层 | 5 种 kind |

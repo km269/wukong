@@ -106,9 +106,24 @@
 
 ## 2. 环境变量展开
 
-支持 `${ENV_VAR}` 和 `${VAR:-default}` 两种语法，运行时由 `expandSecrets()`（`config.go:383`）自动展开。展开逻辑基于 `os.Expand`，支持 bash 风格的 `:-` 默认值回退。
+支持 `${ENV_VAR}` 和 `${VAR:-default}` 两种语法，运行时由加载器自动展开。展开逻辑基于 `os.Expand`，支持 bash 风格的 `:-` 默认值回退。
 
-### 2.1 语法
+### 2.1 机制：`envexpand` 标签驱动（v0.3.3 起）
+
+可展开字段由结构体标签声明，加载器通过反射递归遍历整棵 `WukongConfig` 配置树，对带 `envexpand:"true"` 标签的 string 字段执行展开：
+
+```go
+// internal/config/types_provider.go
+type ProviderConfig struct {
+    APIKey  string `mapstructure:"api_key"  envexpand:"true"`
+    BaseURL string `mapstructure:"base_url" envexpand:"true"`
+    Model   string `mapstructure:"model"    envexpand:"true"`
+}
+```
+
+新增可展开字段只需在对应 `types_*.go` 中打标签，无需改动展开逻辑；数组元素（如 `providers[]`）按索引（有 `name` 字段时按名称）生成偏差路径，用于未解析变量警告。
+
+### 2.2 语法
 
 ```yaml
 # 直接引用环境变量
@@ -118,30 +133,29 @@ api_key: ${OPENAI_API_KEY}
 base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
 ```
 
-### 2.2 支持展开的字段（20+ 类）
+### 2.3 支持展开的字段（20+ 类）
 
-未解析的 `${VAR}`（无 `:-default` 且 `VAR` 未设）会被 `expandEnvTracked()` 记录到 `unresolvedEnvVars`，并通过 `Warnings()` 输出，便于发现拼写错误（如 `${OEPNAI_API_KEY}`）。
+未解析的 `${VAR}`（无 `:-default` 且 `VAR` 未设）会被记录到 `unresolvedEnvVars`，并通过 `Warnings()` 输出，便于发现拼写错误（如 `${OEPNAI_API_KEY}`）。
 
-| 类别 | 字段 | 源码位置 |
+| 类别 | 字段 | 标签位置 |
 |------|------|---------|
-| **Providers** | `api_key`, `base_url`, `model` | `config.go`（expandSecrets） |
-| **A2A Remotes** | `api_key`, `jwt_secret`, `oauth_client_secret` | `config.go`（expandSecrets） |
-| **Gateway Feishu** | `app_secret`, `encrypt_key`, `verification_token` | `config.go`（expandSecrets） |
-| **Observability (Langfuse)** | `langfuse_public_key`, `langfuse_secret_key` | `config.go`（expandSecrets） |
-| **Artifact (COS)** | `cos_secret_id`, `cos_secret_key` | `config.go`（expandSecrets） |
-| **ACP Server** | `security.auth.api_key` | `config.go`（expandSecrets） |
-| **MCP Server** | `security.auth.api_key` | `config.go`（expandSecrets，0.3.1 起支持） |
-| **Cortex Embedding** | `embedding_api_key`, `embedding_base_url`, `embedding_model` | `config.go`（expandSecrets） |
-| **Cortex Reranker** | `reranker_api_key`, `reranker_base_url`, `reranker_model` | `config.go`（expandSecrets） |
-| **Cortex Vertical Routing** | `github_api_key` | `config.go`（expandSecrets） |
-| **MemoryFlow** | `planner_model`, `extractor_model` | `config.go`（expandSecrets） |
-| **GraphFlow** | `extractor_model` | `config.go`（expandSecrets） |
-| **Dify** | `api_secret` | `config.go`（expandSecrets） |
-| **Session** | `redis_url` | `config.go`（expandSecrets） |
-| **Browser Search (SearXNG)** | `url`, `api_key` | `config.go`（expandSecrets） |
-| **Browser Search (Tavily)** | `api_key` | `config.go`（expandSecrets） |
-| **Browser Search (Google)** | `api_key`, `cse_id` | `config.go`（expandSecrets） |
-| **Browser Search (Bing)** | `api_key` | `config.go`（expandSecrets） |
+| **Providers** | `api_key`, `base_url`, `model` | `types_provider.go` |
+| **A2A Remotes** | `api_key`, `jwt_secret`, `oauth_client_secret` | `types_orchestration.go` |
+| **Dify** | `base_url`, `api_secret` | `types_orchestration.go` |
+| **Gateway Feishu** | `app_secret`, `encrypt_key`, `verification_token` | `internal/gateway/config.go` |
+| **Observability (Langfuse)** | `langfuse_public_key`, `langfuse_secret_key` | `types_observability.go` |
+| **Artifact (COS)** | `cos_secret_id`, `cos_secret_key` | `types_observability.go` |
+| **ACP / MCP Server** | `security.auth.api_key`, `jwt_secret` | `internal/server/security.go` |
+| **Cortex Embedding** | `embedding_api_key`, `embedding_base_url`, `embedding_model` | `types_cortex.go` |
+| **Cortex Reranker** | `reranker_api_key`, `reranker_base_url`, `reranker_model` | `types_cortex.go` |
+| **Cortex Vertical Routing** | `github_api_key` | `types_cortex.go` |
+| **MemoryFlow / GraphFlow / ImportFlow** | `planner_model`, `extractor_model` | `types_cortex.go` |
+| **Memory (tRPC)** | `extractor_model` 等 3 字段 | `types_storage.go` |
+| **Session** | `redis_url` | `types_storage.go` |
+| **Browser Search (SearXNG)** | `url`, `api_key` | `types_browser.go` |
+| **Browser Search (Tavily)** | `api_key` | `types_browser.go` |
+| **Browser Search (Google)** | `api_key`, `cse_id` | `types_browser.go` |
+| **Browser Search (Bing)** | `api_key` | `types_browser.go` |
 
 ---
 
@@ -1264,7 +1278,7 @@ providers:
   - name: vllm
     type: vllm
     api_key: ""
-    base_url: "http://localhost:8888/v1"
+    base_url: "http://localhost:8000/v1"
     model: "deepseek-v4-flash-0731"
     context_window: 131072
   - name: openai
