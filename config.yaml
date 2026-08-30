@@ -49,8 +49,8 @@
 # A. Global Settings
 # ===========================================================================
 log_level: "info"                    # debug | info | warn | error
-default_provider: "vllm"         # must match a name in providers[]
-lightweight_provider: "vllm"     # background tasks (empty = default_provider)
+default_provider: "openai"         # must match a name in providers[]
+lightweight_provider: "openai"     # background tasks (empty = default_provider)
 lightweight_model: "deepseek-v4-flash-0731"  # background lightweight model name
 
 # ===========================================================================
@@ -63,9 +63,9 @@ lightweight_model: "deepseek-v4-flash-0731"  # background lightweight model name
 providers:
   - name: "openai"
     type: "openai"
-    api_key: "${OPENAI_API_KEY}"
-    base_url: "https://api.openai.com/v1"
-    model: "gpt-4o"
+    api_key: "sk-sp-H.DIEHDL.EuIz.MEYCIQCpEjqZn5lOGKBJMozAcrDIFn1N9nYyXFSu33-pBeJJsQIhAN2hd5aQ2KCyGbFyuZKbsZ-3bPtQ4uHqqe_Y-P61ta5r"
+    base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    model: "deepseek-v4-flash-0731"
 
   - name: "anthropic"
     type: "anthropic"
