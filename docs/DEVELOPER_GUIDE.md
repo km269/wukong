@@ -42,7 +42,7 @@ module github.com/km269/wukong
 go 1.26
 ```
 
-[go.mod](../go.mod) 包含 **29 个直接依赖**，核心框架为：
+[go.mod](../go.mod) 包含 **36 个直接依赖**，核心框架为：
 
 | 框架 | 版本 | 用途 |
 |------|------|------|
@@ -69,7 +69,7 @@ go 1.26
 git clone <repo-url> wukong && cd wukong
 go mod download
 go build -o wukong ./cmd/wukong
-./wukong version   # 验证：Version: 0.3.1
+./wukong version   # 验证：Version: 0.3.3
 ```
 
 ---
@@ -85,7 +85,7 @@ wukong/
 │   ├── zim-check/                    #   ZIM 归档校验工具
 │   └── zim-ls/                       #   ZIM 归档列出工具
 │
-├── internal/                         # 私有业务逻辑（33 个包）
+├── internal/                         # 私有业务逻辑（33 顶层包 + 23 子包 = 56 包）
 │   ├── agent/                        # ★ Agent 核心循环与编排
 │   ├── apps/                         # 应用克隆/打包/MCP 应用
 │   ├── ard/                          # Agent 注册发现
@@ -101,7 +101,7 @@ wukong/
 │   ├── eval/                         # 评测框架
 │   ├── evolution/                    # 技能自演化引擎
 │   ├── extension/                    # ★ 扩展/工具管理
-│   │   └── builtin/                  #   12+ 内置工具集
+│   │   └── builtin/                  #   12 个内置工具集
 │   ├── gateway/                      # 外部网关（飞书等）
 │   ├── health/                       # 健康检查
 │   ├── knowledge/                    # RAG 知识管理
@@ -696,7 +696,7 @@ cmd.AddCommand(newFooCmd())
 
 - 管理类命令：`*_mgmt.go`（如 `memory_mgmt.go`、`apps_mgmt.go`）
 - 功能命令：`<name>.go`（如 `health.go`、`env.go`）
-- 当前已有 30 个顶层命令，按此模式扩展
+- 当前已有 30 个顶层命令（root.go 注册），按此模式扩展
 
 ---
 
@@ -757,7 +757,7 @@ go test -short -race -count=1 ./internal/... ./pkg/...
 
 ### 11.3 关键测试文件
 
-项目包含 **73+ 测试文件**，核心测试包括：
+项目包含 **130+ 测试文件**，核心测试包括：
 
 | 测试文件 | 覆盖范围 |
 |----------|----------|
@@ -858,7 +858,7 @@ OpenTelemetry 分布式追踪通过 [telemetry/](../internal/telemetry/) 包实�
 
 ### 13.1 类型文件组织
 
-配置类型定义在 `internal/config/` 下，按子系统拆分为 10 个 `types_*.go`，根结构体 `WukongConfig` 汇总于 [config.go](../internal/config/config.go)：
+配置类型定义在 `internal/config/` 下，按子系统拆分为 10 个 `types_*.go`，根结构体 `WukongConfig` 汇总于 [config.go](../internal/config/config.go)。全包共 54 个 `*Config` 结构体（11 个文件）：
 
 | 文件 | 主要类型 |
 |------|----------|
@@ -914,16 +914,16 @@ make clean         # 清理构建产物
 
 ### 14.2 ldflags 版本注入
 
-版本信息通过 ldflags 在构建时注入到 `internal/cli` 包：
+版本信息通过 ldflags 在构建时注入到 `internal/util` 包的版本变量（权威定义在 [version.go](../internal/util/version.go)）：
 
 ```makefile
 LDFLAGS := -s -w \
-    -X github.com/km269/wukong/internal/cli.Version=$(VERSION) \
-    -X github.com/km269/wukong/internal/cli.GitCommit=$(GIT_COMMIT) \
-    -X github.com/km269/wukong/internal/cli.BuildDate=$(BUILD_DATE)
+    -X github.com/km269/wukong/internal/util.Version=$(VERSION) \
+    -X github.com/km269/wukong/internal/util.GitCommit=$(GIT_COMMIT) \
+    -X github.com/km269/wukong/internal/util.BuildDate=$(BUILD_DATE)
 ```
 
-默认版本信息定义在 [version.go](../internal/util/version.go)：`Version = "0.3.3"`。
+> ⚠️ **注意**：Makefile 中曾误配置为 `internal/cli.Version`（cli 包中不存在该变量），版本变量实际定义于 `internal/util/version.go`。修正后的目标应为 `internal/util.*`。
 
 ### 14.3 Taskfile.yaml
 
@@ -999,4 +999,4 @@ docs(agent): correct CoreLoop.Run signature in developer guide
 
 ---
 
-> **版本**: v0.3.3 | **最后更新**: 2026-08-29 | **Go**: 1.26 | **直接依赖**: 29 | **测试文件**: 73+
+> **版本**: v0.3.3 | **最后更新**: 2026-08-30 | **Go**: 1.26 | **直接依赖**: 36 | **测试文件**: 130+

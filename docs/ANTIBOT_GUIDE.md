@@ -1250,4 +1250,4 @@ UTLS HelloChrome_Auto:
 
 ---
 
-> **版本**: v0.3.3 | **最后更新**: 2026-08-29 | **相关代码**: internal/browser/ + internal/errsignal/
+> **版本**: v0.3.3 | **最后更新**: 2026-08-30 | **相关代码**: internal/browser/ + internal/errsignal/

@@ -1,8 +1,8 @@
 # Wukong 配置参考手册
 
 > 配置文件: `config.yaml`（项目根目录，完整模板） | 加载器: Viper + Cobra
-> 配置代码: `internal/config/`（16 文件 = 3 个 `*_test.go` 测试 + 13 个核心文件：`config.go`、`defaults.go`、`validate.go` 及 10 个 `types_*.go`）
-> 配置结构: `WukongConfig` 根结构体（`config.go:97`）含 35+ 子配置段
+> 配置代码: `internal/config/`（17 文件 = 3 个 `*_test.go` 测试 + 14 个核心文件：`config.go`、`defaults.go`、`validate.go`、`marshal.go` 及 10 个 `types_*.go`；54 个 `*Config` 结构体分布在 11 个文件）
+> 配置结构: `WukongConfig` 根结构体（`config.go:104`）含 35 个配置段 + 2 个列表段（`providers`/`extensions`）+ 5 个顶层标量字段 = 共 42 个 `mapstructure` 字段
 > 验证规则: 致命错误（`Validate()`）+ 非致命警告（`Warnings()`）| 环境变量展开: 20+ 类敏感字段
 >
 > **编号说明**：本文的 A–AM 双字母编号仅用于文档导航，按子系统细分；
@@ -1405,4 +1405,4 @@ apps:
 
 ---
 
-> **最后更新**: 2026-08-23
+> **最后更新**: 2026-08-30

@@ -1,7 +1,7 @@
 # Wukong 系统架构
 
 > 本文档基于全量源码深度扫描，描述 Wukong 的分层架构、启动流程、核心数据流、各子系统的技术实现细节与设计原则。
-> 最后更新：2026-08-29
+> 最后更新：2026-08-30
 
 ---
 
@@ -542,11 +542,12 @@ Wukong 的记忆系统是其核心差异化能力，由 4 个子系统协同构�
 ```
 recall_search 工具调用 → CortexStore.Search()
     │
-    ├─ [垂直路由命中?] → mergeVertical()  [arXiv/GitHub/Wikipedia/Reddit]
+    ├─ [垂直路由命中?] → mergeVertical()  [GitHub/Wikipedia/arXiv/Reddit/HN]
     │
     ├─ [lexical] → FTS5 BM25 词法召回
     ├─ [vector]  → HNSW 向量召回 (+ VectorCache LRU 缓存)
     ├─ [hybrid]  → FTS5 pool + HNSW pool
+    │              → SearchGenome 12 参数混合调优（古籍搜索）
     │              → RRF / 加权融合
     │              → [可选] Cross-Encoder 重排
     │              → [可选] MMR 多样性选择
@@ -554,6 +555,8 @@ recall_search 工具调用 → CortexStore.Search()
     ├─ [+ memory] → tRPC Memory (Score=0.5, [Memory] 前缀)
     └─ → 返回 top-K
 ```
+
+**SearchGenome 混合检索**（[search/tune/](../internal/search/tune/)）：12 个可调参数（FTS5/向量权重、RRF 常数、MMR 多样性、重排开关等）经 `RobustScore`（NDCG@20 + 0.1×MRR@10 − 0.5×zero_rate − 0.001×latency − 0.1×variance）评估，支持 `wukong search tune` 三阶段多保真度优化与 `AutoTune` 安全契约（`confirmed=false` 时与 DryRun 输出完全一致）。
 
 ### 7.2 SmartCleanup 四维评分
 
@@ -774,30 +777,54 @@ Open Knowledge Format v0.1：YAML frontmatter + Markdown body，保留文件 ind
 
 ## 14. 目录结构
 
+> 统计口径：`go list ./internal/...` 实测共 **56 个包**（33 个顶层包 + 23 个子包）。
+
 ```
 wukong/
-├── cmd/                    # 编译入口
+├── cmd/                    # 编译入口（3 个）
 │   ├── wukong/             # 主程序 → cli.Execute()
 │   ├── zim-check/          # ZIM 归档校验
 │   └── zim-ls/             # ZIM 归档列举
-├── internal/               # 业务代码（33 个子系统）
+├── internal/               # 业务代码（33 顶层包 + 23 子包 = 56 包）
 │   ├── agent/              # ★ 编排层：CoreLoop + 10种编排模式 + Recipe + HITL
 │   ├── cli/                # ★ CLI 命令层（Cobra）+ TUI（Bubbletea）
-│   ├── config/             # 配置体系（Viper, 10 个类型文件）
+│   │   └── tui/            #   Bubble Tea 终端 UI 模型
+│   ├── config/             # 配置体系（Viper, 10 个 types_*.go + defaults/validate/marshal）
 │   ├── provider/           # LLM 提供商工厂（8 种）
 │   ├── extension/          # ★ MCP 扩展管理 + 12个内置工具集 + ACP-MCP桥接
-│   ├── browser/            # 双后端浏览器 + 5级反爬 + 15项stealth注入（asset/retry/sanitize 子包）
+│   │   └── builtin/        #   内置工具集实现
+│   ├── browser/            # ★ 浏览器引擎（rod 优先 + chromedp 备用）+ 5级反爬
+│   │   ├── antibot/        #   反爬升级体系（含 prober 检测探针）
+│   │   ├── stealth/        #   JS 注入 stealth（16 章节）
+│   │   ├── renderkit/      #   渲染预算控制（HeapInuse 0.70/0.85）
+│   │   ├── rodbackend/     #   Rod 后端实现（生命周期/身份/API发现）
+│   │   ├── behavior/       #   贝塞尔鼠标行为模拟
+│   │   ├── settle/         #   网络空闲检测
+│   │   ├── asset/          #   资源注入与回退
+│   │   ├── retry/          #   请求重试
+│   │   ├── sanitize/       #   HTML 消毒
+│   │   └── types/          #   共享类型定义
 │   ├── search/             # 搜索引擎（SPA调优/垂直路由/语义分块/指标）
+│   │   ├── chunking/       #   语义分块
+│   │   ├── vertical/       #   垂直路由（GitHub/Wikipedia/arXiv/Reddit/HN）
+│   │   ├── metrics/        #   检索质量指标
+│   │   └── tune/           #   SearchGenome 参数调优 + AutoTune
 │   ├── cortex/             # ★ CortexDB 知识引擎（向量+FTS5+GraphRAG+MemoryFlow+GraphFlow+ImportFlow+KG工具+召回管理）
 │   ├── recall/             # 原生 SQLite FTS5 召回（cortex 兜底）
 │   ├── memory/             # 持久化记忆（tRPC Memory + SmartCleanup 四维评分）
 │   ├── gateway/            # ★ 消息网关（飞书 WebSocket）
+│   │   └── feishu/         #   飞书渠道（流式卡片/消息构建）
 │   ├── server/             # ★ HTTP 协议端点（ACP/AG-UI/Security）
 │   ├── summon/             # A2A/ANP 子Agent委派 + E2EE + 元协议协商 + 凭证轮换
 │   ├── ard/                # Agent 资源发现 + DID + 联邦 + HTTP签名
-│   ├── session/            # 会话存储（SQLite/Redis/Memory）
+│   ├── session/            # 会话存储（SQLite/Redis/Memory）+ ModelEventLog
 │   ├── security/           # 安全防护（Guard 4模式/命令Token/SSRF/.wukongignore）
-│   ├── apps/               # 应用管理（clone 克隆/pack 打包/sanitize 消毒/mcpapps MCP Apps/server 本地预览）
+│   ├── apps/               # 应用管理
+│   │   ├── clone/          #   网站克隆引擎（EnhancedCloner/分页/重写）
+│   │   ├── pack/           #   ZIM 打包
+│   │   ├── sanitize/       #   HTML 消毒
+│   │   ├── mcpapps/        #   MCP Apps
+│   │   └── server/         #   本地预览服务器
 │   ├── skill/              # SKILL.md 技能系统
 │   ├── evolution/          # LLM 驱动技能自进化引擎
 │   ├── knowledge/          # RAG 知识管理
@@ -813,7 +840,7 @@ wukong/
 │   ├── todo/               # 任务跟踪
 │   ├── artifact/           # 制品存储（inmemory/COS）
 │   ├── project/            # 工作目录追踪
-│   └── util/               # 通用工具（Logger/MultiPool/Version）
+│   └── util/               # 通用工具（Logger/MultiPool/Version/Redact）
 ├── pkg/                    # 可外部引用的公共库（5 个包）
 │   ├── capability/         # 开发者工具 fs/shell 执行接缝（FileService/ShellService 接口 + 沙箱后端）
 │   ├── httpclient/         # HTTP 客户端（DNS缓存/限流/uTLS/DNS回退）

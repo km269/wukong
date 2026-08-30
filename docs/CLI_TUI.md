@@ -632,11 +632,18 @@ const maxAuditEntries = 50       // 审计日志上限
 type ModalType int
 const (
     ModalNone     ModalType = iota
-    ModalCommands            // 命令菜单
-    ModalSkills              // 技能浏览
-    ModalSettings            // 设置面板
+    ModalCommands            // 命令菜单（/）
+    ModalSkills              // 技能浏览（/skills）
+    ModalSettings            // 设置面板（/settings）
+    ModalProjects            // 项目选择（/projects，v0.3.3+）
+    ModalSessions            // 会话管理（/sessions，v0.3.3+）
 )
 ```
+
+**v0.3.3 新增会话/项目管理模态：**
+
+- **`/sessions`**（ModalSessions）：列出当前全部会话（会话 ID + 最近时间戳），支持 `+ New session` 新建、选中后 Enter 恢复（走 `/resume <sessionID>` 语义）、Backspace 删除选中会话。TUI 通过轻量 `sessionLister` 接口（`ListSessions`/`DeleteSession`）与 `wksession.SessionService` 解耦，不直接依赖 session 包。
+- **`/projects`**（ModalProjects）：列出工作目录记录（路径 + 8 位截断会话 ID + 指令摘要），选中后通过 `mgr.ListProjects()` 重新查询完整记录并复用恢复语义。
 
 ### 6.4 三区布局（View 渲染）
 
@@ -1044,18 +1051,22 @@ package util
 var (
     Version   = "0.3.3"
     GitCommit = "fix commit"
-    BuildDate = "2026-08-5"
+    BuildDate = "2026-08-29"
 )
 ```
+
+> ⚠️ **注意**：`GitCommit` 与 `BuildDate` 为占位符，CI 发布时会被 ldflags 覆盖。其中 `BuildDate` 应写作 `"2026-08-29"`（补齐两位数日）。
 
 Makefile 中的 ldflags（[Makefile](../Makefile)）：
 
 ```makefile
 LDFLAGS := -s -w \
-    -X github.com/km269/wukong/internal/cli.Version=$(VERSION) \
-    -X github.com/km269/wukong/internal/cli.GitCommit=$(GIT_COMMIT) \
-    -X github.com/km269/wukong/internal/cli.BuildDate=$(BUILD_DATE)
+    -X github.com/km269/wukong/internal/util.Version=$(VERSION) \
+    -X github.com/km269/wukong/internal/util.GitCommit=$(GIT_COMMIT) \
+    -X github.com/km269/wukong/internal/util.BuildDate=$(BUILD_DATE)
 ```
+
+> ⚠️ **注意**：注入目标应为 `internal/util.*`（版本变量实际定义于 util 包）。Makefile 中若仍写 `internal/cli.*` 则不会生效，需同步修正。
 
 `wukong version` 命令输出 Version、GitCommit、BuildDate 三项信息。
 
@@ -1097,4 +1108,4 @@ EvolutionTracker 作为 Runner 级别插件，通过事件监听异步捕获执�
 
 ---
 
-> **版本**: v0.3.3 | **最后更新**: 2026-08-29 | **CLI 源文件**: 29 + TUI 3 = 32 | **顶层命令**: 30
+> **版本**: v0.3.3 | **最后更新**: 2026-08-30 | **CLI 源文件**: 29 + TUI 3 = 32 | **顶层命令**: 30

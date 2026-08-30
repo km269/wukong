@@ -73,15 +73,15 @@ make build                 # 输出 build/wukong
 make build-all             # linux/darwin/windows × amd64/arm64 交叉编译
 ```
 
-`make build` 通过 LDFLAGS 注入版本信息到 `internal/cli` 包：
+`make build` 通过 LDFLAGS 注入版本信息到 `internal/util` 包（版本变量的权威定义处）：
 
 ```
--X github.com/km269/wukong/internal/cli.Version=...
--X github.com/km269/wukong/internal/cli.GitCommit=...
--X github.com/km269/wukong/internal/cli.BuildDate=...
+-X github.com/km269/wukong/internal/util.Version=...
+-X github.com/km269/wukong/internal/util.GitCommit=...
+-X github.com/km269/wukong/internal/util.BuildDate=...
 ```
 
-> ⚠️ `.goreleaser.yaml` 的 ldflags 注入目标是 **`main` 包**，与 Makefile 注入 `internal/cli` 包不一致——发行版与本地构建的版本字段来源不同。
+> ⚠️ **注意**：注入目标应为 `internal/util.*`。`.goreleaser.yaml` 的 ldflags 注入目标是 **`main` 包**，与 Makefile 注入目标不同——发行版与本地构建的版本字段来源不同，但 go build（含 Makefile/CI）默认以源码中的 `internal/util/version.go` 占位值为准。
 
 ### 2.2 预编译二进制（`.goreleaser.yaml` v2）
 
@@ -312,7 +312,7 @@ type ComponentHealth struct {
 ```json
 {
   "status": "healthy",
-  "version": "v0.3.1",
+  "version": "v0.3.3",
   "uptime": "2h13m",
   "components": [
     { "name": "database",    "status": "healthy", "message": "database is reachable", "latency_ms": 2 },
@@ -321,7 +321,7 @@ type ComponentHealth struct {
     { "name": "memory",      "status": "healthy", "message": "backend: sqlite, auto_extract: true" },
     { "name": "gateway",     "status": "healthy", "message": "running" }
   ],
-  "timestamp": "2026-08-11T12:34:56Z"
+  "timestamp": "2026-08-30T12:34:56Z"
 }
 ```
 
@@ -732,4 +732,4 @@ cp ~/.config/wukong/wukong.db-shm /backup/ 2>/dev/null || true
 
 ---
 
-> **版本**: v0.3.3 | **最后更新**: 2026-08-29
+> **版本**: v0.3.3 | **最后更新**: 2026-08-30
