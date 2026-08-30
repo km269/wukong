@@ -22,3 +22,7 @@ wukong.db
 wukong.db-shm
 wukong.db-wal
 .wukong/
+
+# Local config with secrets (never commit API keys)
+config.yaml
+config.local.yaml
