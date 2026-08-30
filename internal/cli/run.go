@@ -3,7 +3,6 @@
 package cli
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/km269/wukong/internal/agent"
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/util"
 
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -62,7 +62,7 @@ Examples:
 			input := resolveInput(message, args)
 
 			if sessionID == "" {
-				sessionID = uuid.New().String()
+				sessionID = resolveSessionID()
 			}
 
 			// Resolve userID for the runner and subsystems.
@@ -100,7 +100,7 @@ Examples:
 				// as the first turn.
 				if input != "" {
 					if printErr := runOneShot(
-						wukongCfg, loop,
+						wukongCfg, coreRunner{loop},
 						runUserID, sessionID,
 						input, noStream,
 					); printErr != nil {
@@ -120,7 +120,7 @@ Examples:
 					"no input: use --message, positional args, pipe stdin, or --dialogue")
 			}
 			return runOneShot(
-				wukongCfg, loop,
+				wukongCfg, coreRunner{loop},
 				runUserID, sessionID,
 				input, noStream,
 			)
@@ -170,10 +170,41 @@ Examples:
 // Single-shot execution
 // ==========================================================================
 
+// runner is the minimal agent-loop surface runOneShot depends on.
+// It is an interface (rather than *agent.CoreLoop) so tests can inject
+// a fake to exercise streaming output and redaction without booting
+// the full agent stack.
+type runner interface {
+	RunStream(
+		ctx context.Context,
+		userID string,
+		sessionID string,
+		message model.Message,
+		onEvent func(evt *event.Event) error,
+	) (string, error)
+}
+
+// coreRunner adapts *agent.CoreLoop to the runner interface.
+type coreRunner struct {
+	loop *agent.CoreLoop
+}
+
+// RunStream forwards to the underlying loop.
+func (c coreRunner) RunStream(
+	ctx context.Context,
+	userID string,
+	sessionID string,
+	message model.Message,
+	onEvent func(evt *event.Event) error,
+) (string, error) {
+	return c.loop.RunStream(
+		ctx, userID, sessionID, message, onEvent)
+}
+
 // runOneShot executes a single prompt and prints the response.
 func runOneShot(
 	cfg *config.WukongConfig,
-	loop *agent.CoreLoop,
+	loop runner,
 	userID, sessionID, input string,
 	noStream bool,
 ) error {
@@ -186,7 +217,10 @@ func runOneShot(
 		fmt.Println()
 		response, err := loop.RunStream(
 			ctx, userID, sessionID, msg,
-			streamToStdout,
+			func(evt *event.Event) error {
+				return streamToStdoutWith(
+					evt, os.Stdout, cfg.SecretValues())
+			},
 		)
 		fmt.Println() // final newline
 		_ = response
@@ -195,20 +229,12 @@ func runOneShot(
 
 	response, err := loop.RunStream(
 		ctx, userID, sessionID, msg, nil)
-	fmt.Println(response)
+	fmt.Println(util.RedactSecrets(response, cfg.SecretValues()))
 	return err
 }
 
-// streamToStdout prints streaming deltas to stdout.
-func streamToStdout(evt *event.Event) error {
-	if evt.Response != nil && len(evt.Response.Choices) > 0 {
-		content := evt.Response.Choices[0].Delta.Content
-		if content != "" {
-			fmt.Print(content)
-		}
-	}
-	return nil
-}
+// Response streaming into runOneShot now uses streamToStdout from
+// repl.go (tool-render aware).
 
 // ==========================================================================
 // Dialogue mode (REPL in shell)
@@ -221,7 +247,10 @@ func runDialogue(
 	userID, sessionID string,
 	noStream bool,
 ) error {
-	reader := bufio.NewReader(os.Stdin)
+	// Per-session command history for the line editor.
+	// C2: persisted to disk (~/.wukong/history) so Up/Down recall
+	// and Ctrl+R search survive across processes.
+	hist := newHistoryWithFile(100, historyFilePath(cfg))
 
 	displaySession := sessionID
 	if len(displaySession) > 8 {
@@ -239,7 +268,7 @@ func runDialogue(
 	for {
 		fmt.Print("\n> ")
 
-		line, err := reader.ReadString('\n')
+		line, err := editLine(os.Stdin, os.Stdout, hist)
 		if err != nil {
 			if err == io.EOF {
 				fmt.Println("\nGoodbye.")
@@ -268,13 +297,21 @@ func runDialogue(
 			fmt.Print("\033[2J\033[H") // ANSI clear screen
 			continue
 		}
+		if input == "/history-clear" {
+			// C2: wipe the persisted + in-memory dialogue history.
+			hist.entries = nil
+			hist.deleteHistoryFile()
+			fmt.Println("History cleared.")
+			continue
+		}
 		if input == "/help" {
 			fmt.Println(`
 Commands:
-  /exit, /quit   Exit dialogue mode
-  /session       Show current session ID
-  /clear         Clear terminal screen
-  /help          Show this help
+  /exit, /quit           Exit dialogue mode
+  /session               Show current session ID
+  /clear                 Clear terminal screen
+  /history-clear         Clear the saved history file
+  /help                  Show this help
 
 Session ID: ` + sessionID + `
 To resume later: wukong run -d -s ` + sessionID)
@@ -282,6 +319,9 @@ To resume later: wukong run -d -s ` + sessionID)
 		}
 
 		fmt.Println()
+
+		// Record the executed command in history for Up/Down recall.
+		hist.add(input)
 
 		// Execute the agent call within this dialogue turn.
 		printErr := runOneShot(
@@ -341,6 +381,22 @@ func resolveUserID() string {
 		userID = "default"
 	}
 	return userID
+}
+
+// resolveSessionID returns a fresh session ID when the caller did not
+// provide one.
+func resolveSessionID() string {
+	return uuid.New().String()
+}
+
+// resolveWorkingDir returns the current working directory, or "" when
+// it cannot be determined.
+func resolveWorkingDir() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return wd
 }
 
 // cleanupBootstrap has been replaced by the unified shutdownBootstrap

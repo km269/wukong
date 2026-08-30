@@ -69,21 +69,19 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("server already running")
 	}
 
-	// 确定端口
-	port := s.port
-	if port == 0 {
-		// 自动选择端口
-		ln, err := net.Listen("tcp", ":0")
-		if err != nil {
-			s.mu.Unlock()
-			return fmt.Errorf("listen: %w", err)
-		}
-		port = ln.Addr().(*net.TCPAddr).Port
-		ln.Close()
+	// 先建立监听器：监听器就绪后 running 才会置位，
+	// 因此 StartAndWait 观察到 running 时服务器必然已可接受连接。
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", s.port))
+	if err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("listen: %w", err)
 	}
+
+	port := ln.Addr().(*net.TCPAddr).Port
 
 	// 创建 HTTP 服务器
 	s.addr = fmt.Sprintf("http://localhost:%d", port)
+	s.port = port // 写回实际端口（自动选择时端口不为 0）
 	mux := http.NewServeMux()
 
 	// 注册处理程序
@@ -105,8 +103,8 @@ func (s *Server) Start(ctx context.Context) error {
 		s.httpSrv.Shutdown(context.Background())
 	}()
 
-	if err := s.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("listen and serve: %w", err)
+	if err := s.httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		return fmt.Errorf("serve: %w", err)
 	}
 
 	return nil
@@ -120,7 +118,8 @@ func (s *Server) StartAndWait(ctx context.Context) (string, error) {
 		errCh <- s.Start(ctx)
 	}()
 
-	// 等待服务器启动
+	// 等待服务器启动。监听器在 running 置位前已建立，
+	// 因此 running 为真即代表服务器就绪。
 	for i := 0; i < 50; i++ {
 		s.mu.RLock()
 		running := s.running

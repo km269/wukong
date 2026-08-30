@@ -8,9 +8,18 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/km269/wukong/internal/util"
 
+	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 )
+
+// loopRunner is the minimal agent-loop surface the TUI depends on.
+// It is a small interface (rather than *agent.CoreLoop) so tests can
+// inject a fake loop to exercise the streaming/resultQueue paths.
+type loopRunner interface {
+	Run(ctx context.Context, userID, sessionID string, message model.Message) (<-chan *event.Event, error)
+}
 
 // streamingDeltaMsg carries an incremental content delta for streaming.
 type streamingDeltaMsg string
@@ -39,12 +48,13 @@ type streamEndMsg struct {
 
 // streamEvent carries a streaming event from the agent goroutine.
 type streamEvent struct {
-	Delta      string
-	Tool       *toolCallStartMsg
-	ToolResult *toolCallResultMsg
-	Err        string
-	IsEnd      bool
-	Content    string
+	Delta        string
+	Tool         *toolCallStartMsg
+	ToolResult   *toolCallResultMsg
+	Err          string
+	IsEnd        bool
+	Content      string
+	NoToolResult bool // tool.response arrived with no content to attribute
 }
 
 // sendMessage creates a command to send a user message.
@@ -60,6 +70,7 @@ func (m *Model) sendMessage(input string) tea.Cmd {
 	m.setStatus("Thinking...")
 	m.streaming = true
 	m.currentStream = ""
+	m.resetStreamCache()
 	m.autoScroll = true
 	m.cancelled = false
 	m.lastRenderTime = time.Time{}
@@ -145,8 +156,13 @@ func (m *Model) sendMessage(input string) tea.Cmd {
 			return
 		}
 
+		// resultQueue tracks tool names in the order their calls STARTED.
+		// tool.response events carry no tool-call ID (the framework's
+		// runner distinguishes them internally), so attaching results in
+		// start order is the only correct generic attribution. TUI-side
+		// matching takes the FIRST running entry with this name.
+		var resultQueue []string
 		var fullContent string
-		var lastToolName string
 		for evt := range events {
 			// Check if context is cancelled to avoid wasted work
 			select {
@@ -176,15 +192,39 @@ func (m *Model) sendMessage(input string) tea.Cmd {
 				if choice.Message.Role == "tool" ||
 					evt.Response.Object ==
 						"tool.response" {
-					if len(choice.Message.ToolCalls) == 0 &&
-						choice.Message.Content != "" {
-						if lastToolName != "" {
+					// A tool.response event corresponds to the
+					// OLDEST tool call that is still awaiting a
+					// result, in start order (see resultQueue).
+					if len(choice.Message.ToolCalls) == 0 {
+						if len(resultQueue) > 0 {
+							name := resultQueue[0]
+							resultQueue = resultQueue[1:]
+							res := choice.Message.Content
+							if res == "" {
+								res = "(no content)"
+							}
+							// Redact secrets before the result
+							// reaches the message channel (output
+							// side AND stored message/audit).
+							res = util.RedactSecrets(
+								res, m.secrets)
 							select {
 							case streamCh <- streamEvent{
 								ToolResult: &toolCallResultMsg{
-									Name:   lastToolName,
-									Result: choice.Message.Content,
+									Name:   name,
+									Result: res,
 								},
+							}:
+							case <-ctx.Done():
+								return
+							}
+						} else {
+							// No outstanding tool call to attach
+							// to; surface as a system note so the
+							// response is not silently dropped.
+							select {
+							case streamCh <- streamEvent{
+								NoToolResult: true,
 							}:
 							case <-ctx.Done():
 								return
@@ -226,7 +266,10 @@ func (m *Model) sendMessage(input string) tea.Cmd {
 					if tc.Function.Arguments != nil {
 						argsJSON = string(tc.Function.Arguments)
 					}
-					lastToolName = tc.Function.Name
+					// Tool call args are shown in the TUI header;
+					// strip secret values before they are rendered.
+					argsJSON = util.RedactSecrets(argsJSON, m.secrets)
+					resultQueue = append(resultQueue, tc.Function.Name)
 					select {
 					case streamCh <- streamEvent{
 						Tool: &toolCallStartMsg{
@@ -283,6 +326,8 @@ func readStreamEvent(ch <-chan streamEvent) tea.Cmd {
 				return streamingErrorMsg(evt.Err)
 			case evt.ToolResult != nil:
 				return *evt.ToolResult
+			case evt.NoToolResult:
+				return streamingDeltaMsg("\n[Tool result empty — no content returned]\n")
 			case evt.Tool != nil:
 				return *evt.Tool
 			case evt.Delta != "":

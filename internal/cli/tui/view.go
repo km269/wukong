@@ -346,9 +346,10 @@ func RenderToolCall(name, status string) string {
 }
 
 // RenderToolCallResult formats a tool call with its result.
-// Supports collapse/expand state, truncation for long results, and
-// a selected-highlight indicator for keyboard navigation.
-func RenderToolCallResult(entry toolCallEntry, selected bool) string {
+// Supports collapse/expand state, width-limited wrapping for long
+// results (no hard truncation in expanded state), and a
+// selected-highlight indicator for keyboard navigation.
+func RenderToolCallResult(entry toolCallEntry, selected bool, maxWidth int) string {
 	icon := "○"
 	color := colorDim
 	switch entry.Status {
@@ -395,14 +396,17 @@ func RenderToolCallResult(entry toolCallEntry, selected bool) string {
 
 	var result string
 	if entry.Result != "" && !entry.Collapsed {
-		resultStr := entry.Result
-		if len(resultStr) > 500 {
-			resultStr = resultStr[:497] + "..."
+		// Expanded: wrap the full result at maxWidth instead of
+		// truncating, so nothing is silently lost. The visible
+		// window + viewport scrolling handle long content.
+		w := maxWidth
+		if w < 10 {
+			w = 10
 		}
-		result = "\n" + toolCallResultStyle.Render(resultStr)
+		result = "\n" + toolCallResultStyle.Width(w).Render(entry.Result)
 	} else if entry.Result != "" && entry.Collapsed {
 		result = "\n" + lipgloss.NewStyle().Foreground(colorDim).Render(
-			fmt.Sprintf("  [%d chars hidden - press Tab to expand]", len(entry.Result)),
+			fmt.Sprintf("  [%d chars hidden — press Enter to expand]", len(entry.Result)),
 		)
 	}
 
@@ -502,6 +506,9 @@ func RenderHeader(
 }
 
 // RenderModal renders a modal window.
+// Content taller than the modal is clipped to a scrollable window
+// using modal.Scroll (kept aligned with the selected item by
+// followModalSelection in the model).
 func RenderModal(modal *modalState, width, height int) string {
 	if modal == nil {
 		return ""
@@ -509,13 +516,38 @@ func RenderModal(modal *modalState, width, height int) string {
 
 	content := modalTitleStyle.Render(modal.Title) + "\n\n"
 
+	// Maximum visible body rows (height minus title, padding, border).
+	maxVisible := height - 3
+	if maxVisible < 1 {
+		maxVisible = 1
+	}
+
 	if len(modal.Items) > 0 {
-		for i, item := range modal.Items {
+		// Clamp scroll to a valid range so a shrunken modal never
+		// shows blank space.
+		if modal.Scroll > len(modal.Items)-maxVisible {
+			modal.Scroll = len(modal.Items) - maxVisible
+		}
+		if modal.Scroll < 0 {
+			modal.Scroll = 0
+		}
+		end := modal.Scroll + maxVisible
+		if end > len(modal.Items) {
+			end = len(modal.Items)
+		}
+		for i := modal.Scroll; i < end; i++ {
+			item := modal.Items[i]
 			if i == modal.Selected {
 				content += modalSelectedStyle.Render("> "+item) + "\n"
 			} else {
 				content += modalItemStyle.Render("  "+item) + "\n"
 			}
+		}
+		if len(modal.Items) > maxVisible {
+			content += dimStyle.Render(fmt.Sprintf(
+				"  [%d/%d — ↑↓ scroll, PgUp/PgDn jump]",
+				modal.Selected+1, len(modal.Items),
+			)) + "\n"
 		}
 	} else {
 		content += modal.Content + "\n"

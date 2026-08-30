@@ -464,20 +464,96 @@ func expandEnvFields(v reflect.Value, prefix string, unresolved *[]string) {
 // Load parses the configuration into a WukongConfig.
 // Results are cached; subsequent calls return the same instance.
 func (l *Loader) Load() (*WukongConfig, error) {
-	if l.config != nil {
-		return l.config, nil
+	cfg, err := l.loadUnmarshaled()
+	if err != nil {
+		return nil, err
 	}
 
+	// Expand ${ENV_VAR} references in all secret fields.
+	l.expandSecrets(cfg)
+
+	l.config = cfg
+	return l.config, nil
+}
+
+// loadUnmarshaled unmarshals the configuration from Viper's merged
+// view (config file + env overrides + defaults) without expanding
+// ${ENV_VAR} references. It caches nothing, so callers that need
+// the raw (unexpanded) form, such as the `wukong configure --edit`
+// wizard baseline, can use it without persisting expanded secrets.
+func (l *Loader) loadUnmarshaled() (*WukongConfig, error) {
 	var cfg WukongConfig
 	if err := l.v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
+	return &cfg, nil
+}
 
-	// Expand ${ENV_VAR} references in all secret fields.
-	l.expandSecrets(&cfg)
+// LoadUnresolved returns the configuration exactly as stored on
+// disk (plus defaults/env overrides), with ${ENV_VAR} secret
+// references left untouched. Used by the configure --edit wizard:
+// editing must round-trip the file's own values rather than the
+// expanded secrets, otherwise editing any unrelated field would
+// persist the expanded key material.
+func (l *Loader) LoadUnresolved() (*WukongConfig, error) {
+	return l.loadUnmarshaled()
+}
 
-	l.config = &cfg
-	return l.config, nil
+// SecretValues returns all secret values that have been expanded
+// into the loaded configuration, for output redaction. It collects:
+//
+//   - providers[].api_key
+//   - extensions[].env values whose key looks like a secret
+//     (contains "key", "secret", "token", "password", or "credential")
+//   - summon.a2a_remotes[].{api_key, jwt_secret, oauth_client_secret}
+//   - server endpoint security.auth.{api_key, jwt_secret}
+//   - gateway AppSecret/EncryptKey/VerificationToken
+//
+// Values shorter than 2 characters are never yielded (they cannot be
+// meaningfully redacted). The returned slice is intended to be passed
+// to util.RedactSecrets before printing assistant/tool output.
+func (c *WukongConfig) SecretValues() []string {
+	var out []string
+	add := func(s string) {
+		if len(s) >= 2 {
+			out = append(out, s)
+		}
+	}
+
+	for _, p := range c.Providers {
+		add(p.APIKey)
+	}
+	for _, ext := range c.Extensions {
+		for k, v := range ext.Env {
+			kl := strings.ToLower(strings.TrimSpace(k))
+			if strings.Contains(kl, "key") ||
+				strings.Contains(kl, "secret") ||
+				strings.Contains(kl, "token") ||
+				strings.Contains(kl, "password") ||
+				strings.Contains(kl, "credential") {
+				add(v)
+			}
+		}
+	}
+	for _, r := range c.Summon.A2ARemotes {
+		add(r.APIKey)
+		add(r.JWTSecret)
+		add(r.OAuthClientSecret)
+	}
+	for _, sec := range []ServerSecurityConfig{
+		c.AGUI.Security,
+		c.ACPServer.Security,
+		c.MCPServer.Security,
+	} {
+		add(sec.Auth.APIKey)
+		add(sec.Auth.JWTSecret)
+	}
+	if w := c.Gateway.Feishu; w.Enabled {
+		add(w.AppSecret)
+		add(w.EncryptKey)
+		add(w.VerificationToken)
+	}
+	return out
 }
 
 // LoadAndValidate loads the configuration and then validates it.

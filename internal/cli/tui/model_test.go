@@ -1,14 +1,27 @@
 package tui
 
 import (
+	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/project"
+	"trpc.group/trpc-go/trpc-agent-go/session"
 )
+
+// ansiRE matches SGR escape sequences emitted by lipgloss styles.
+var ansiRE = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// stripANSI removes color escape codes from a rendered string.
+func stripANSI(s string) string {
+	return ansiRE.ReplaceAllString(s, "")
+}
 
 func TestFriendlyError(t *testing.T) {
 	tests := []struct {
@@ -915,6 +928,414 @@ func TestHandleCommand_Audit_WithLimit(t *testing.T) {
 	}
 }
 
+// ---------- A1: handleCommand branch coverage ----------
+
+// fakeProjectLister implements the projectLister interface for tests.
+type fakeProjectLister struct {
+	records []project.ProjectRecord
+}
+
+func (f *fakeProjectLister) ListProjects() []project.ProjectRecord {
+	return f.records
+}
+
+// fakeSessionLister implements the sessionLister interface for tests.
+type fakeSessionLister struct {
+	sessions  []*session.Session
+	deleted   []string // session ids passed to DeleteSession
+	listErr   error
+	deleteErr error
+}
+
+func (f *fakeSessionLister) ListSessions(
+	ctx context.Context,
+	userKey session.UserKey,
+) ([]*session.Session, error) {
+	return f.sessions, f.listErr
+}
+
+func (f *fakeSessionLister) DeleteSession(
+	ctx context.Context,
+	key session.Key,
+) error {
+	f.deleted = append(f.deleted, key.SessionID)
+	return f.deleteErr
+}
+
+func TestHandleCommand_Sessions_NoManager(t *testing.T) {
+	m := &Model{}
+	m.handleCommand("/sessions")
+
+	if len(m.messages) == 0 {
+		t.Fatal("expected a system message")
+	}
+	lastMsg := m.messages[len(m.messages)-1]
+	if !strings.Contains(lastMsg.Content, "Session management is not available") {
+		t.Errorf("expected 'not available' message, got %q", lastMsg.Content)
+	}
+}
+
+func TestHandleCommand_Sessions_OpensModal(t *testing.T) {
+	m := &Model{
+		width:  80,
+		height: 24,
+		userID: "user-1",
+		sessionMgr: &fakeSessionLister{
+			sessions: []*session.Session{
+				{ID: "sess-aaaa", UpdatedAt: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)},
+				{ID: "sess-bbbb"},
+			},
+		},
+	}
+	m.handleCommand("/sessions")
+
+	if m.modal == nil || m.modal.Type != ModalSessions {
+		t.Fatalf("expected sessions modal open, got %+v", m.modal)
+	}
+	// New + 2 sessions + Back
+	if len(m.modal.Items) != 4 {
+		t.Fatalf("items = %v, want 4 (new + 2 sessions + back)", m.modal.Items)
+	}
+	if m.modal.Items[0] != "+ New session" {
+		t.Errorf("first item = %q, want + New session", m.modal.Items[0])
+	}
+	if !strings.Contains(m.modal.Items[1], "sess-aaaa") {
+		t.Errorf("session item = %q, want to contain sess-aaaa", m.modal.Items[1])
+	}
+	if m.modal.Items[len(m.modal.Items)-1] != "— Back" {
+		t.Errorf("last item = %q, want — Back", m.modal.Items[len(m.modal.Items)-1])
+	}
+}
+
+func TestHandleModalSelection_SessionsResume(t *testing.T) {
+	m := &Model{
+		width:  80,
+		height: 24,
+		userID: "user-1",
+		sessionMgr: &fakeSessionLister{
+			sessions: []*session.Session{{ID: "sess-x"}},
+		},
+	}
+	m.handleCommand("/sessions")
+	// Select the session row (index 1).
+	m.modal.Selected = 1
+	m.handleModalSelection()
+
+	if m.modal != nil {
+		t.Fatal("expected modal closed after selection")
+	}
+	if m.sessionID != "sess-x" {
+		t.Errorf("sessionID = %q, want sess-x", m.sessionID)
+	}
+}
+
+func TestHandleModalSelection_SessionsNew(t *testing.T) {
+	m := &Model{
+		width:      80,
+		height:     24,
+		userID:     "user-1",
+		sessionID:  "old",
+		sessionMgr: &fakeSessionLister{sessions: []*session.Session{{ID: "sess-x"}}},
+	}
+	m.handleCommand("/sessions")
+	// Index 0 is + New session.
+	m.handleModalSelection()
+
+	if m.modal != nil {
+		t.Fatal("expected modal closed after New")
+	}
+	if m.sessionID == "old" || m.sessionID == "" {
+		t.Errorf("sessionID after New = %q, want fresh value", m.sessionID)
+	}
+}
+
+func TestHandleModalSelection_SessionsBack(t *testing.T) {
+	m := &Model{
+		width:      80,
+		height:     24,
+		userID:     "user-1",
+		sessionID:  "old",
+		sessionMgr: &fakeSessionLister{sessions: []*session.Session{{ID: "sess-x"}}},
+	}
+	m.handleCommand("/sessions")
+	m.modal.Selected = len(m.modal.Items) - 1 // — Back
+	m.handleModalSelection()
+
+	if m.modal != nil {
+		t.Fatal("expected modal closed after Back")
+	}
+	if m.sessionID != "old" {
+		t.Errorf("sessionID = %q, want unchanged old", m.sessionID)
+	}
+}
+
+func TestSessionModal_DeleteSelected(t *testing.T) {
+	fake := &fakeSessionLister{
+		sessions: []*session.Session{
+			{ID: "sess-1"},
+			{ID: "sess-2"},
+		},
+	}
+	m := &Model{
+		width:      80,
+		height:     24,
+		userID:     "user-1",
+		sessionMgr: fake,
+	}
+	m.handleCommand("/sessions")
+	m.modal.Selected = 1 // sess-1
+
+	m.deleteSelectedSession()
+
+	if len(fake.deleted) != 1 || fake.deleted[0] != "sess-1" {
+		t.Fatalf("deleted = %v, want [sess-1]", fake.deleted)
+	}
+	if m.modal == nil || m.modal.Type != ModalSessions {
+		t.Fatal("expected sessions modal still open")
+	}
+	// Remaining: New + sess-2 + Back.
+	if len(m.modal.Items) != 3 {
+		t.Errorf("items after delete = %v, want 3", m.modal.Items)
+	}
+	if !strings.Contains(m.modal.Items[1], "sess-2") {
+		t.Errorf("remaining item = %q, want sess-2", m.modal.Items[1])
+	}
+}
+
+func TestSessionModal_DeleteLastCloses(t *testing.T) {
+	fake := &fakeSessionLister{
+		sessions: []*session.Session{{ID: "sess-only"}},
+	}
+	m := &Model{
+		width:      80,
+		height:     24,
+		userID:     "user-1",
+		sessionMgr: fake,
+	}
+	m.handleCommand("/sessions")
+	m.modal.Selected = 1 // the only session
+
+	m.deleteSelectedSession()
+
+	if m.modal != nil {
+		t.Fatal("expected modal closed when no sessions remain")
+	}
+	if m.status != "No stored sessions" {
+		t.Errorf("status = %q, want No stored sessions", m.status)
+	}
+}
+
+func TestHandleCommand_Projects_NoManager(t *testing.T) {
+	m := &Model{}
+	m.handleCommand("/projects")
+
+	if len(m.messages) == 0 {
+		t.Fatal("expected a system message")
+	}
+	lastMsg := m.messages[len(m.messages)-1]
+	if !strings.Contains(lastMsg.Content, "Project tracking is not available") {
+		t.Errorf("expected 'not available' message, got %q", lastMsg.Content)
+	}
+}
+
+func TestHandleCommand_Projects_Empty(t *testing.T) {
+	m := &Model{projectMgr: &fakeProjectLister{}}
+	m.handleCommand("/projects")
+
+	if len(m.messages) == 0 {
+		t.Fatal("expected a system message")
+	}
+	lastMsg := m.messages[len(m.messages)-1]
+	if !strings.Contains(lastMsg.Content, "No tracked projects found") {
+		t.Errorf("expected 'No tracked projects found', got %q", lastMsg.Content)
+	}
+}
+
+func TestHandleCommand_Projects_ListsRecords(t *testing.T) {
+	m := &Model{projectMgr: &fakeProjectLister{
+		records: []project.ProjectRecord{
+			{Path: "/work/demo", SessionID: "abcdef123456", LastInstruction: "Build the feature"},
+			{Path: "/work/other", SessionID: "xyz", LastInstruction: ""},
+		},
+	}}
+	m.handleCommand("/projects")
+
+	// C3: /projects opens the selectable ModalProjects instead of a
+	// plain-text chat reply.
+	if m.modal == nil || m.modal.Type != ModalProjects {
+		t.Fatalf("expected ModalProjects open, got %+v", m.modal)
+	}
+	if len(m.modal.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d: %v", len(m.modal.Items), m.modal.Items)
+	}
+	if !strings.Contains(m.modal.Items[0], "/work/demo") {
+		t.Errorf("expected project path in item, got %q", m.modal.Items[0])
+	}
+	// Long session IDs are truncated to 8 chars in the display item.
+	if !strings.Contains(m.modal.Items[0], "abcdef12") {
+		t.Errorf("expected truncated session id 'abcdef12', got %q", m.modal.Items[0])
+	}
+	if m.modal.Selected != 0 {
+		t.Errorf("initial Selected = %d, want 0", m.modal.Selected)
+	}
+}
+
+func TestHandleModalSelection_ProjectsResumes(t *testing.T) {
+	m := &Model{
+		sessionID: "old-session",
+		projectMgr: &fakeProjectLister{
+			records: []project.ProjectRecord{
+				{Path: "/work/demo", SessionID: "full-session-id-001", LastInstruction: "x"},
+			},
+		},
+	}
+	m.handleCommand("/projects")
+	if m.modal == nil || m.modal.Type != ModalProjects {
+		t.Fatalf("expected ModalProjects open, got %+v", m.modal)
+	}
+
+	// Enter on the selected item resumes its full session id.
+	m.handleModalSelection()
+	if m.modal != nil {
+		t.Fatal("expected modal to close after selection")
+	}
+	if m.sessionID != "full-session-id-001" {
+		t.Errorf("sessionID = %q, want %q", m.sessionID, "full-session-id-001")
+	}
+	// The /resume path clears prior UI state and reports a resume.
+	if len(m.messages) == 0 ||
+		!strings.Contains(m.messages[len(m.messages)-1].Content, "[Session resumed:") {
+		t.Errorf("expected resume notice message, got %d messages", len(m.messages))
+	}
+}
+
+func TestHandleCommand_Resume_NoArgs(t *testing.T) {
+	m := &Model{messages: []chatEntry{{Role: "user", Content: "hi"}}}
+	m.handleCommand("/resume")
+
+	lastMsg := m.messages[len(m.messages)-1]
+	if !strings.Contains(lastMsg.Content, "Usage: /resume <session-id>") {
+		t.Errorf("expected usage message, got %q", lastMsg.Content)
+	}
+	// Messages from before must be untouched.
+	if len(m.messages) != 2 {
+		t.Errorf("expected 2 messages, got %d", len(m.messages))
+	}
+}
+
+func TestHandleCommand_Resume_WithID(t *testing.T) {
+	m := &Model{
+		sessionID:     "old-session",
+		messages:      []chatEntry{{Role: "user", Content: "old"}},
+		toolCalls:     []toolCallEntry{{Name: "tool", Status: "running"}},
+		auditLog:      []toolAuditEntry{{Name: "tool"}},
+		currentStream: "streaming",
+		streaming:     true,
+	}
+	m.handleCommand("/resume abc-def-123456")
+
+	if m.sessionID != "abc-def-123456" {
+		t.Errorf("sessionID = %q, want abc-def-123456", m.sessionID)
+	}
+	if len(m.messages) != 1 {
+		t.Fatalf("expected messages reset to 1 system entry, got %d", len(m.messages))
+	}
+	if !strings.Contains(m.messages[0].Content, "[Session resumed: abc-def-123456]") {
+		t.Errorf("expected resumed marker, got %q", m.messages[0].Content)
+	}
+	if len(m.toolCalls) != 0 || len(m.auditLog) != 0 {
+		t.Error("tool calls and audit log should be cleared on resume")
+	}
+	if m.currentStream != "" || m.streaming {
+		t.Error("stream state should be reset on resume")
+	}
+	if !strings.HasPrefix(m.status, "Resumed session abc-def-1") {
+		t.Errorf("status = %q, want Resumed session prefix", m.status)
+	}
+}
+
+func TestHandleCommand_Resume_TrailingSpace(t *testing.T) {
+	m := &Model{
+		sessionID: "keep-me",
+		messages:  []chatEntry{{Role: "user", Content: "old"}},
+	}
+	// "/resume " is trimmed to "/resume", so it falls into the usage
+	// branch: the session must NOT be switched and a usage hint is
+	// appended (the empty-id branch is defensive-only dead code).
+	m.handleCommand("/resume ")
+
+	if m.sessionID != "keep-me" {
+		t.Error("sessionID should be untouched for resume with no id")
+	}
+	if len(m.messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(m.messages))
+	}
+	lastMsg := m.messages[len(m.messages)-1]
+	if !strings.Contains(lastMsg.Content, "Usage: /resume <session-id>") {
+		t.Errorf("expected usage hint, got %q", lastMsg.Content)
+	}
+}
+
+func TestHandleCommand_ModelSwitch(t *testing.T) {
+	cfg := &config.WukongConfig{
+		DefaultProvider: "test-provider",
+		Providers: []config.ProviderConfig{
+			{Name: "test-provider", Model: "gpt-4"},
+		},
+	}
+	m := &Model{cfg: cfg, modelName: "gpt-4"}
+	m.handleCommand("/model gpt-4o")
+
+	p := cfg.DefaultProviderConfig()
+	if p == nil || p.Model != "gpt-4o" {
+		t.Errorf("cfg model = %v, want gpt-4o", p)
+	}
+	if m.modelName != "gpt-4o" {
+		t.Errorf("modelName = %q, want gpt-4o", m.modelName)
+	}
+	lastMsg := m.messages[len(m.messages)-1]
+	if !strings.Contains(lastMsg.Content, "Switched model: gpt-4 -> gpt-4o") {
+		t.Errorf("expected switch confirmation, got %q", lastMsg.Content)
+	}
+}
+
+func TestHandleCommand_ModelSwitch_NoProvider(t *testing.T) {
+	cfg := &config.WukongConfig{
+		DefaultProvider: "missing",
+		Providers:       []config.ProviderConfig{{Name: "other", Model: "x"}},
+	}
+	m := &Model{cfg: cfg, modelName: "keep"}
+	m.handleCommand("/model something")
+
+	if m.modelName != "keep" {
+		t.Errorf("modelName should be untouched, got %q", m.modelName)
+	}
+	lastMsg := m.messages[len(m.messages)-1]
+	if !strings.Contains(lastMsg.Content, "No provider configured") {
+		t.Errorf("expected 'No provider configured', got %q", lastMsg.Content)
+	}
+}
+
+func TestHandleCommand_Exts_EmptyConfig(t *testing.T) {
+	m := &Model{cfg: &config.WukongConfig{}}
+	m.handleCommand("/exts")
+
+	lastMsg := m.messages[len(m.messages)-1]
+	if !strings.Contains(lastMsg.Content, "No extensions loaded.") {
+		t.Errorf("expected 'No extensions loaded.', got %q", lastMsg.Content)
+	}
+}
+
+func TestHandleCommand_Audit_Empty(t *testing.T) {
+	m := &Model{}
+	m.handleCommand("/audit")
+
+	lastMsg := m.messages[len(m.messages)-1]
+	if !strings.Contains(lastMsg.Content, "No tool audit entries yet.") {
+		t.Errorf("expected empty audit message, got %q", lastMsg.Content)
+	}
+}
+
 // ---------- Exit / Cleanup Tests ----------
 
 func TestRequestExit_NotStreaming(t *testing.T) {
@@ -1148,5 +1569,679 @@ func TestCtrlD_WhileStreaming_Ignores(t *testing.T) {
 
 	if m.status == "" {
 		t.Error("expected status message when Ctrl+D pressed during streaming")
+	}
+}
+
+// --- P3.1 incremental streaming-render helpers ---
+
+func TestFenceCount(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want int
+	}{
+		{"empty", "", 0},
+		{"no fences", "hello\nworld", 0},
+		{"one open", "```go\ncode", 1},
+		{"closed", "```go\ncode\n```", 2},
+		{"indented", "  ```\n  ~~~  \n", 2},
+		{"tilde", "~~~\ntext\n~~~", 2},
+	}
+	for _, c := range cases {
+		if got := fenceCount(c.in); got != c.want {
+			t.Errorf("%s: fenceCount(%q) = %d, want %d", c.name, c.in, got, c.want)
+		}
+	}
+}
+
+func TestSafeIncrementalTail(t *testing.T) {
+	cases := []struct {
+		name string
+		tail string
+		want bool
+	}{
+		{"empty", "", false},
+		{"plain text", "growing line", true},
+		{"open fence", "```go\ncode", false},
+		{"closed fence", "```go\ncode\n```", true},
+		{"closed then text", "```\nx\n```\ngrowing", true},
+	}
+	for _, c := range cases {
+		if got := safeIncrementalTail(c.tail); got != c.want {
+			t.Errorf("%s: safeIncrementalTail(%q) = %v, want %v", c.name, c.tail, got, c.want)
+		}
+	}
+}
+
+func TestLastSafeSplit(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want int
+	}{
+		{"empty", "", 0},
+		{"no blank line", "line1\nline2", 0},
+		{"blank line with content after", "head\n\nbody", 6},
+		{"multiple blanks picks last", "a\n\nb\n\nc", 6},
+		{"split before open fence", "head\n\n```go\ncode", 0},
+		{"split after closed fence", "head\n\n```go\ncode\n```\n\nmore", 22},
+		{"blank inside open fence not safe", "```\n\ntext\n```", 0},
+	}
+	for _, c := range cases {
+		if got := lastSafeSplit(c.in); got != c.want {
+			t.Errorf("%s: lastSafeSplit(%q) = %d, want %d", c.name, c.in, got, c.want)
+		}
+	}
+}
+
+func TestLastSafeSplit_PrefixOddFence(t *testing.T) {
+	// Blank line inside an open code block: the tail has an odd fence
+	// count (open), prefix has odd too. Split must not happen at the
+	// last blank because tail is odd; but an earlier split must be
+	// considered. Here the only blank is inside the fence, so result 0.
+	in := "```\n\ntext"
+	if got := lastSafeSplit(in); got != 0 {
+		t.Errorf("lastSafeSplit inside open fence = %d, want 0", got)
+	}
+}
+
+func TestResetStreamCache_Invalidates(t *testing.T) {
+	m := &Model{
+		streamCachePrefixIdx: 12,
+		streamCacheRendered:  "prefix",
+		streamCacheValid:     true,
+	}
+	m.resetStreamCache()
+	if m.streamCacheValid {
+		t.Error("expected cache invalid after reset")
+	}
+	if m.streamCachePrefixIdx != 0 || m.streamCacheRendered != "" {
+		t.Error("expected cache fields zeroed after reset")
+	}
+}
+
+// --- P3.2 tool result collapse/expand ---
+
+func TestToolCallStart_DefaultCollapsed(t *testing.T) {
+	m := &Model{}
+
+	_, _ = m.Update(toolCallStartMsg{
+		Name: "file_read",
+		Args: `{"path":"/tmp/x"}`,
+	})
+
+	if len(m.toolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(m.toolCalls))
+	}
+	if !m.toolCalls[0].Collapsed {
+		t.Error("new tool call should default to Collapsed=true")
+	}
+	if m.toolCalls[0].Status != "running" {
+		t.Errorf("expected running status, got %q", m.toolCalls[0].Status)
+	}
+}
+
+func TestToolCallResult_ToggleExpanded(t *testing.T) {
+	m := &Model{}
+	_, _ = m.Update(toolCallStartMsg{
+		Name: "file_read",
+		Args: `{"path":"/tmp/x"}`,
+	})
+	_, _ = m.Update(toolCallResultMsg{
+		Name:   "file_read",
+		Result: "file content here",
+	})
+
+	if m.toolCalls[0].Result == "" {
+		t.Fatal("expected result attached")
+	}
+	if !m.toolCalls[0].Collapsed {
+		t.Error("should start collapsed even with result")
+	}
+
+	// Enter expands.
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.toolCalls[0].Collapsed {
+		t.Error("expected Enter to expand the result")
+	}
+	if cmd != nil {
+		t.Error("Enter on a tool should not submit input")
+	}
+
+	// Enter again collapses.
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !m.toolCalls[0].Collapsed {
+		t.Error("expected second Enter to collapse")
+	}
+	if cmd != nil {
+		t.Error("toggle should not produce a command")
+	}
+}
+
+func TestToolCallResult_EnterWithoutResult_Submits(t *testing.T) {
+	ta := textarea.New()
+	ta.SetHeight(3)
+	ta.Focus()
+	ta.SetValue("say hi")
+	m := &Model{textarea: ta}
+	_, _ = m.Update(toolCallStartMsg{
+		Name: "file_read",
+		Args: `{}`,
+	})
+	// toolCallStartMsg triggers readStreamEvent with a nil streamCh —
+	// ensure no command is pending from it.
+
+	// Running tool (Result == "") + Enter must NOT toggle; Enter is
+	// not a submit key in this UI (Ctrl+D submits), so fall through
+	// must leave the tool expanded-state untouched.
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Error("expected no command (Enter is not the submit key)")
+	}
+	if !m.toolCalls[0].Collapsed {
+		t.Error("running tool should remain collapsed")
+	}
+}
+
+func TestToolCall_EnterTogglesSelected(t *testing.T) {
+	m := &Model{}
+	// Two tools; select the second one via Tab, then toggle.
+	for _, name := range []string{"t1", "t2"} {
+		_, _ = m.Update(toolCallStartMsg{Name: name, Args: `{}`})
+		_, _ = m.Update(toolCallResultMsg{Name: name, Result: "res-" + name})
+	}
+
+	m.toolSelectedIdx = 1
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if m.toolCalls[1].Collapsed {
+		t.Error("expected selected second tool to be expanded")
+	}
+	if !m.toolCalls[0].Collapsed {
+		t.Error("unselected first tool must stay collapsed")
+	}
+	if cmd != nil {
+		t.Error("expected no submit command")
+	}
+}
+
+func TestToolCall_EnterNoTools_Submits(t *testing.T) {
+	ta := textarea.New()
+	ta.SetHeight(3)
+	ta.Focus()
+	ta.SetValue("hello")
+	m := &Model{textarea: ta}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Error("Enter without tools should still not submit (Ctrl+D is submit)")
+	}
+}
+
+func TestToolCall_TabNavigatesAndWraps(t *testing.T) {
+	m := &Model{}
+	// Two finished tools, default Collapsed=true.
+	_, _ = m.Update(toolCallStartMsg{Name: "t1", Args: `{}`})
+	_, _ = m.Update(toolCallResultMsg{Name: "t1", Result: "r1"})
+	_, _ = m.Update(toolCallStartMsg{Name: "t2", Args: `{}`})
+	_, _ = m.Update(toolCallResultMsg{Name: "t2", Result: "r2"})
+
+	if m.toolSelectedIdx != 0 {
+		t.Fatalf("initial selection should be 0, got %d", m.toolSelectedIdx)
+	}
+
+	// Tab moves forward (does NOT toggle collapse).
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if m.toolSelectedIdx != 1 {
+		t.Errorf("Tab should move to index 1, got %d", m.toolSelectedIdx)
+	}
+
+	// Tab wraps to 0.
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if m.toolSelectedIdx != 0 {
+		t.Errorf("Tab should wrap to 0, got %d", m.toolSelectedIdx)
+	}
+
+	// Shift+Tab moves back to the end.
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	if m.toolSelectedIdx != 1 {
+		t.Errorf("Shift+Tab should wrap to 1, got %d", m.toolSelectedIdx)
+	}
+}
+
+func TestRenderToolCallResult_ExpandedNoTruncation(t *testing.T) {
+	// Long result (>500 chars) must be fully present in the render,
+	// wrapped at the given width — no silent cut.
+	long := strings.Repeat("0123456789", 100) // 1000 chars
+	out := RenderToolCallResult(toolCallEntry{
+		Name:      "web_search",
+		Args:      `{"q":"x"}`,
+		Status:    "done",
+		Result:    long,
+		Collapsed: false,
+	}, false, 40)
+
+	// The renderer hard-wraps at width and pads each line, so the
+	// long string is split across lines with inserted spaces. Strip
+	// ANSI escapes, newlines and padding, then verify the complete
+	// result content survives (no truncation like the old 500-char cut).
+	plain := stripANSI(out)
+	plain = strings.ReplaceAll(plain, "\n", "")
+	plain = strings.ReplaceAll(plain, " ", "")
+	if !strings.Contains(plain, long) {
+		t.Error("expanded render must contain the full result (no truncation)")
+	}
+	if strings.Contains(plain, "...") {
+		t.Error("expanded render should not contain truncation markers")
+	}
+	// Header, args preserved.
+	if !strings.Contains(plain, "web_search") {
+		t.Error("header with tool name missing")
+	}
+}
+
+func TestRenderToolCallResult_CollapsedHint(t *testing.T) {
+	out := RenderToolCallResult(toolCallEntry{
+		Name:      "web_search",
+		Status:    "done",
+		Result:    strings.Repeat("x", 123),
+		Collapsed: true,
+	}, false, 40)
+
+	if strings.Contains(out, strings.Repeat("x", 123)) {
+		t.Error("collapsed render must not include the result body")
+	}
+	if !strings.Contains(out, "123 chars hidden") {
+		t.Errorf("collapsed render must show char count hint, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Enter to expand") {
+		t.Errorf("collapsed hint should mention Enter, got:\n%s", out)
+	}
+}
+
+func TestRenderToolCallResult_RunningHeader(t *testing.T) {
+	out := RenderToolCallResult(toolCallEntry{
+		Name:      "file_read",
+		Status:    "running",
+		Collapsed: true,
+	}, true, 40)
+
+	if !strings.Contains(out, "file_read") {
+		t.Error("running header should show tool name")
+	}
+	if !strings.Contains(out, "▌") {
+		t.Error("selected indicator missing")
+	}
+}
+
+// --- Phase 4.1: modal keyboard navigation ---
+
+const testCommandsItems = 12 // openCommandsModal() item count
+
+// openTestCommandsModal builds a model that can host the commands modal
+// and opens it, returning the updated model.
+func openTestCommandsModal() *Model {
+	m := &Model{
+		width:  80,
+		height: 24,
+	}
+	m.openCommandsModal()
+	return m
+}
+
+func TestCommandsModal_ArrowKeysNavigate(t *testing.T) {
+	m := openTestCommandsModal()
+	if m.modal == nil || m.modal.Type != ModalCommands {
+		t.Fatal("expected commands modal to be open")
+	}
+	if m.modal.Selected != 0 {
+		t.Fatalf("initial Selected = %d, want 0", m.modal.Selected)
+	}
+
+	// Down moves selection forward and stays inside bounds.
+	for want := 1; want <= testCommandsItems-2; want++ {
+		_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		if cmd != nil {
+			t.Fatalf("Down at %d produced a command, want nil", want)
+		}
+		if m.modal.Selected != want {
+			t.Fatalf("Selected after Down #%d = %d, want %d",
+				want, m.modal.Selected, want)
+		}
+	}
+
+	// Up moves back.
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	if m.modal.Selected != testCommandsItems-3 {
+		t.Errorf("Selected after Up = %d, want %d",
+			m.modal.Selected, testCommandsItems-3)
+	}
+}
+
+func TestCommandsModal_NavigationClampedAtEdges(t *testing.T) {
+	m := openTestCommandsModal()
+
+	// Overshoot the bottom: selection must clamp at the last item.
+	for i := 0; i < testCommandsItems+5; i++ {
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	if m.modal.Selected != testCommandsItems-1 {
+		t.Errorf("Selected after overshoot = %d, want %d",
+			m.modal.Selected, testCommandsItems-1)
+	}
+
+	// Overshoot the top: clamp at first item.
+	for i := 0; i < testCommandsItems+5; i++ {
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	}
+	if m.modal.Selected != 0 {
+		t.Errorf("Selected after Up overshoot = %d, want 0",
+			m.modal.Selected)
+	}
+}
+
+func TestCommandsModal_EnterExecutesSelectedCommand(t *testing.T) {
+	m := openTestCommandsModal()
+
+	// Select /clear (index 1), press Enter: modal closes and the
+	// command handler clears the conversation.
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m.messages = append(m.messages, chatEntry{Role: "user", Content: "hello"})
+	m.toolCalls = append(m.toolCalls, toolCallEntry{Name: "x"})
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Error("Enter in commands modal should not produce a command")
+	}
+	if m.modal != nil {
+		t.Error("Enter in commands modal should close it")
+	}
+	if len(m.messages) != 0 {
+		t.Errorf("messages after /clear = %d, want 0", len(m.messages))
+	}
+	if len(m.toolCalls) != 0 {
+		t.Errorf("toolCalls after /clear = %d, want 0", len(m.toolCalls))
+	}
+	if m.status != "Cleared" {
+		t.Errorf("status after /clear = %q, want Cleared", m.status)
+	}
+}
+
+func TestCommandsModal_EnterOnNewSwitchesSession(t *testing.T) {
+	m := openTestCommandsModal()
+	m.sessionID = "old-session"
+
+	// Index 0 is /new.
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if m.modal != nil {
+		t.Error("Enter on /new should close the modal")
+	}
+	if m.sessionID == "" || m.sessionID == "old-session" {
+		t.Errorf("sessionID after /new = %q, want a fresh value", m.sessionID)
+	}
+	if m.status != "New session started" {
+		t.Errorf("status after /new = %q", m.status)
+	}
+}
+
+func TestCommandsModal_EscClosesWithoutAction(t *testing.T) {
+	m := openTestCommandsModal()
+	m.messages = append(m.messages, chatEntry{Role: "user", Content: "hello"})
+
+	for i := 0; i < 3; i++ {
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+
+	if cmd != nil {
+		t.Error("Esc should not produce a command")
+	}
+	if m.modal != nil {
+		t.Error("Esc should close the modal")
+	}
+	// No command was executed: conversation untouched.
+	if len(m.messages) != 1 {
+		t.Errorf("messages after Esc = %d, want 1 (untouched)",
+			len(m.messages))
+	}
+}
+
+func TestSkillsModal_SelectsSkill(t *testing.T) {
+	m := &Model{
+		width:  80,
+		height: 24,
+		cfg: &config.WukongConfig{
+			Extensions: []config.ExtensionConfig{
+				{Name: "file_reader", Enabled: true},
+				{Name: "web_search", Enabled: true},
+				{Name: "disabled_ext", Enabled: false},
+			},
+		},
+	}
+	m.openSkillsModal()
+	if m.modal == nil || m.modal.Type != ModalSkills {
+		t.Fatal("expected skills modal to be open")
+	}
+	if len(m.modal.Items) != 2 {
+		t.Fatalf("items = %v, want only enabled extensions", m.modal.Items)
+	}
+
+	// Down to the second skill, Enter selects it.
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if m.modal != nil {
+		t.Error("Enter should close the skills modal")
+	}
+	if m.skillName != "web_search" {
+		t.Errorf("skillName = %q, want web_search", m.skillName)
+	}
+	if m.status != "Skill: web_search" {
+		t.Errorf("status = %q, want Skill: web_search", m.status)
+	}
+}
+
+func TestSkillsModal_NoSkillsFallback(t *testing.T) {
+	m := &Model{width: 80, height: 24} // nil cfg → no extensions
+	m.openSkillsModal()
+	if len(m.modal.Items) != 1 || m.modal.Items[0] != "No skills loaded" {
+		t.Errorf("fallback items = %v", m.modal.Items)
+	}
+}
+
+func TestModal_SettingsEnterCloses(t *testing.T) {
+	m := &Model{
+		width:  80,
+		height: 24,
+		cfg: &config.WukongConfig{
+			LogLevel: "info",
+			Memory:   config.MemoryConfig{Backend: "sqlite"},
+			Session:  config.SessionConfig{Backend: "memory"},
+			Recall:   config.RecallConfig{Enabled: false},
+		},
+		providerName: "p",
+		modelName:    "m",
+	}
+	m.openSettingsModal()
+	if m.modal == nil || m.modal.Type != ModalSettings {
+		t.Fatal("expected settings modal to be open")
+	}
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil {
+		t.Error("settings Enter should not produce a command")
+	}
+	if m.modal != nil {
+		t.Error("settings Enter should close the modal")
+	}
+}
+
+func TestModal_PgUpPgDownScroll(t *testing.T) {
+	// Small window (modalHeight=6 → maxVisible=3) over 11 items so
+	// Scroll actually moves.
+	m := &Model{width: 40, height: 12}
+	m.modal = &modalState{
+		Type:  ModalCommands,
+		Title: "cmd",
+		Items: []string{
+			"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+		},
+	}
+	m.layoutModal(testCommandsItems)
+	if m.modalHeight != 6 {
+		t.Fatalf("modalHeight = %d, want 6 (clamped)", m.modalHeight)
+	}
+
+	// PgDown advances the scroll offset.
+	m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	if m.modal.Scroll != 2 {
+		t.Errorf("Scroll after 2×PgDown = %d, want 2", m.modal.Scroll)
+	}
+
+	// PgUp moves back.
+	m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	if m.modal.Scroll != 1 {
+		t.Errorf("Scroll after PgUp = %d, want 1", m.modal.Scroll)
+	}
+
+	// PgUp clamps at 0.
+	m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	if m.modal.Scroll != 0 {
+		t.Errorf("Scroll after PgUp overshoot = %d, want 0", m.modal.Scroll)
+	}
+}
+
+func TestModal_SelectionFollowsIntoVisibleWindow(t *testing.T) {
+	// maxVisible = 3 → selection beyond index 3 must pull Scroll along.
+	m := &Model{width: 40, height: 12}
+	items := make([]string, testCommandsItems)
+	for i := range items {
+		items[i] = fmt.Sprintf("cmd-%d", i)
+	}
+	m.modal = &modalState{Type: ModalCommands, Title: "cmd", Items: items}
+	m.layoutModal(len(items)) // modalHeight = 6, maxVisible = 3
+
+	// Drop down to index 8; Scroll must follow so the selection is
+	// visible: Scroll = Selected - maxVisible + 1 = 6.
+	for i := 0; i < 8; i++ {
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	if m.modal.Selected != 8 {
+		t.Fatalf("Selected = %d, want 8", m.modal.Selected)
+	}
+	if m.modal.Scroll != 6 {
+		t.Errorf("Scroll after tracking = %d, want 6", m.modal.Scroll)
+	}
+
+	// Jump back to the top; Scroll must collapse to keep it visible.
+	for i := 0; i < 8; i++ {
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	}
+	if m.modal.Selected != 0 {
+		t.Fatalf("Selected = %d, want 0", m.modal.Selected)
+	}
+	if m.modal.Scroll != 0 {
+		t.Errorf("Scroll after returning to top = %d, want 0", m.modal.Scroll)
+	}
+}
+
+func TestModal_PgUpDoesNotMoveSelection(t *testing.T) {
+	m := &Model{width: 40, height: 12}
+	items := make([]string, testCommandsItems)
+	for i := range items {
+		items[i] = fmt.Sprintf("cmd-%d", i)
+	}
+	m.modal = &modalState{Type: ModalCommands, Title: "cmd", Items: items}
+	m.layoutModal(len(items))
+
+	// Select item 5, then PgUp/Down: selection must not move.
+	for i := 0; i < 5; i++ {
+		_, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	_, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	if m.modal.Selected != 5 {
+		t.Errorf("PgUp/PgDown moved selection to %d, want 5",
+			m.modal.Selected)
+	}
+}
+
+func TestCommandsModal_UnchangedNonNavKey(t *testing.T) {
+	m := openTestCommandsModal()
+	// Ctrl+D (submit) while a modal is open must be swallowed, not
+	// forwarded to the command/submit path.
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	if cmd != nil {
+		t.Error("Ctrl+D with modal open should not produce a command")
+	}
+	if m.modal == nil {
+		t.Error("non-nav key should keep the modal open")
+	}
+}
+
+func TestRenderModal_ScrollHint(t *testing.T) {
+	items := make([]string, testCommandsItems)
+	for i := range items {
+		items[i] = fmt.Sprintf("cmd-%d", i)
+	}
+	modal := &modalState{
+		Type:  ModalCommands,
+		Title: "Available Commands",
+		Items: items,
+	}
+
+	// 4 rows → maxVisible = 1 → only one item and a scroll hint.
+	out := stripANSI(RenderModal(modal, 40, 4))
+	if !strings.Contains(out, "cmd-0") {
+		t.Error("first item missing from rendered modal")
+	}
+	if strings.Contains(out, "cmd-1") {
+		t.Error("second item should be scrolled out at height 4")
+	}
+	if !strings.Contains(out, "[1/12") {
+		t.Errorf("scroll hint missing, got:\n%s", out)
+	}
+}
+
+func TestRenderModal_ClampsOverscroll(t *testing.T) {
+	items := make([]string, testCommandsItems)
+	for i := range items {
+		items[i] = fmt.Sprintf("cmd-%d", i)
+	}
+	modal := &modalState{
+		Type:     ModalCommands,
+		Title:    "Available Commands",
+		Items:    items,
+		Selected: testCommandsItems - 1, // last item
+		Scroll:   50,                    // invalid: beyond the last visible position
+	}
+
+	out := stripANSI(RenderModal(modal, 40, 4))
+	if !strings.Contains(out, "cmd-11") {
+		t.Errorf("overscrolled modal must clamp to the last item, got:\n%s", out)
+	}
+	if !strings.Contains(out, "[12/12") {
+		t.Errorf("clamped scroll hint missing, got:\n%s", out)
+	}
+}
+
+func TestRenderModal_NilSafe(t *testing.T) {
+	if got := RenderModal(nil, 40, 10); got != "" {
+		t.Errorf("RenderModal(nil) = %q, want empty", got)
+	}
+}
+
+func TestRenderModal_ContentOnly(t *testing.T) {
+	// Settings-style modal uses Content instead of Items.
+	modal := &modalState{
+		Type:    ModalSettings,
+		Title:   "Settings",
+		Content: "Provider: p\nModel: m",
+	}
+	out := stripANSI(RenderModal(modal, 40, 6))
+	if !strings.Contains(out, "Provider: p") {
+		t.Errorf("content modal should render Content, got:\n%s", out)
 	}
 }

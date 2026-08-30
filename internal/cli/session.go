@@ -12,7 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
 	"github.com/km269/wukong/internal/agent"
@@ -108,37 +107,37 @@ func runSession(cmd *cobra.Command, args []string) error {
 	maxTokens, _ := cmd.Flags().GetInt("max-tokens")
 	noStream, _ := cmd.Flags().GetBool("no-stream")
 
+	// An explicit workingDir of "" falls back to os.Getwd().
+	return startInteractiveSession(configPath, provider, modelName,
+		temperature, maxTokens, noStream, sessionID, "")
+}
+
+// startInteractiveSession bootstraps the full agent stack and launches
+// the TUI. It is shared by `wukong session` (runSession) and the
+// project selector ([r]ecover) so both go through the same
+// bootstrap/cleanup/signal-handling path.
+func startInteractiveSession(
+	configPath, provider, modelName string,
+	temperature float64, maxTokens int, noStream bool,
+	sessionID, workingDir string,
+) error {
+
 	// Build a reasonably unique user identifier.
 	// Priority: USER env var (Unix), USERDOMAIN\USERNAME (Windows),
-	// hostname fallback, "default" last resort.
-	userID := os.Getenv("USER")
-	if userID == "" {
-		// On Windows, combine domain and username for uniqueness.
-		userDomain := os.Getenv("USERDOMAIN")
-		userName := os.Getenv("USERNAME")
-		if userDomain != "" && userName != "" {
-			userID = userDomain + "\\" + userName
-		} else if userName != "" && userName != "SYSTEM" {
-			userID = userName
-		}
-	}
-	if userID == "" || userID == "SYSTEM" {
-		// Fallback: use hostname so different machines get
-		// different IDs even when running as SYSTEM.
-		if hostname, err := os.Hostname(); err == nil {
-			userID = hostname
-		}
-	}
-	if userID == "" {
-		userID = "default"
-	}
+	// hostname fallback, "default" last resort. Shared with other CLI
+	// commands via resolveUserID (run.go).
+	userID := resolveUserID()
 
 	if sessionID == "" {
-		sessionID = uuid.New().String()
+		sessionID = resolveSessionID()
 	}
 
 	// Get current working directory for project tracking.
-	workingDir, _ := os.Getwd()
+	// An explicit workingDir (project selector recover) takes
+	// precedence; caller is responsible for it existing.
+	if workingDir == "" {
+		workingDir = resolveWorkingDir()
+	}
 
 	// Report model overrides if any
 	if provider != "" || modelName != "" {
@@ -213,10 +212,12 @@ func runSession(cmd *cobra.Command, args []string) error {
 			workingDir, sessionID, "")
 	}
 
-	// Start TUI — pass projectMgr for instruction tracking.
+	// Start TUI — pass projectMgr for instruction tracking and session
+	// service for the multi-session tab.
 	return tui.StartTUI(
 		wukongCfg, loop, userID, sessionID,
-		workingDir, bootstrapState.ProjectMgr, "")
+		workingDir, bootstrapState.ProjectMgr,
+		bootstrapState.SessionSvc, "")
 }
 
 // BootstrapState holds resources created during bootstrap that need
@@ -238,6 +239,11 @@ type BootstrapState struct {
 	KnowledgeMgr      *knowledge.Manager
 	ProjectMgr        *project.Manager
 	GatewayServer     *gateway.GatewayServer
+
+	// SessionSvc is the session store service used by the agent loop;
+	// shared with the TUI's multi-session tab (C1). Nil when no
+	// session backend is configured.
+	SessionSvc *wksession.SessionService
 
 	// DBPing probes the shared database pool for liveness; wired by
 	// bootstrapSession and consumed by health checks. Nil when no DB
@@ -1149,6 +1155,7 @@ func bootstrapSession(
 	state := &BootstrapState{
 		KnowledgeMgr:      knowledgeMgr,
 		ProjectMgr:        projectMgr,
+		SessionSvc:        sessionSvc,
 		ARDRegistry:       ardRegistryServer,
 		ACPMCPBridge:      acpMCPBridge,
 		MCPServer:         mcpServer,

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/km269/wukong/internal/gateway"
 )
@@ -301,6 +302,8 @@ session:
 	}
 }
 
+// TestNewLoader_EnvVarExpansion verifies that ${ENV} references in
+// secret fields are expanded during Load.
 func TestNewLoader_EnvVarExpansion(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
@@ -589,5 +592,180 @@ func TestWarnings_MalformedRedisURL(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected redis_url warning for malformed URL, got %v", warnings)
+	}
+}
+
+// --- P3.3 configure --edit: round-trip serialization ---
+
+func TestMarshalYAML_RoundTrip(t *testing.T) {
+	cfg := &WukongConfig{
+		DefaultProvider: "lmstudio",
+		Providers: []ProviderConfig{
+			{
+				Name:          "lmstudio",
+				Type:          "openai",
+				BaseURL:       "http://localhost:1234/v1",
+				APIKey:        "${LMSTUDIO_KEY}",
+				Model:         "qwen3",
+				MCPPort:       "8080",
+				ContextWindow: 32768,
+			},
+		},
+		Extensions: []ExtensionConfig{
+			{Name: "developer", Type: "builtin", Enabled: true},
+		},
+		Agent: AgentConfig{
+			MaxLLMCalls:    42,
+			MaxRunDuration: 90 * time.Second,
+		},
+		Security: SecurityConfig{BlockDangerousCommands: true},
+	}
+
+	data, err := MarshalYAML(cfg)
+	if err != nil {
+		t.Fatalf("MarshalYAML: %v", err)
+	}
+
+	// Keys must be snake_case, and durations must be strings.
+	out := string(data)
+	for _, want := range []string{
+		"default_provider: lmstudio",
+		"max_llm_calls: 42",
+		"max_run_duration: 1m30s",
+		"base_url: http://localhost:1234/v1",
+		"mcp_port: \"8080\"",
+		"context_window: 32768",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("marshaled YAML missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "DefaultProvider") {
+		t.Errorf("marshaled YAML must not contain Go field names:\n%s", out)
+	}
+	if strings.Contains(out, "APIKey") {
+		t.Errorf("marshaled YAML must not contain Go field names for APIKey:\n%s", out)
+	}
+}
+
+// TestMarshalYAML_RoundTripLoad verifies a config marshaled by
+// MarshalYAML loads back losslessly via NewLoader (the exact flow
+// the configure wizard uses for write + read).
+func TestMarshalYAML_RoundTripLoad(t *testing.T) {
+	cfg := &WukongConfig{
+		DefaultProvider: "lmstudio",
+		Providers: []ProviderConfig{
+			{
+				Name:          "lmstudio",
+				Type:          "openai",
+				BaseURL:       "http://localhost:1234/v1",
+				APIKey:        "sk-test",
+				Model:         "qwen3",
+				MCPPort:       "8090",
+				ContextWindow: 16384,
+			},
+		},
+		Agent: AgentConfig{
+			MaxLLMCalls:    42,
+			MaxRunDuration: 90 * time.Second,
+		},
+	}
+
+	data, err := MarshalYAML(cfg)
+	if err != nil {
+		t.Fatalf("MarshalYAML: %v", err)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, data, 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	loader, err := NewLoader(configPath)
+	if err != nil {
+		t.Fatalf("NewLoader: %v", err)
+	}
+	loaded, err := loader.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if loaded.DefaultProvider != "lmstudio" {
+		t.Errorf("default provider = %q, want lmstudio", loaded.DefaultProvider)
+	}
+	p := loaded.FindProvider("lmstudio")
+	if p == nil {
+		t.Fatal("provider lmstudio missing after reload")
+	}
+	if p.MCPPort != "8090" {
+		t.Errorf("mcp_port = %q, want 8090 (snake_case key must round-trip)", p.MCPPort)
+	}
+	if p.ContextWindow != 16384 {
+		t.Errorf("context_window = %d, want 16384", p.ContextWindow)
+	}
+	if loaded.Agent.MaxLLMCalls != 42 {
+		t.Errorf("agent.max_llm_calls = %d, want 42", loaded.Agent.MaxLLMCalls)
+	}
+	if loaded.Agent.MaxRunDuration != 90*time.Second {
+		t.Errorf("agent.max_run_duration = %v, want 90s", loaded.Agent.MaxRunDuration)
+	}
+}
+
+// TestLoadUnresolved_KeepsEnvRefs verifies the --edit baseline does
+// not expand ${ENV} references.
+func TestLoadUnresolved_KeepsEnvRefs(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	os.Setenv("TEST_KEY_EDIT", "expanded-secret")
+	defer os.Unsetenv("TEST_KEY_EDIT")
+
+	yamlContent := `
+default_provider: lmstudio
+providers:
+  - name: lmstudio
+    type: openai
+    base_url: http://localhost:1234/v1
+    api_key: ${TEST_KEY_EDIT}
+    model: qwen3
+`
+	if err := os.WriteFile(configPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	loader, err := NewLoader(configPath)
+	if err != nil {
+		t.Fatalf("NewLoader: %v", err)
+	}
+	cfg, err := loader.LoadUnresolved()
+	if err != nil {
+		t.Fatalf("LoadUnresolved: %v", err)
+	}
+
+	p := cfg.FindProvider("lmstudio")
+	if p == nil {
+		t.Fatal("provider lmstudio missing")
+	}
+	if p.APIKey != "${TEST_KEY_EDIT}" {
+		t.Errorf("api_key = %q, want unexpanded ${TEST_KEY_EDIT}", p.APIKey)
+	}
+}
+
+// TestMarshalYAML_NilFields verifies nil slices/maps and pointer
+// fields serialize as null and reload as zero/nil values.
+func TestMarshalYAML_NilFields(t *testing.T) {
+	cfg := &WukongConfig{}
+	cfg.Providers = nil
+	cfg.Extensions = nil
+
+	data, err := MarshalYAML(cfg)
+	if err != nil {
+		t.Fatalf("MarshalYAML: %v", err)
+	}
+	if !strings.Contains(string(data), "providers: null") {
+		t.Errorf("expected explicit null providers:\n%s", data)
+	}
+	if !strings.Contains(string(data), "extensions: null") {
+		t.Errorf("expected explicit null extensions:\n%s", data)
 	}
 }

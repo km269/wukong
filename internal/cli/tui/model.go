@@ -4,6 +4,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -15,9 +16,10 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/google/uuid"
+	"trpc.group/trpc-go/trpc-agent-go/session"
 
-	"github.com/km269/wukong/internal/agent"
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/project"
 	"github.com/km269/wukong/internal/util"
 )
 
@@ -25,6 +27,12 @@ import (
 // Beyond this limit, the oldest messages are dropped to prevent
 // unbounded growth during long sessions.
 const maxMessages = 500
+
+// streamDebounce is how long updateViewport waits before pushing a
+// stream-delta-only content change to the viewport. The viewport's
+// internal SetContent is comparatively expensive, so batching deltas
+// here avoids thrashing the renderer during high-churn streaming.
+const streamDebounce = 50 * time.Millisecond
 
 // maxCommandHistory limits the number of commands saved in history.
 const maxCommandHistory = 100
@@ -65,6 +73,8 @@ const (
 	ModalCommands
 	ModalSkills
 	ModalSettings
+	ModalProjects
+	ModalSessions
 )
 
 // modalState represents the state of a modal window.
@@ -74,6 +84,7 @@ type modalState struct {
 	Content  string
 	Selected int
 	Items    []string
+	Scroll   int // viewport offset for content taller than the modal
 }
 
 // Model is the Bubbletea model for the wukong TUI.
@@ -94,8 +105,12 @@ type Model struct {
 	auditLog []toolAuditEntry
 
 	// Agent loop
-	loop *agent.CoreLoop
+	loop loopRunner
 	cfg  *config.WukongConfig
+
+	// Secret values to redact from rendered output (from cfg via
+	// SecretValues(); nil-safe, stays nil when cfg is absent).
+	secrets []string
 
 	// Streaming state
 	streaming     bool
@@ -113,8 +128,12 @@ type Model struct {
 
 	// Project tracking
 	workingDir    string
-	projectMgr    any // *project.Manager (avoids import cycle)
+	projectMgr    any // *project.Manager (set by CLI; asserted via small interfaces)
 	instrRecorded bool
+
+	// Session management (multi-session tab, C1)
+	sessionMgr        any                 // *wksession.SessionService (set by CLI; asserted via small interfaces)
+	sessionModalItems []sessionsModalItem // full IDs for the open sessions modal (reset on open)
 
 	// Layout
 	width  int
@@ -154,6 +173,7 @@ type Model struct {
 
 	// Tool-panel navigation state
 	toolSelectedIdx int
+	toolScrollStart int // first visible tool in the scroll window
 
 	// Viewport scroll control: when false, auto-scroll is disabled
 	// (user has manually scrolled up to read history)
@@ -165,16 +185,34 @@ type Model struct {
 
 	// Debounce timer for SetContent to reduce thrashing during streaming
 	lastRenderTime time.Time
+
+	// Incremental streaming-render cache (P3.1). While a response is
+	// streaming, streamCachePrefixIdx holds the byte offset of the last
+	// provably-safe split point (a blank line after a fully-closed
+	// markdown block), streamCacheRendered is the rendered output of
+	// content[:streamCachePrefixIdx], and streamCacheValid says whether
+	// the cache still matches currentStream. Each frame renders only the
+	// growing tail after that prefix instead of the whole document.
+	// Invalidated whenever currentStream changes (see
+	// invalidateStreamCache/resetStreamCache).
+	// streamDeltas counts render frames since the last baseline; a
+	// periodic full reconcile (markdownStreamReconcileEvery) bounds any
+	// block-boundary approximation.
+	streamCachePrefixIdx int
+	streamCacheRendered  string
+	streamCacheValid     bool
+	streamDeltas         int
 }
 
 // ModelConfig holds dependencies for creating the TUI model.
 type ModelConfig struct {
 	Config     *config.WukongConfig
-	Loop       *agent.CoreLoop
+	Loop       loopRunner
 	UserID     string
 	SessionID  string
 	WorkingDir string
-	ProjectMgr any // *project.Manager (avoids import cycle)
+	ProjectMgr any // *project.Manager (set by CLI; asserted via small interfaces)
+	SessionMgr any // *wksession.SessionService (set by CLI; asserted via small interfaces)
 	Version    string
 }
 
@@ -228,6 +266,7 @@ func NewModel(cfg ModelConfig) *Model {
 		sessionID:    cfg.SessionID,
 		loop:         cfg.Loop,
 		cfg:          cfg.Config,
+		secrets:      cfg.Config.SecretValues(),
 		modelName:    modelDisplay,
 		providerName: providerDisplay,
 		toolCount:    toolCount,
@@ -235,6 +274,7 @@ func NewModel(cfg ModelConfig) *Model {
 		version:      cfg.Version,
 		workingDir:   cfg.WorkingDir,
 		projectMgr:   cfg.ProjectMgr,
+		sessionMgr:   cfg.SessionMgr,
 		mdRenderer:   mdRenderer,
 		autoScroll:   true,
 		messages: []chatEntry{
@@ -297,12 +337,21 @@ func (m *Model) Init() tea.Cmd {
 // by session.go's shutdownBootstrap which uses an independent context,
 // avoiding "context deadline exceeded" errors from in-flight events.
 func (m *Model) requestExit() tea.Cmd {
+	m.stopStream()
+
+	m.quitRequested = true
+	m.status = "Goodbye!"
+	return tea.Quit
+}
+
+// stopStream cancels any in-flight streaming request and waits for the
+// streaming goroutine to finish. Safe to call multiple times (cancel
+// and wait are each guarded by sync.Once). Does NOT set quitRequested.
+func (m *Model) stopStream() {
 	m.cleanupOnce.Do(func() {
-		// Cancel streaming if active
 		if m.streaming && m.streamCancel != nil {
 			m.streamCancel()
 		}
-		// Wait for stream goroutine to finish (with timeout)
 		if m.streamDone != nil {
 			select {
 			case <-m.streamDone:
@@ -312,10 +361,6 @@ func (m *Model) requestExit() tea.Cmd {
 			}
 		}
 	})
-
-	m.quitRequested = true
-	m.status = "Goodbye!"
-	return tea.Quit
 }
 
 // cleanup stops any running streams.
@@ -324,17 +369,7 @@ func (m *Model) requestExit() tea.Cmd {
 // Note: loop.Close() is NOT called here — session.go's
 // shutdownBootstrap handles that with an independent context.
 func (m *Model) cleanup() {
-	m.cleanupOnce.Do(func() {
-		if m.streaming && m.streamCancel != nil {
-			m.streamCancel()
-		}
-		if m.streamDone != nil {
-			select {
-			case <-m.streamDone:
-			case <-time.After(3 * time.Second):
-			}
-		}
-	})
+	m.stopStream()
 }
 
 // Update implements tea.Model.
@@ -353,11 +388,29 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case tea.KeyUp:
 				if m.modal.Selected > 0 {
 					m.modal.Selected--
+					m.followModalSelection()
 				}
 				return m, nil
 			case tea.KeyDown:
 				if m.modal.Selected < len(m.modal.Items)-1 {
 					m.modal.Selected++
+					m.followModalSelection()
+				}
+				return m, nil
+			case tea.KeyPgUp:
+				m.modal.Scroll--
+				if m.modal.Scroll < 0 {
+					m.modal.Scroll = 0
+				}
+				return m, nil
+			case tea.KeyPgDown:
+				m.modal.Scroll++
+				return m, nil
+			case tea.KeyBackspace:
+				// C1: in the sessions tab, Backspace deletes the
+				// selected session (server-side) and refreshes.
+				if m.modal.Type == ModalSessions {
+					m.deleteSelectedSession()
 				}
 				return m, nil
 			}
@@ -367,6 +420,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			if m.streaming {
+				// Second Ctrl+C while already cancelling force-quits,
+				// matching the "Press Ctrl+C again to force-quit" hint.
+				if m.cancelled {
+					return m, m.requestExit()
+				}
 				if m.streamCancel != nil {
 					m.streamCancel()
 				}
@@ -376,12 +434,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					chatEntry{Role: "system",
 						Content: "[Request cancelled by user]\nWaiting for stream to finish...\nPress Ctrl+C again to force-quit, or type /exit"})
 				m.updateViewport()
-				// Return nil — still need to keep consuming streamCh
-				// until the goroutine sends streamEndMsg or closes channel.
-				return m, nil
-			}
-			if m.cancelled || m.quitRequested {
-				return m, m.requestExit()
+				// Keep consuming streamCh — the stream goroutine
+				// will send streamEndMsg once it observes the
+				// cancellation. Without this cmd the channel is
+				// never drained and the UI deadlocks on
+				// "Cancelling...".
+				return m, readStreamEvent(m.streamCh)
 			}
 			return m, m.requestExit()
 
@@ -399,18 +457,16 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.modal != nil {
 				return m, nil
 			}
+			// Tab/Shift+Tab navigate the tool list; Enter toggles
+			// collapse/expand of the selected tool result (with a
+			// result). This matches the footer hint rendered in
+			// updateViewport.
 			if len(m.toolCalls) > 0 {
-				idx := m.toolSelectedIdx
-				if idx >= len(m.toolCalls) {
-					idx = len(m.toolCalls) - 1
+				if m.toolSelectedIdx+1 < len(m.toolCalls) {
+					m.toolSelectedIdx++
+				} else {
+					m.toolSelectedIdx = 0
 				}
-				if m.toolCalls[idx].Result != "" {
-					m.toolCalls[idx].Collapsed = !m.toolCalls[idx].Collapsed
-					m.updateViewport()
-					return m, nil
-				}
-				// Tool has no result yet — still select it for when it arrives
-				m.toolSelectedIdx = idx
 				m.updateViewport()
 				return m, nil
 			}
@@ -428,6 +484,25 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.updateViewport()
 				return m, nil
 			}
+
+		case tea.KeyEnter:
+			if m.modal != nil {
+				return m, nil
+			}
+			// Enter toggles collapse/expand of the selected tool.
+			// Only tool calls with a finished result are expandable;
+			// running/error calls have nothing to reveal.
+			if len(m.toolCalls) > 0 &&
+				m.toolSelectedIdx >= 0 &&
+				m.toolSelectedIdx < len(m.toolCalls) {
+				tc := &m.toolCalls[m.toolSelectedIdx]
+				if tc.Result != "" {
+					tc.Collapsed = !tc.Collapsed
+					m.updateViewport()
+					return m, nil
+				}
+			}
+			// Not a tool-toggle: fall through to submit the input.
 
 		case tea.KeyUp:
 			if msg.Alt {
@@ -538,13 +613,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Args:      msg.Args,
 			Status:    "running",
 			StartTime: time.Now(),
+			// Default to collapsed: show only the header while the
+			// call runs; the result is revealed on Enter when done.
+			Collapsed: true,
 		})
 		m.setStatus("Running: " + msg.Name)
 		m.updateViewport()
 		return m, readStreamEvent(m.streamCh)
 
 	case toolCallResultMsg:
-		for i := len(m.toolCalls) - 1; i >= 0; i-- {
+		// Match the FIRST running entry with this name (oldest
+		// call), mirroring the FIFO attribution in update.go's
+		// resultQueue: results are attached to tool calls in the
+		// order they started.
+		for i := 0; i < len(m.toolCalls); i++ {
 			if m.toolCalls[i].Status == "running" &&
 				m.toolCalls[i].Name == msg.Name {
 				m.toolCalls[i].Result = msg.Result
@@ -571,6 +653,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.addMessage("system", string(msg))
 		m.currentStream = ""
 		m.streaming = false
+		m.resetStreamCache()
 		m.setStatus("Error occurred")
 		m.updateViewport()
 		return m, readStreamEvent(m.streamCh)
@@ -580,7 +663,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.streaming = false
-		m.cancelled = false
 		m.streamCancel = nil
 		var finalContent string
 		if m.currentStream != "" {
@@ -589,6 +671,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			finalContent = msg.Content
 		}
 		m.currentStream = ""
+		m.resetStreamCache()
 		if finalContent != "" {
 			m.addMessage("assistant", finalContent)
 		}
@@ -620,6 +703,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.setStatus("Ready")
 		}
+		m.cancelled = false
 		m.updateViewport()
 		return m, nil
 	}
@@ -809,9 +893,44 @@ func (m *Model) updateViewport() {
 
 	if toolChanged {
 		var buf strings.Builder
-		for i, tc := range m.toolCalls {
+		// Render only the visible window of tools. The window
+		// follows the selected tool and is capped at a quarter of
+		// the viewport height so a long tool list never pushes
+		// the input area off screen.
+		maxVisible := m.viewport.Height / 4
+		if maxVisible < 2 {
+			maxVisible = 2
+		}
+		if m.toolSelectedIdx < m.toolScrollStart {
+			m.toolScrollStart = m.toolSelectedIdx
+		}
+		if m.toolSelectedIdx >= m.toolScrollStart+maxVisible {
+			m.toolScrollStart = m.toolSelectedIdx - maxVisible + 1
+		}
+		if m.toolScrollStart < 0 {
+			m.toolScrollStart = 0
+		}
+		start := m.toolScrollStart
+		end := start + maxVisible
+		if end > len(m.toolCalls) {
+			end = len(m.toolCalls)
+		}
+		for i := start; i < end; i++ {
+			tc := m.toolCalls[i]
 			selected := i == m.toolSelectedIdx
-			buf.WriteString(RenderToolCallResult(tc, selected) + "\n\n")
+			buf.WriteString(RenderToolCallResult(tc, selected, m.width) + "\n\n")
+		}
+		if len(m.toolCalls) > maxVisible {
+			hint := "Tab/Shift+Tab to navigate"
+			if m.toolSelectedIdx >= 0 &&
+				m.toolSelectedIdx < len(m.toolCalls) &&
+				m.toolCalls[m.toolSelectedIdx].Result != "" {
+				hint = "Tab/Shift+Tab to navigate • Enter to expand/collapse"
+			}
+			buf.WriteString(dimStyle.Render(fmt.Sprintf(
+				"  [%d-%d/%d tools — %s]",
+				start+1, end, len(m.toolCalls), hint,
+			)) + "\n")
 		}
 		m.cachedTools = buf.String()
 		m.cachedToolCount = toolCount
@@ -829,7 +948,7 @@ func (m *Model) updateViewport() {
 	content.WriteString(m.cachedTools)
 
 	if m.currentStream != "" {
-		content.WriteString(m.renderAssistantMessage(m.currentStream) + "\n")
+		content.WriteString(m.renderStreamedMarkdown(m.currentStream) + "\n")
 	}
 
 	// Force render when structure changes (messages/tools changed)
@@ -837,7 +956,7 @@ func (m *Model) updateViewport() {
 	structuralChange := msgChanged || toolChanged
 
 	now := time.Now()
-	if !structuralChange && now.Sub(m.lastRenderTime) < 16*time.Millisecond {
+	if !structuralChange && now.Sub(m.lastRenderTime) < streamDebounce {
 		return
 	}
 	m.lastRenderTime = now
@@ -850,6 +969,7 @@ func (m *Model) updateViewport() {
 }
 
 func (m *Model) renderAssistantMessage(content string) string {
+	content = util.RedactSecrets(content, m.secrets)
 	rendered := RenderAssistantMessage(content)
 	if m.mdRenderer == nil {
 		return rendered
@@ -863,6 +983,185 @@ func (m *Model) renderAssistantMessage(content string) string {
 		return rendered
 	}
 	return assistantStyle.Render("Wukong: ") + md
+}
+
+// markdownStreamFlushThreshold: content below this size is rendered in
+// full every frame — the incremental machinery is not worth the book-
+// keeping for small messages (the render itself is fast).
+const markdownStreamFlushThreshold = 2 * 1024
+
+// markdownStreamReconcileEvery forces a full re-render every N deltas
+// so any subtle block-boundary approximation self-corrects within a
+// few frames.
+const markdownStreamReconcileEvery = 8
+
+// renderStreamedMarkdown renders assistant content during streaming.
+// It caches the rendered output of the stable document prefix (everything
+// up to the last blank-line boundary, at which point the markdown blocks
+// are independent) and only re-renders the still-growing final block.
+//
+// Safety: incremental reuse is ONLY attempted when the split point is
+// provably independent — an even number of code fences above the split
+// AND an even number inside the tail (no open block). Any other case
+// falls back to a full render, which is always correct. A periodic full
+// reconciliation further bounds any approximation.
+func (m *Model) renderStreamedMarkdown(content string) string {
+	if m.mdRenderer == nil {
+		m.invalidateStreamCache()
+		return RenderAssistantMessage(content)
+	}
+
+	// Not the active streaming message: full render.
+	if !m.streaming || m.currentStream != content {
+		m.invalidateStreamCache()
+		return m.renderAssistantMessage(content)
+	}
+
+	m.streamDeltas++
+
+	// Cache was invalidated (message replaced / /new / /clear / /resume).
+	if !m.streamCacheValid {
+		m.streamCachePrefixIdx = 0
+		m.streamCacheRendered = ""
+		m.streamCacheValid = true
+		return m.renderStreamedMarkdownFull(content)
+	}
+
+	if len(content) < markdownStreamFlushThreshold ||
+		m.streamCachePrefixIdx == 0 ||
+		m.streamDeltas%markdownStreamReconcileEvery == 0 {
+		return m.renderStreamedMarkdownFull(content)
+	}
+
+	// Fast path: only the final block changed since last frame. Verify
+	// the prefix is still valid, then render just the tail.
+	prefixEnd := m.streamCachePrefixIdx
+	if prefixEnd > len(content) ||
+		!strings.HasPrefix(content, content[:prefixEnd]) {
+		// Content was replaced: reset and render in full.
+		m.invalidateStreamCache()
+		return m.renderAssistantMessage(content)
+	}
+
+	tail := content[prefixEnd:]
+	if !safeIncrementalTail(tail) {
+		// Tail has an open code block or is empty: full render this
+		// frame (incremental reuse will resume at the next safe split).
+		m.invalidateStreamCache()
+		return m.renderAssistantMessage(content)
+	}
+
+	rendered := m.streamCacheRendered + "\n\n" + m.renderMarkdownBody(tail)
+	if rendered == "" {
+		m.invalidateStreamCache()
+		return m.renderAssistantMessage(content)
+	}
+	return assistantStyle.Render("Wukong: ") + rendered
+}
+
+// renderMarkdownBody renders a content fragment with the markdown
+// renderer and returns the body without the "Wukong: " prefix or
+// trailing newlines. Returns "" when the render fails.
+func (m *Model) renderMarkdownBody(content string) string {
+	if m.mdRenderer == nil {
+		return ""
+	}
+	md, err := m.mdRenderer.Render(content)
+	if err != nil || md == "" {
+		return ""
+	}
+	return strings.TrimRight(md, "\n")
+}
+
+// safeIncrementalTail reports whether the trailing block can be rendered
+// standalone and concatenated with the cached prefix without changing
+// markdown semantics. Since the split is at a blank line, blocks are
+// independent; the only risk is an odd number of fences (an open code
+// block) whose tail would render differently in isolation.
+func safeIncrementalTail(tail string) bool {
+	if tail == "" {
+		return false
+	}
+	return fenceCount(tail)%2 == 0
+}
+
+func fenceCount(s string) int {
+	n := 0
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") ||
+			strings.HasPrefix(strings.TrimSpace(line), "~~~") {
+			n++
+		}
+	}
+	return n
+}
+
+// renderStreamedMarkdownFull renders the whole document and re-baselines
+// the incremental cache at the last safe split point (if any).
+func (m *Model) renderStreamedMarkdownFull(content string) string {
+	full := m.renderAssistantMessage(content)
+
+	// Re-baseline: find the last safe blank-line split.
+	idx := lastSafeSplit(content)
+	if idx > 0 {
+		m.streamCachePrefixIdx = idx
+		m.streamCacheRendered = strings.TrimRight(
+			m.renderMarkdownBody(content[:idx]), "\n")
+	} else {
+		m.streamCachePrefixIdx = 0
+		m.streamCacheRendered = ""
+	}
+	m.streamCacheValid = true
+	return full
+}
+
+// lastSafeSplit returns the byte offset just after the last blank line
+// whose prefix and suffix both have an even fence count. A split with an
+// odd fence count anywhere would break rendering, so only provably safe
+// boundaries are returned (0 when none exist).
+func lastSafeSplit(content string) int {
+	lines := strings.Split(content, "\n")
+	// start[i] = byte offset where line i begins.
+	start := make([]int, len(lines))
+	pos := 0
+	for i, ln := range lines {
+		start[i] = pos
+		pos += len(ln) + 1
+	}
+	// Walk blank lines from the end; the split point is the byte just
+	// after the blank line (the start of the next line). Only accept a
+	// split whose prefix and tail both have an even fence count.
+	for i := len(lines) - 2; i >= 0; i-- {
+		if lines[i] != "" {
+			continue
+		}
+		split := start[i+1]
+		tail := content[split:]
+		if tail == "" {
+			continue
+		}
+		if fenceCount(tail)%2 != 0 {
+			continue
+		}
+		if fenceCount(content[:split])%2 != 0 {
+			continue
+		}
+		return split
+	}
+	return 0
+}
+
+// invalidateStreamCache forces the next render to re-baseline.
+func (m *Model) invalidateStreamCache() {
+	m.streamCachePrefixIdx = 0
+	m.streamCacheRendered = ""
+	m.streamCacheValid = false
+}
+
+// resetStreamCache invalidates the incremental streaming-render cache.
+// Called whenever currentStream is replaced or cleared.
+func (m *Model) resetStreamCache() {
+	m.invalidateStreamCache()
 }
 
 func (m *Model) addToHistory(input string) {
@@ -967,6 +1266,50 @@ func (m *Model) handleCommand(input string) {
 			Content: content,
 		})
 
+	case trimmed == "/projects":
+		m.showProjects()
+
+	case trimmed == "/sessions":
+		m.openSessionsModal()
+
+	case trimmed == "/resume":
+		m.messages = append(m.messages, chatEntry{
+			Role: "system",
+			Content: "Usage: /resume <session-id> to resume a saved " +
+				"session. Session context (conversation, memory " +
+				"recall) is restored from the server-side store.",
+		})
+
+	case strings.HasPrefix(trimmed, "/resume "):
+		sid := strings.TrimSpace(strings.TrimPrefix(trimmed, "/resume "))
+		if sid == "" {
+			break
+		}
+		m.sessionID = sid
+		m.messages = nil
+		m.toolCalls = nil
+		m.auditLog = nil
+		m.currentStream = ""
+		m.streaming = false
+		m.instrRecorded = false
+		m.resetStreamCache()
+		m.autoScroll = true
+		m.cachedMessages = ""
+		m.cachedTools = ""
+		m.cachedMsgCount = 0
+		m.cachedToolCount = 0
+		m.cachedToolStatus = nil
+		m.cachedToolCollapsed = nil
+		m.cachedToolSelected = -1
+		m.viewport.SetContent("")
+		m.status = "Resumed session " + sid[:min(len(sid), 12)]
+		m.messages = append(m.messages, chatEntry{
+			Role: "system",
+			Content: "[Session resumed: " + sid + "]\nThe agent's " +
+				"server-side session store restores context on the " +
+				"next message.",
+		})
+
 	case trimmed == "/new":
 		m.sessionID = generateSessionID()
 		m.messages = nil
@@ -974,6 +1317,7 @@ func (m *Model) handleCommand(input string) {
 		m.auditLog = nil
 		m.currentStream = ""
 		m.instrRecorded = false
+		m.resetStreamCache()
 		m.autoScroll = true
 		m.status = "New session started"
 		m.cachedMessages = ""
@@ -988,6 +1332,7 @@ func (m *Model) handleCommand(input string) {
 		m.messages = nil
 		m.toolCalls = nil
 		m.currentStream = ""
+		m.resetStreamCache()
 		m.autoScroll = true
 		m.cachedMessages = ""
 		m.cachedTools = ""
@@ -1091,6 +1436,7 @@ func (m *Model) handleCommand(input string) {
 		m.cachedToolCollapsed = nil
 		m.cachedToolSelected = -1
 		m.lastRenderTime = time.Time{}
+		m.resetStreamCache()
 		m.messages = append(m.messages, chatEntry{
 			Role: "system",
 			Content: fmt.Sprintf(
@@ -1100,9 +1446,7 @@ func (m *Model) handleCommand(input string) {
 		})
 
 	case strings.HasPrefix(trimmed, "/help"):
-		m.messages = append(m.messages, chatEntry{
-			Role: "system",
-			Content: `Wukong Commands:
+		help := `Wukong Commands:
   /new        Start a new session
   /clear      Clear screen
   /help       Show this help
@@ -1112,23 +1456,24 @@ func (m *Model) handleCommand(input string) {
   /commands   Open command menu
   /skills     Open skills browser
   /settings   Open settings panel
+  /projects   Recover a tracked project session
+  /sessions   List and manage sessions
   /exit       Quit wukong
   Ctrl+D      Send message
   Ctrl+C      Quit
 
 Built-in Extensions:
-  developer            File ops, commands, code search
-  computer_controller  Web fetch, file cache
-  memory               Remember preferences & knowledge
-  auto_visualiser      Charts, diagrams, tables
-  tutorial             Interactive tutorials
-
+` + m.builtinExtensionHelp() + `
 Platform Extensions:
   todo_*               Task management & tracking
   recall_*             Cross-session history search
   tom_*                Persistent instruction injection
   code_*               JavaScript code execution
-  app_*                Custom HTML app management`,
+  app_*                Custom HTML app management`
+
+		m.messages = append(m.messages, chatEntry{
+			Role:    "system",
+			Content: help,
 		})
 
 	default:
@@ -1138,6 +1483,41 @@ Platform Extensions:
 				". Type /help for available commands.",
 		})
 	}
+}
+
+// builtinExtensionHelp builds the "Built-in Extensions" section of the
+// /help output from the ACTUAL enabled extensions in config, so newly
+// added extensions appear automatically instead of being hardcoded.
+func (m *Model) builtinExtensionHelp() string {
+	if m.cfg == nil {
+		return "  (no extensions loaded)"
+	}
+	var lines []string
+	for _, ext := range m.cfg.Extensions {
+		if !ext.Enabled {
+			continue
+		}
+		desc := extensionDescriptions[ext.Name]
+		if desc == "" {
+			desc = "type: " + ext.Type
+		}
+		line := fmt.Sprintf("  %-22s %s", ext.Name, desc)
+		lines = append(lines, line)
+	}
+	if len(lines) == 0 {
+		return "  (no extensions loaded)"
+	}
+	return strings.Join(lines, "\n")
+}
+
+// extensionDescriptions maps known builtin extension names to a short
+// description shown in /help. Unknown names fall back to their type.
+var extensionDescriptions = map[string]string{
+	"developer":           "File ops, commands, code search",
+	"computer_controller": "Web fetch, file cache",
+	"memory":              "Remember preferences & knowledge",
+	"auto_visualiser":     "Charts, diagrams, tables",
+	"tutorial":            "Interactive tutorials",
 }
 
 func (m *Model) openCommandsModal() {
@@ -1150,6 +1530,8 @@ func (m *Model) openCommandsModal() {
 		"/audit      - Show tool audit log",
 		"/skills     - Browse available skills",
 		"/settings   - Open settings",
+		"/projects   - Recover a tracked project session",
+		"/sessions   - List and manage sessions",
 		"/help       - Show help",
 		"/exit       - Quit wukong",
 	}
@@ -1159,8 +1541,7 @@ func (m *Model) openCommandsModal() {
 		Selected: 0,
 		Items:    commands,
 	}
-	m.modalWidth = 60
-	m.modalHeight = 14
+	m.layoutModal(len(commands))
 }
 
 func (m *Model) openSkillsModal() {
@@ -1181,8 +1562,7 @@ func (m *Model) openSkillsModal() {
 		Selected: 0,
 		Items:    skills,
 	}
-	m.modalWidth = 60
-	m.modalHeight = min(len(skills)+4, 14)
+	m.layoutModal(len(skills))
 }
 
 func (m *Model) openSettingsModal() {
@@ -1206,8 +1586,253 @@ Press ESC to close`,
 		Title:   "Settings",
 		Content: content,
 	}
-	m.modalWidth = 60
-	m.modalHeight = 14
+	m.layoutModal(strings.Count(content, "\n") + 1)
+}
+
+// layoutModal computes adaptive modal dimensions that fit the screen.
+// Height is derived from content but capped so tall content becomes
+// scrollable instead of overflowing; width adapts to the terminal.
+func (m *Model) layoutModal(contentLines int) {
+	// Title line + blank separator + rows + bottom padding.
+	needed := contentLines + 3
+	maxH := m.height - 8
+	if maxH < 6 {
+		maxH = 6
+	}
+	m.modalHeight = needed
+	if m.modalHeight > maxH {
+		m.modalHeight = maxH
+	}
+
+	w := m.width - 8
+	if w > 60 {
+		w = 60
+	}
+	if w < 40 {
+		w = 40
+	}
+	m.modalWidth = w
+}
+
+// followModalSelection keeps the modal's scroll offset aligned with the
+// selected item after an up/down movement.
+func (m *Model) followModalSelection() {
+	if m.modal == nil {
+		return
+	}
+	maxVisible := m.modalHeight - 3
+	if maxVisible < 1 {
+		maxVisible = 1
+	}
+	if m.modal.Selected < m.modal.Scroll {
+		m.modal.Scroll = m.modal.Selected
+	}
+	if m.modal.Selected >= m.modal.Scroll+maxVisible {
+		m.modal.Scroll = m.modal.Selected - maxVisible + 1
+	}
+}
+
+// projectLister is the subset of project.Manager used by the TUI.
+// The field holds `any` to keep ModelConfiguration decoupled; the
+// runtime value is *project.Manager from the CLI layer.
+type projectLister interface {
+	ListProjects() []project.ProjectRecord
+}
+
+// sessionLister is the subset of session.Service used by the TUI for
+// the multi-session tab (C1). The field holds `any` to keep the TUI
+// decoupled from the concrete wksession.SessionService.
+type sessionLister interface {
+	ListSessions(ctx context.Context, userKey session.UserKey) ([]*session.Session, error)
+	DeleteSession(ctx context.Context, key session.Key) error
+}
+
+// sessionsModalItem describes one entry in the sessions modal. The
+// first item is the "new session" action; the last is "back". Session
+// rows also carry their full ID so deletion/selection doesn't rely on
+// the truncated display string.
+type sessionsModalItem struct {
+	Label     string
+	SessionID string // "" for action rows
+}
+
+func (m *Model) sessionsModalItems() ([]sessionsModalItem, string) {
+	svc, ok := m.sessionMgr.(sessionLister)
+	if !ok || svc == nil {
+		return nil, "Session management is not available in this session."
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	sessions, err := svc.ListSessions(ctx, session.UserKey{
+		AppName: "wukong-app",
+		UserID:  m.userID,
+	})
+	if err != nil {
+		return nil, "Failed to list sessions: " + err.Error()
+	}
+
+	items := make([]sessionsModalItem, 0, len(sessions)+1)
+	items = append(items, sessionsModalItem{Label: "+ New session"})
+	for _, s := range sessions {
+		items = append(items, sessionsModalItem{
+			Label:     fmt.Sprintf("%s  %s", s.ID, formatSessionTime(s.UpdatedAt)),
+			SessionID: s.ID,
+		})
+	}
+	items = append(items, sessionsModalItem{Label: "— Back"})
+	return items, ""
+}
+
+// openSessionsModal opens the multi-session tab (C1): New + existing
+// sessions + delete action, so switching is a single Enter.
+func (m *Model) openSessionsModal() {
+	items, errMsg := m.sessionsModalItems()
+	if errMsg != "" {
+		m.messages = append(m.messages, chatEntry{
+			Role:    "system",
+			Content: errMsg,
+		})
+		return
+	}
+	labels := make([]string, len(items))
+	for i, it := range items {
+		labels[i] = it.Label
+	}
+	m.modal = &modalState{
+		Type:     ModalSessions,
+		Title:    "Sessions",
+		Selected: 0,
+		Items:    labels,
+	}
+	// Stash the full session IDs on the model; the Items slice only
+	// holds display text.
+	m.sessionModalItems = items
+	m.layoutModal(len(labels))
+}
+
+// deleteSelectedSession deletes the session under the cursor in the
+// sessions tab (C1). The modal is refreshed afterwards; the active
+// session is left untouched.
+func (m *Model) deleteSelectedSession() {
+	if m.modal == nil {
+		return
+	}
+	sel := m.modal.Selected
+	if m.modal.Selected < 0 || m.modal.Selected >= len(m.sessionModalItems) {
+		return
+	}
+	item := m.sessionModalItems[sel]
+	if item.SessionID == "" {
+		return // action row (New / Back)
+	}
+
+	svc, ok := m.sessionMgr.(sessionLister)
+	if !ok || svc == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := svc.DeleteSession(ctx, session.Key{
+		AppName:   "wukong-app",
+		UserID:    m.userID,
+		SessionID: item.SessionID,
+	}); err != nil {
+		m.status = "Delete failed: " + err.Error()
+		// Refresh anyway (row may already be gone).
+	}
+	// Refresh the modal list after deletion.
+	m.removeSessionFromModal(sel)
+}
+
+// removeSessionFromModal drops the deleted row and, if the modal became
+// empty (no sessions left), closes it with a notice.
+func (m *Model) removeSessionFromModal(deletedSel int) {
+	if m.modal == nil || m.modal.Type != ModalSessions {
+		return
+	}
+	if deletedSel >= 0 && deletedSel < len(m.sessionModalItems) {
+		m.sessionModalItems = append(
+			m.sessionModalItems[:deletedSel],
+			m.sessionModalItems[deletedSel+1:]...,
+		)
+	}
+	// After removing a session row the "+ New session" header stays and
+	// "— Back" stays; if nothing but the actions remain, close the modal.
+	if len(m.sessionModalItems) <= 2 {
+		m.modal = nil
+		m.sessionModalItems = nil
+		m.status = "No stored sessions"
+		return
+	}
+	// Rebuild display items.
+	labels := make([]string, len(m.sessionModalItems))
+	for i, it := range m.sessionModalItems {
+		labels[i] = it.Label
+	}
+	m.modal.Items = labels
+	if m.modal.Selected >= len(labels) {
+		m.modal.Selected = len(labels) - 1
+	}
+	m.followModalSelection()
+}
+
+// formatSessionTime renders a session timestamp compactly.
+func formatSessionTime(t time.Time) string {
+	if t.IsZero() {
+		return "unknown time"
+	}
+	return t.Format("01-02 15:04")
+}
+
+// openProjectsModal shows tracked projects as a selectable modal.
+// Selecting an entry resumes that project's session (via /resume),
+// replacing the old plain-text listing.
+func (m *Model) openProjectsModal() {
+	mgr, ok := m.projectMgr.(projectLister)
+	if !ok || mgr == nil {
+		m.messages = append(m.messages, chatEntry{
+			Role:    "system",
+			Content: "Project tracking is not available in this session.",
+		})
+		return
+	}
+	records := mgr.ListProjects()
+	items := make([]string, 0, len(records))
+	for _, r := range records {
+		sID := r.SessionID
+		if len(sID) > 8 {
+			sID = sID[:8]
+		}
+		inst := r.LastInstruction
+		if len(inst) > 24 {
+			inst = inst[:21] + "..."
+		}
+		items = append(items, fmt.Sprintf("%-28s %s  %s", r.Path, sID, inst))
+	}
+	if len(items) == 0 {
+		m.messages = append(m.messages, chatEntry{
+			Role: "system",
+			Content: "No tracked projects found. Start a " +
+				"'wukong session' in any directory to begin " +
+				"tracking.",
+		})
+		return
+	}
+	m.modal = &modalState{
+		Type:     ModalProjects,
+		Title:    "Tracked Projects — Enter to resume",
+		Selected: 0,
+		Items:    items,
+	}
+	m.layoutModal(len(items))
+}
+
+// showProjects lists tracked projects; C3: now opens the selectable
+// ModalProjects rather than appending a plain-text chat reply.
+func (m *Model) showProjects() {
+	m.openProjectsModal()
 }
 
 func (m *Model) handleModalSelection() {
@@ -1232,16 +1857,48 @@ func (m *Model) handleModalSelection() {
 		m.modal = nil
 	case ModalSettings:
 		m.modal = nil
+	case ModalSessions:
+		// C1 multi-session tab: New / resume / delete / back.
+		sel := m.modal.Selected
+		items := m.sessionModalItems
+		m.modal = nil
+		m.sessionModalItems = nil
+		if sel < 0 || sel >= len(items) {
+			return
+		}
+		item := items[sel]
+		switch {
+		case item.Label == "+ New session":
+			m.handleCommand("/new")
+		case item.Label == "— Back":
+			// just close
+		case item.SessionID != "":
+			m.handleCommand("/resume " + item.SessionID)
+		}
+	case ModalProjects:
+		// Selecting a project resumes its tracked session. The
+		// shortened session id shown in the item is only a display
+		// prefix, so re-query the underlying record for the full id.
+		mgr, ok := m.projectMgr.(projectLister)
+		sel := m.modal.Selected
+		if ok && mgr != nil && sel >= 0 && sel < len(m.modal.Items) {
+			records := mgr.ListProjects()
+			if sel < len(records) {
+				m.modal = nil
+				m.handleCommand("/resume " + records[sel].SessionID)
+			}
+		}
 	}
 }
 
 // StartTUI initializes and runs the Bubbletea TUI.
 func StartTUI(
 	cfg *config.WukongConfig,
-	loop *agent.CoreLoop,
+	loop loopRunner,
 	userID, sessionID string,
 	workingDir string,
 	projectMgr any,
+	sessionMgr any,
 	version string,
 ) error {
 	util.SetQuietMode()
@@ -1257,6 +1914,7 @@ func StartTUI(
 		SessionID:  sessionID,
 		WorkingDir: workingDir,
 		ProjectMgr: projectMgr,
+		SessionMgr: sessionMgr,
 		Version:    version,
 	})
 

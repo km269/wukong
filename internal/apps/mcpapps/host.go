@@ -144,7 +144,7 @@ func (h *SandboxedHost) GetCSP() *CSPConfig {
 // BuildCSPHeaders generates CSP headers from configuration.
 func (h *SandboxedHost) BuildCSPHeaders(resource *UIResource) string {
 	csp := h.csp
-	if resource.Meta != nil && resource.Meta.CSP != nil {
+	if resource != nil && resource.Meta != nil && resource.Meta.CSP != nil {
 		csp = resource.Meta.CSP
 	}
 
