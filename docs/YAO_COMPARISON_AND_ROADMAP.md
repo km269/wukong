@@ -147,7 +147,7 @@ CLI 可直接调用：`yao run <process>`。
 
 ### P1 · 扩展性与生态（2–3 个版本）
 
-4. **JS 脚本 hook** — goja 已在依赖中：支持 `.wukong/hooks/*.js` 实现 PreStep/PreTool hook（对齐 Yao 的 TS hooks），默认关闭 + API 白名单；配合能力总线可注册脚本工具。
+4. **JS 脚本 hook** — ✅ **已落地（2026-09-03）**：新增 `internal/scripthook` 包。`.wukong/hooks/*.js`（`agent.script_hooks_enabled` 开启，超时 `script_hooks_timeout` 默认 5s）可定义 **`beforeStep`**（改写 `ctx.message.content` / `{reject, reason}` 关闭回合，接入 PreStepHook 瀑布）与 **`beforeTool`**（按 `{tool_name, args}` 拦截工具调用），并经全局 **`tool({name, description, parameters}, handler)`** 注册脚本工具——LLM 名为声明名、能力地址 `script.<name>`（SourceScript），`wukong caps run script.x` 可直接调用。沙箱与 codemode 同源：goja 每次调用全新 runtime + `Interrupt` 超时 + panic 恢复，纯 ECMAScript 无 IO API。**有意偏差**：hook 失败（异常/超时）**fail-open**（记日志跳过）——脚本属用户自身信任域的增强件，不应击穿 agent 可用性；脚本工具失败照常报错给 LLM。v1 未含：hook 热重载（改脚本需重启）、`require`/跨脚本共享。
 5. **Provider 原生化** — 为 anthropic（tool blocks / thinking / prompt cache）与 google 增加原生协议路径，打破 `createOpenAI` 单管道；仿 Yao 建立 provider 能力矩阵文档。
 6. **AG-UI 参考客户端** — 在 :8080 内置一个静态 Web 聊天页（消费自家 SSE），作为协议参考实现与项目门面。不造 SUI，成本约一周。
 7. **评测闭环** — `wukong eval run -i inputs.jsonl -v` + 结果提取（对齐 `yao agent test`），把 `internal/eval` 从库升级为工作流；同步补 `internal/cortex`（16 个源文件、0 个测试文件）单测。

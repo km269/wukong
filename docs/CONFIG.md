@@ -388,6 +388,9 @@ base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
 | `recipe_enabled` | bool | true | 是否启用 Recipe 系统 |
 | `flow_enabled` | bool | false | 是否启用声明式 Flow DSL（P0-2）：`.wukong/flows/*.yaml` 编译为 `flow-<name>` 工具与 `flow.<name>` 能力 |
 | `flow_dir` | string | `.wukong/flows/` | Flow YAML 定义目录 |
+| `script_hooks_enabled` | bool | false | 是否启用用户 JS Hook（P1-4）：`.wukong/hooks/*.js` 可定义 `beforeStep`/`beforeTool` hook 并经 `tool()` 注册 `script.*` 工具；goja 沙箱（纯 ECMAScript，无 IO） |
+| `script_hooks_dir` | string | `.wukong/hooks/` | Hook 脚本目录 |
+| `script_hooks_timeout` | duration | `5s` | 单次 hook/脚本工具调用截止时间；hook 超时 fail-open（记日志跳过），脚本工具超时报错 |
 | `inline_recipes` | []map[string]any | - | config.yaml 内联 Recipe 定义 |
 
 ---

@@ -71,6 +71,11 @@ func (l *Loader) setAgentDefaults() {
 	l.v.SetDefault("agent.flow_enabled", false)
 	l.v.SetDefault("agent.flow_dir", "")
 
+	// User JS hooks (P1-4), opt-in; per-invocation deadline.
+	l.v.SetDefault("agent.script_hooks_enabled", false)
+	l.v.SetDefault("agent.script_hooks_dir", "")
+	l.v.SetDefault("agent.script_hooks_timeout", "5s")
+
 	// Tool search
 	l.v.SetDefault("agent.tool_search_enabled", false)
 	l.v.SetDefault("agent.tool_search_max_tools", 20)

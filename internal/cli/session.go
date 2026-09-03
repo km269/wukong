@@ -34,6 +34,7 @@ import (
 	"github.com/km269/wukong/internal/project"
 	"github.com/km269/wukong/internal/provider"
 	"github.com/km269/wukong/internal/recall"
+	"github.com/km269/wukong/internal/scripthook"
 	"github.com/km269/wukong/internal/security"
 	"github.com/km269/wukong/internal/server"
 	wksession "github.com/km269/wukong/internal/session"
@@ -1062,6 +1063,33 @@ func bootstrapSession(
 	registerCapsToolset(extension.AddrCodeMode, codeToolSet)
 	registerCapsToolset(extension.AddrApps, appsToolSet)
 	registerCapsToolset(extension.AddrAgentTools, agentToolSet)
+
+	// P1-4: user JS hooks (.wukong/hooks/*.js, opt-in). beforeStep /
+	// beforeTool functions join the waterfall HookRegistry; script
+	// tools register as "script.*" capabilities.
+	var scriptHooksReg *agent.HookRegistry
+	if wukongCfg.Agent.ScriptHooksEnabled {
+		shs, shErr := scripthook.Load(
+			scripthook.ResolveDir(wukongCfg.Agent.ScriptHooksDir),
+			wukongCfg.Agent.ScriptHooksTimeout,
+		)
+		if shErr != nil {
+			util.Logger.Warn("scripthook: load failed, hooks disabled",
+				"error", shErr.Error())
+		} else {
+			scriptHooksReg = agent.NewHookRegistry()
+			for _, h := range shs.PreStepHooks() {
+				scriptHooksReg.RegisterPreStep(h)
+			}
+			for _, h := range shs.PreToolHooks() {
+				scriptHooksReg.RegisterPreToolExecute(h)
+			}
+			shs.SyncScriptTools(capsReg)
+			util.Logger.Info("scripthook: enabled",
+				"scripts", shs.Len())
+		}
+	}
+
 	util.Logger.Info("capability registry ready",
 		"capabilities", capsReg.Len())
 
@@ -1160,6 +1188,7 @@ func bootstrapSession(
 		ToolSets:              toolSets,
 		FunctionTools:         functionTools,
 		Capabilities:          capsReg,
+		Hooks:                 scriptHooksReg,
 		SecurityGuard:         guard,
 		RecallStore:           recallStore,
 		CortexStore:           cortexStore,

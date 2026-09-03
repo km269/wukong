@@ -19,6 +19,7 @@ import (
 	"github.com/km269/wukong/internal/extension"
 	"github.com/km269/wukong/internal/extension/builtin"
 	"github.com/km269/wukong/internal/provider"
+	"github.com/km269/wukong/internal/scripthook"
 	"github.com/km269/wukong/internal/topofmind"
 	"github.com/km269/wukong/internal/util"
 
@@ -42,6 +43,8 @@ Every callable capability carries a stable address:
   tools.apps.*                 apps / agent_tools)
   tools.agent_tools.*
   recipe.<name>               recipe sub-agents
+  flow.<name>                 declarative YAML flows
+  script.<name>               user JS hook tools
 
 The registry is the single tool-aggregation source for the agent
 loop (capability roadmap P0-1, Phase B+). Engine function tools
@@ -317,6 +320,20 @@ func registerSessionToolsets(
 		if fts != nil {
 			defer fts.Close() //nolint:errcheck // inspection command
 			agent.SyncFlowCapabilities(reg, fts.Tools(ctx))
+		}
+	}
+
+	// User JS hooks: script tools register under "script.*" (P1-4).
+	if wukongCfg.Agent.ScriptHooksEnabled {
+		shs, err := scripthook.Load(
+			scripthook.ResolveDir(wukongCfg.Agent.ScriptHooksDir),
+			wukongCfg.Agent.ScriptHooksTimeout,
+		)
+		if err != nil {
+			util.Logger.Warn("scripthook: load failed (caps listing)",
+				"error", err.Error())
+		} else {
+			shs.SyncScriptTools(reg)
 		}
 	}
 }

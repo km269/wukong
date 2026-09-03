@@ -111,7 +111,7 @@
 | 编排模式 | 10 种 |
 | LLM Provider | 8 种（openai/anthropic/google/deepseek/ollama/lmstudio/vllm/acp） |
 | 内置扩展 | 12 个（`web` 扩展内含 5 个搜索后端工具） |
-| 能力注册表 | 统一地址 `<ns>.<name>[.<tool>]`（tools.* / mcp.* / recipe.* / flow.* 等），`wukong caps list/run` 查看，为工具聚合单一来源 |
+| 能力注册表 | 统一地址 `<ns>.<name>[.<tool>]`（tools.* / mcp.* / recipe.* / flow.* / script.* 等），`wukong caps list/run` 查看，为工具聚合单一来源 |
 | 直接依赖 | 36 个（go.mod require 块） |
 | 测试文件 | 约 130 个 |
 | 反爬升级体系 | 5 级 |

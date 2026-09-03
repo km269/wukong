@@ -54,6 +54,20 @@ type AgentConfig struct {
 	// FlowDir is the directory scanned for flow YAML files. Empty
 	// falls back to .wukong/flows relative to the working directory.
 	FlowDir string `mapstructure:"flow_dir"`
+	// ScriptHooksEnabled turns on user JS hooks (P1-4): every
+	// .js file in script_hooks_dir may define beforeStep /
+	// beforeTool hook functions and register script tools via the
+	// tool() global. Opt-in like flows.
+	ScriptHooksEnabled bool `mapstructure:"script_hooks_enabled"`
+	// ScriptHooksDir is the directory scanned for hook scripts.
+	// Empty falls back to .wukong/hooks relative to the working
+	// directory.
+	ScriptHooksDir string `mapstructure:"script_hooks_dir"`
+	// ScriptHooksTimeout caps each hook/tool invocation. A hit
+	// deadline interrupts the JS runtime; hooks fail open (logged
+	// and skipped), script tool calls fail with an error. Default
+	// 5s.
+	ScriptHooksTimeout time.Duration `mapstructure:"script_hooks_timeout"`
 	// CommandValidationMode selects how the Guard decides which tool
 	// calls need command-string validation (Guard.ValidateCommand):
 	//
