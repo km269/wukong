@@ -939,6 +939,8 @@ Extensions 为 MCP 外部服务器数组。每个扩展实现 tRPC-agent-go 的 
 | `path` | string | `/agui` | SSE 路径 |
 | `security` | ServerSecurityConfig | - | 安全配置 |
 
+> **内置参考客户端（P1-6）**：AG-UI 服务器在 `/` 提供自包含 Web 聊天控制台（`internal/server/agui.html`，go:embed），消费本端点 SSE 协议（text_delta/tool_calls/error/done），支持会话连续与可选 `X-API-Key`。默认无鉴权时浏览器打开 `http://localhost:8080/` 即用；启用 `api_key` 鉴权时经 `?api_key=<key>` 打开页面。
+
 ---
 
 ## W. ACP Server 配置

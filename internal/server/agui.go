@@ -59,10 +59,13 @@ func NewAGUIServer(cfg *AGUIConfig) (*AGUIServer, error) {
 }
 
 // Handler returns the HTTP handler for mounting into an HTTP server.
+// Routes: the chat endpoint (s.path, default /agui), /health, and
+// the embedded reference client at "/" (P1-6).
 func (s *AGUIServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(s.path, s.handleChat)
 	mux.HandleFunc("/health", s.handleHealth)
+	s.mountIndex(mux)
 	return mux
 }
 
