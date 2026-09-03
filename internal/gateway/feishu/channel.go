@@ -1,56 +1,116 @@
 // Package feishu provides the Feishu/Lark channel implementation
-// for the Wukong gateway. It handles:
-//   - URL challenge verification
-//   - HMAC-SHA256 request signature verification
-//   - Event callback parsing (text messages, etc.)
-//   - Message reply via passive response or streaming card
+// for the Wukong gateway.
+//
+// Transport: this channel receives messages over a Feishu WebSocket
+// long-connection. Wukong acts as a client and dials out to the Feishu
+// open platform (wss://), so no public callback URL, domain, or HTTPS
+// ingress is required — it works from a local or intranet host. The
+// Lark SDK (larksuite/oapi-sdk-go/v3) handles authentication,
+// reconnection, heartbeat, and message-fragment reassembly internally.
+//
+// Event flow:
+//   - larkws.Client receives im.message.receive_v1 frames
+//   - the registered dispatcher calls onMessage with a typed
+//     *larkim.P2MessageReceiveV1
+//   - onMessage parses it into a *gateway.GatewayMessage and invokes
+//     the gateway-supplied MessageHandler (which runs the agent
+//     asynchronously)
+//
+// Replies still use the Feishu Open API via FeishuSender (create +
+// periodically patch an interactive card for a streaming experience),
+// authenticated with a tenant_access_token managed automatically by
+// the Lark SDK client.
 package feishu
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"strings"
 
-	"github.com/km269/wukong/internal/agent"
-	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/gateway"
 	"github.com/km269/wukong/internal/util"
+	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
+	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 	"trpc.group/trpc-go/trpc-agent-go/event"
-	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 const (
 	// channelName is the unique identifier for the Feishu channel.
 	channelName = "feishu"
-
-	// channelPath is the base route path for Feishu callbacks.
-	channelPath = "/feishu"
 )
 
 // FeishuChannel implements gateway.Channel for the Feishu/Lark
-// platform. It handles event subscription callbacks and URL
-// verification.
+// platform using a WebSocket long-connection to receive events and
+// the Lark Open API to send replies.
+//
+// Architecture:
+//   - wsClient: outbound WebSocket long-connection to the Feishu
+//     platform (receives events; SDK manages auth/reconnect/heartbeat).
+//   - sender: FeishuSender for replies via the Lark SDK (auto
+//     tenant_access_token management), supporting streaming cards.
 type FeishuChannel struct {
-	cfg    *config.FeishuChannelConfig
-	loop   *agent.CoreLoop
-	crypto *FeishuCrypto
-	sender *FeishuSender
+	cfg      *gateway.FeishuChannelConfig
+	sender   *FeishuSender
+	wsClient *larkws.Client
 }
 
 // NewFeishuChannel creates a new Feishu channel instance.
 func NewFeishuChannel(
-	cfg *config.WukongConfig,
-	loop *agent.CoreLoop,
+	cfg *gateway.FeishuChannelConfig,
 ) *FeishuChannel {
 	return &FeishuChannel{
-		cfg:    &cfg.Gateway.Feishu,
-		loop:   loop,
-		crypto: NewFeishuCrypto(&cfg.Gateway.Feishu),
-		sender: NewFeishuSender(&cfg.Gateway.Feishu),
+		cfg:    cfg,
+		sender: NewFeishuSender(cfg),
 	}
+}
+
+// Validate checks that the credentials required to operate are present.
+// It should be called before registering the channel; a non-nil error
+// means the channel cannot function and should not be registered.
+//
+// Required (long-connection mode):
+//   - AppID/AppSecret: dial the WebSocket gateway AND obtain the
+//     tenant_access_token used to send replies.
+//
+// Optional but recommended:
+//   - EncryptKey:        needed only if "encryption strategy" is
+//     enabled on the Feishu app (the SDK decrypts
+//     event payloads with it). Not used for HTTP
+//     signature verification (none in WS mode).
+//   - VerificationToken: legacy field, no longer verified by the SDK
+//     in long-connection mode; kept for backward
+//     config compatibility.
+//
+// Missing optional fields only produce a warning, since the channel
+// can still operate without encryption.
+func (fc *FeishuChannel) Validate() error {
+	var missing []string
+	if fc.cfg.AppID == "" {
+		missing = append(missing, "app_id")
+	}
+	if fc.cfg.AppSecret == "" {
+		missing = append(missing, "app_secret")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf(
+			"feishu: missing required credentials: %s "+
+				"(check FEISHU_APP_ID / FEISHU_APP_SECRET and config)",
+			strings.Join(missing, ", "))
+	}
+
+	if fc.cfg.EncryptKey == "" {
+		util.Logger.Info("feishu: encrypt_key not configured — " +
+			"event payload decryption is disabled. Set FEISHU_ENCRYPT_KEY " +
+			"if the encryption strategy is enabled on the Feishu app.")
+	}
+	if fc.cfg.VerificationToken == "" {
+		util.Logger.Info("feishu: verification_token not configured — " +
+			"this is a legacy field with no effect in long-connection mode")
+	}
+	return nil
 }
 
 // Name returns "feishu".
@@ -58,104 +118,70 @@ func (fc *FeishuChannel) Name() string {
 	return channelName
 }
 
-// RoutePath returns "/feishu".
-func (fc *FeishuChannel) RoutePath() string {
-	return channelPath
-}
-
-// VerifyRequest validates the Feishu event callback signature.
-//
-// Feishu signs each callback with a HMAC-SHA256 digest of
-// (timestamp + nonce + encrypt_key + body). The signature is sent
-// in the X-Lark-Signature header.
-//
-// For encrypted events, the body is first AES-256-CBC decrypted.
-func (fc *FeishuChannel) VerifyRequest(
-	r *http.Request,
-) ([]byte, error) {
-	body, err := readBody(r)
-	if err != nil {
-		return nil, fmt.Errorf("feishu: read body: %w", err)
-	}
-
-	if err := fc.crypto.VerifySignature(r.Header, body); err != nil {
-		return nil, fmt.Errorf("feishu: signature verification: %w",
-			err)
-	}
-
-	// If the body is encrypted, decrypt it.
-	if fc.crypto.IsEncrypted(body) {
-		decrypted, err := fc.crypto.Decrypt(body)
-		if err != nil {
-			return nil, fmt.Errorf("feishu: decrypt: %w", err)
+// Start dials the Feishu WebSocket long-connection gateway and blocks
+// until ctx is cancelled or a fatal connection error occurs. The Lark
+// SDK reconnects and heartbeats automatically. For each inbound
+// im.message.receive_v1 event it invokes handle (the gateway dispatch
+// pipeline), which runs the agent asynchronously.
+func (fc *FeishuChannel) Start(
+	ctx context.Context, handle gateway.MessageHandler,
+) error {
+	// Build the event dispatcher. In long-connection mode the SDK does
+	// NOT verify HTTP signatures (authentication happens at connection
+	// establishment using the app secret). encryptKey is still used by
+	// the dispatcher to decrypt event payloads when the app has
+	// encryption enabled.
+	disp := dispatcher.NewEventDispatcher(
+		fc.cfg.VerificationToken, fc.cfg.EncryptKey)
+	disp.OnP2MessageReceiveV1(func(
+		_ context.Context, evt *larkim.P2MessageReceiveV1,
+	) error {
+		msg := fc.parseP2MessageReceiveV1(evt)
+		if msg == nil {
+			return nil
 		}
-		return decrypted, nil
-	}
+		msg.Platform = channelName
+		// Dispatch runs synchronously here; the gateway launches the
+		// agent in a background goroutine, so this returns quickly and
+		// does not stall the SDK's receive loop.
+		handle(ctx, msg)
+		return nil
+	})
 
-	return body, nil
-}
+	fc.wsClient = larkws.NewClient(
+		fc.cfg.AppID, fc.cfg.AppSecret,
+		larkws.WithEventHandler(disp),
+		larkws.WithLogLevel(larkcore.LogLevelInfo),
+	)
 
-// ParseMessage converts a Feishu event callback JSON body into a
-// unified GatewayMessage.
-//
-// Supported message types:
-//   - text: Plain text messages (im.message.receive_v1)
-//   - Image and file messages are returned with ContentType set
-//     but Content is a placeholder description.
-func (fc *FeishuChannel) ParseMessage(
-	body []byte,
-) (*gateway.GatewayMessage, error) {
-	var event FeishuEvent
-	if err := json.Unmarshal(body, &event); err != nil {
-		return nil, fmt.Errorf("feishu: parse event: %w", err)
-	}
+	util.Logger.Info("feishu: connecting long-connection gateway",
+		slog.String("api_base", fc.cfg.APIBase))
 
-	// Handle event wrapper (event_callback type).
-	if event.Type == "event_callback" && event.Event != nil {
-		return fc.parseEventCallback(&event), nil
-	}
+	// wsClient.Start blocks (the SDK's Start does not return on ctx
+	// cancellation in v3.9.7, so we run it in a goroutine and wait on
+	// ctx here, returning context.Canceled when shutdown is requested).
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- fc.wsClient.Start(ctx)
+	}()
 
-	return nil, fmt.Errorf(
-		"feishu: unsupported event type: %s", event.Type)
-}
-
-// parseEventCallback handles im.message.receive_v1 events.
-func (fc *FeishuChannel) parseEventCallback(
-	event *FeishuEvent,
-) *gateway.GatewayMessage {
-	ev := event.Event
-
-	if ev.Type != "im.message.receive_v1" {
-		util.Logger.Debug("feishu: non-message event",
-			slog.String("type", ev.Type))
+	select {
+	case <-ctx.Done():
+		util.Logger.Info("feishu: long-connection context cancelled")
+		return ctx.Err()
+	case err := <-errCh:
+		if err != nil {
+			return fmt.Errorf("feishu: long-connection exited: %w", err)
+		}
 		return nil
 	}
+}
 
-	msg := &gateway.GatewayMessage{
-		ContentType: ev.MsgType,
-		MessageID:   ev.MessageID,
-		Timestamp:   0,
-		RawData:     mustMarshal(ev),
-	}
-
-	// Extract user and conversation IDs.
-	if ev.Sender != nil && ev.Sender.SenderID != nil {
-		msg.PlatformUserID = ev.Sender.SenderID.OpenID
-	}
-	msg.ConversationID = ev.ChatID
-
-	// Extract text content.
-	switch ev.MsgType {
-	case "text":
-		content := extractTextContent(ev.Content)
-		msg.Content = strings.TrimSpace(content)
-
-	default:
-		msg.Content = fmt.Sprintf(
-			"[收到消息类型: %s]", ev.MsgType)
-	}
-
-	return msg
+// Stop releases channel resources. The WebSocket connection is torn
+// down when Start's context is cancelled by the gateway; Stop only
+// frees the reply sender's resources.
+func (fc *FeishuChannel) Stop(_ context.Context) error {
+	return fc.sender.Close()
 }
 
 // BuildUserID constructs a Wukong user ID from the Feishu user.
@@ -182,9 +208,18 @@ func (fc *FeishuChannel) BuildSessionID(
 
 // SendReply processes agent events and sends the response back to
 // Feishu. It supports two modes:
-//   - Streaming card: When stream_card_enabled is true, creates a
-//     streaming card that updates incrementally.
-//   - Passive reply: Direct JSON response (fast but no streaming).
+//
+// Streaming card (StreamCardEnabled=true):
+//
+//	Creates a message card via Feishu API, then periodically patches
+//	it with accumulated content as the LLM generates tokens. This
+//	provides a streaming experience.
+//
+// Text reply (StreamCardEnabled=false):
+//
+//	Collects all streaming content from the agent and sends a single
+//	text message via the Feishu Send Message API using
+//	tenant_access_token.
 func (fc *FeishuChannel) SendReply(
 	ctx context.Context,
 	msg *gateway.GatewayMessage,
@@ -194,12 +229,14 @@ func (fc *FeishuChannel) SendReply(
 		return fc.sender.SendStreamCard(ctx, msg, events)
 	}
 
-	// Fallback: collect all content and send as a single reply.
+	// Non-streaming mode: collect all content, send as single reply.
 	var builder strings.Builder
 	for evt := range events {
 		if evt.Error != nil {
-			return fmt.Errorf(
-				"feishu: agent error: %s", evt.Error.Message)
+			util.Logger.Warn("feishu: agent event error",
+				slog.String("error", evt.Error.Message))
+			builder.WriteString(fmt.Sprintf("\n[错误: %s]", evt.Error.Message))
+			continue
 		}
 		if evt.Response != nil &&
 			len(evt.Response.Choices) > 0 {
@@ -218,71 +255,5 @@ func (fc *FeishuChannel) SendReply(
 	return fc.sender.SendTextReply(ctx, msg, content)
 }
 
-// HandlePlatformEvent handles Feishu-specific platform events.
-//
-// Supported events:
-//   - "url_verify": Returns the challenge string to complete URL
-//     verification.
-func (fc *FeishuChannel) HandlePlatformEvent(
-	w http.ResponseWriter,
-	evt *gateway.PlatformEvent,
-) ([]byte, error) {
-	switch evt.Type {
-	case "url_verify":
-		return fc.handleURLVerification(evt.Data)
-
-	default:
-		// Unknown event type; ignore.
-		return nil, nil
-	}
-}
-
-// handleURLVerification processes the Feishu URL challenge during
-// event subscription setup.
-func (fc *FeishuChannel) handleURLVerification(
-	data json.RawMessage,
-) ([]byte, error) {
-	var challenge struct {
-		Challenge string `json:"challenge"`
-		Token     string `json:"token"`
-		Type      string `json:"type"`
-	}
-	if err := json.Unmarshal(data, &challenge); err != nil {
-		return nil, fmt.Errorf(
-			"feishu: parse challenge: %w", err)
-	}
-
-	if challenge.Type != "url_verification" {
-		return nil, fmt.Errorf(
-			"feishu: unexpected challenge type: %s",
-			challenge.Type)
-	}
-
-	// Verify token matches the configured verification token.
-	if challenge.Token != "" &&
-		challenge.Token != fc.cfg.VerificationToken {
-		return nil, fmt.Errorf(
-			"feishu: verification token mismatch")
-	}
-
-	response := map[string]string{
-		"challenge": challenge.Challenge,
-	}
-
-	respBytes, err := json.Marshal(response)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"feishu: marshal challenge response: %w", err)
-	}
-
-	util.Logger.Info("feishu: URL verification completed",
-		slog.String("challenge", challenge.Challenge[:8]+"..."))
-
-	return respBytes, nil
-}
-
 // Ensure Channel interface compliance.
 var _ gateway.Channel = (*FeishuChannel)(nil)
-
-// Compile-time check for valid import.
-var _ = model.NewUserMessage("")

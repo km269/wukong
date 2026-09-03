@@ -26,7 +26,7 @@ builds:
     main: ./cmd/wukong
     binary: wukong
     ldflags:
-      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+      - -s -w -X github.com/km269/wukong/internal/util.Version={{.Version}} -X github.com/km269/wukong/internal/util.GitCommit={{.Commit}} -X github.com/km269/wukong/internal/util.BuildDate={{.Date}}
     env:
       - CGO_ENABLED=0
     flags:
@@ -39,7 +39,7 @@ builds:
     main: ./cmd/wukong
     binary: wukong
     ldflags:
-      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+      - -s -w -X github.com/km269/wukong/internal/util.Version={{.Version}} -X github.com/km269/wukong/internal/util.GitCommit={{.Commit}} -X github.com/km269/wukong/internal/util.BuildDate={{.Date}}
     env:
       - CGO_ENABLED=0
     flags:
@@ -53,7 +53,7 @@ builds:
     main: ./cmd/wukong
     binary: wukong
     ldflags:
-      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+      - -s -w -X github.com/km269/wukong/internal/util.Version={{.Version}} -X github.com/km269/wukong/internal/util.GitCommit={{.Commit}} -X github.com/km269/wukong/internal/util.BuildDate={{.Date}}
     env:
       - CGO_ENABLED=0
     flags:
@@ -66,7 +66,7 @@ builds:
     main: ./cmd/wukong
     binary: wukong
     ldflags:
-      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+      - -s -w -X github.com/km269/wukong/internal/util.Version={{.Version}} -X github.com/km269/wukong/internal/util.GitCommit={{.Commit}} -X github.com/km269/wukong/internal/util.BuildDate={{.Date}}
     env:
       - CGO_ENABLED=0
     flags:
@@ -80,7 +80,7 @@ builds:
     main: ./cmd/wukong
     binary: wukong
     ldflags:
-      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+      - -s -w -X github.com/km269/wukong/internal/util.Version={{.Version}} -X github.com/km269/wukong/internal/util.GitCommit={{.Commit}} -X github.com/km269/wukong/internal/util.BuildDate={{.Date}}
     env:
       - CGO_ENABLED=0
     flags:
@@ -93,7 +93,7 @@ builds:
     main: ./cmd/wukong
     binary: wukong
     ldflags:
-      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+      - -s -w -X github.com/km269/wukong/internal/util.Version={{.Version}} -X github.com/km269/wukong/internal/util.GitCommit={{.Commit}} -X github.com/km269/wukong/internal/util.BuildDate={{.Date}}
     env:
       - CGO_ENABLED=0
     flags:
@@ -135,31 +135,31 @@ changelog:
     include:
       - "^.*"
 
-# ===== Homebrew Tap =====
-brews:
-  - name: wukong
-    repository:
-      owner: km269
-      name: homebrew-tap
-      branch: main
-    homepage: "https://github.com/km269/wukong"
-    description: "Local-first extensible AI agent platform with website cloning"
-    license: "MIT"
-    install: |
-      bin.install "wukong"
-    test: |
-      system "#{bin}/wukong", "--version"
+# ===== Homebrew Tap (disabled until km269/homebrew-tap repo exists) =====
+# brews:
+#   - name: wukong
+#     repository:
+#       owner: km269
+#       name: homebrew-tap
+#       branch: main
+#     homepage: "https://github.com/km269/wukong"
+#     description: "Local-first extensible AI agent platform with website cloning"
+#     license: "MIT"
+#     install: |
+#       bin.install "wukong"
+#     test: |
+#       system "#{bin}/wukong", "--version"
 
-# ===== Scoop (Windows) =====
-scoops:
-  - name: wukong
-    repository:
-      owner: km269
-      name: scoop-bucket
-      branch: main
-    homepage: "https://github.com/km269/wukong"
-    description: "Local-first extensible AI agent platform"
-    license: "MIT"
+# ===== Scoop (disabled until km269/scoop-bucket repo exists) =====
+# scoops:
+#   - name: wukong
+#     repository:
+#       owner: km269
+#       name: scoop-bucket
+#       branch: main
+#     homepage: "https://github.com/km269/wukong"
+#     description: "Local-first extensible AI agent platform"
+#     license: "MIT"
 
 # ===== Docker images =====
 dockers:

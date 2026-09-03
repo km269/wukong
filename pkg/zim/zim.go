@@ -31,9 +31,7 @@ import (
 	"os"
 	"sort"
 	"strings"
-)
-
-// ---------------------------------------------------------------------------
+) // ---------------------------------------------------------------------------
 // Packer (write path)
 // ---------------------------------------------------------------------------
 
@@ -115,7 +113,7 @@ func (p *Packer) AddMetadata(name, value string) {
 // AddArticle adds a content article to the ZIM archive in namespace 'C'.
 // Deprecated: prefer AddContent('C', url, title, mimeType, data).
 func (p *Packer) AddArticle(url, title, mimeType string, data []byte) error {
-	return p.AddContent('C', url, title, mimeType, data)
+	return p.AddContent(NamespaceContent, url, title, mimeType, data)
 }
 
 // AddRedirect adds a redirect article that points to another article
@@ -228,6 +226,12 @@ func (p *Packer) writeToWithCache(w io.Writer, compress bool,
 		return key(a.Namespace, a.URL) < key(b.Namespace, b.URL)
 	})
 
+	// Rebuild byKey map after sorting since indices have changed.
+	p.byKey = make(map[string]int)
+	for i, a := range p.articles {
+		p.byKey[key(a.Namespace, a.URL)] = i
+	}
+
 	if err := p.resolveRedirects(); err != nil {
 		return 0, err
 	}
@@ -246,19 +250,19 @@ func (p *Packer) writeToWithCache(w io.Writer, compress bool,
 	}
 
 	// Calculate file layout using precomputed offsets (O(N)).
-	// ZIM v6 layout: Header → MIME List → URL Ptr → Title Ptr → Cluster Ptr → Articles → Clusters → MD5
-	// All pointer lists must be 8-byte aligned.
+	// ZIM v5/v6 layout: Header → MIME List → URL Ptr → Title Ptr → Cluster Ptr → Articles → Clusters → MD5
+	// URL pointers are 8-byte offsets, title pointers are 4-byte URL indices.
 	articleOffsets, articleDataSize := p.calculateArticleLayout()
 	urlPtrListSize := uint64(len(p.articles) * 8)
-	titlePtrListSize := uint64(len(p.articles) * 8)
+	titlePtrListSize := uint64(len(p.articles) * 4)
 	clusterPtrListSize := uint64(len(clusters) * 8)
 	mimeListSize := uint64(len(mimeList))
 
 	mimeListPos := uint64(HeaderSize)
 	urlPtrPos := align8(mimeListPos + mimeListSize)
-	titlePtrPos := urlPtrPos + urlPtrListSize
-	clusterPtrPos := titlePtrPos + titlePtrListSize
-	articlesPos := clusterPtrPos + clusterPtrListSize
+	titlePtrPos := align8(urlPtrPos + urlPtrListSize)
+	clusterPtrPos := align8(titlePtrPos + titlePtrListSize)
+	articlesPos := align8(clusterPtrPos + clusterPtrListSize)
 	clusterDataPos := articlesPos + articleDataSize
 
 	// Also write MIME list with 8-byte alignment padding.
@@ -271,6 +275,165 @@ func (p *Packer) writeToWithCache(w io.Writer, compress bool,
 	}
 
 	mainPage := p.resolveMainPage()
+	if mainPage == noMainPage {
+		return 0, fmt.Errorf("zim: main page not found (namespace=%q, url=%q)",
+			p.mainPageNS, p.mainPageURL)
+	}
+
+	// Check if writer supports seeking for streaming write.
+	seeker, canSeek := w.(io.Seeker)
+	if canSeek {
+		return p.writeToStreaming(w, seeker, mimeList, paddedMime, clusters,
+			articleOffsets, articleDataSize, urlPtrListSize,
+			titlePtrListSize, clusterPtrListSize, mimeListSize,
+			mimeListPos, urlPtrPos, titlePtrPos, clusterPtrPos,
+			articlesPos, clusterDataPos, checksumPos, mainPage)
+	}
+
+	// Fallback to buffered write for non-seekable writers.
+	return p.writeToBuffered(w, mimeList, paddedMime, clusters,
+		articleOffsets, articleDataSize, urlPtrListSize,
+		titlePtrListSize, clusterPtrListSize, mimeListSize,
+		mimeListPos, urlPtrPos, titlePtrPos, clusterPtrPos,
+		articlesPos, clusterDataPos, checksumPos, mainPage)
+}
+
+// writeToStreaming writes the ZIM archive directly to a seekable writer,
+// computing MD5 checksum on-the-fly without buffering the entire archive.
+func (p *Packer) writeToStreaming(w io.Writer, seeker io.Seeker,
+	mimeList, paddedMime []byte, clusters []cluster,
+	articleOffsets []uint64, articleDataSize, urlPtrListSize,
+	titlePtrListSize, clusterPtrListSize, mimeListSize,
+	mimeListPos, urlPtrPos, titlePtrPos, clusterPtrPos,
+	articlesPos, clusterDataPos, checksumPos uint64,
+	mainPage uint32) (int64, error) {
+
+	// Create MD5 hash for on-the-fly checksum calculation.
+	hash := md5.New()
+	mw := io.MultiWriter(w, hash)
+
+	// Write header first (will be updated later with checksum).
+	header := Header{
+		Magic:         [4]byte{0x5a, 0x49, 0x4d, 0x04},
+		MajorVersion:  6,
+		MinorVersion:  0,
+		UUID:          p.computeUUID(),
+		ArticleCount:  uint32(len(p.articles)),
+		ClusterCount:  uint32(len(clusters)),
+		URLPtrPos:     urlPtrPos,
+		TitlePtrPos:   titlePtrPos,
+		ClusterPtrPos: clusterPtrPos,
+		MimeListPos:   mimeListPos,
+		MainPage:      mainPage,
+		LayoutPage:    noMainPage,
+		ChecksumPos:   checksumPos,
+	}
+	if err := writeHeader(mw, &header); err != nil {
+		return 0, fmt.Errorf("zim: write header: %w", err)
+	}
+
+	// Write MIME type list (with 8-byte alignment padding).
+	if _, err := mw.Write(paddedMime); err != nil {
+		return 0, fmt.Errorf("zim: write MIME list: %w", err)
+	}
+
+	// Write URL pointer list (O(N) using precomputed offsets).
+	for i := range p.articles {
+		pos := articlesPos + calculateArticleOffset(articleOffsets, i)
+		if err := binary.Write(mw, binary.LittleEndian, pos); err != nil {
+			return 0, fmt.Errorf("zim: write URL pointer: %w", err)
+		}
+	}
+
+	// Padding after URL pointer list to align title pointer list.
+	if pad := (titlePtrPos - (urlPtrPos + urlPtrListSize)); pad > 0 {
+		if _, err := mw.Write(make([]byte, pad)); err != nil {
+			return 0, fmt.Errorf("zim: write padding: %w", err)
+		}
+	}
+
+	// Write title pointer list (4-byte URL indices, sorted by namespace+title).
+	titleOrder := make([]int, len(p.articles))
+	for i := range titleOrder {
+		titleOrder[i] = i
+	}
+	sort.Slice(titleOrder, func(i, j int) bool {
+		a, b := p.articles[titleOrder[i]], p.articles[titleOrder[j]]
+		ka := key(a.Namespace, a.Title)
+		kb := key(b.Namespace, b.Title)
+		if ka != kb {
+			return ka < kb
+		}
+		return titleOrder[i] < titleOrder[j]
+	})
+	for _, idx := range titleOrder {
+		if err := binary.Write(mw, binary.LittleEndian, uint32(idx)); err != nil {
+			return 0, fmt.Errorf("zim: write title pointer: %w", err)
+		}
+	}
+
+	// Padding after title pointer list to align cluster pointer list.
+	if pad := (clusterPtrPos - (titlePtrPos + titlePtrListSize)); pad > 0 {
+		if _, err := mw.Write(make([]byte, pad)); err != nil {
+			return 0, fmt.Errorf("zim: write padding: %w", err)
+		}
+	}
+
+	// Write cluster pointers.
+	currentOffset := articlesPos + articleDataSize
+	for i := range clusters {
+		if err := binary.Write(mw, binary.LittleEndian,
+			currentOffset); err != nil {
+			return 0, fmt.Errorf("zim: write cluster pointer: %w", err)
+		}
+		currentOffset += uint64(len(clusters[i].data))
+	}
+
+	// Padding after cluster pointer list to align articles.
+	if pad := (articlesPos - (clusterPtrPos + clusterPtrListSize)); pad > 0 {
+		if _, err := mw.Write(make([]byte, pad)); err != nil {
+			return 0, fmt.Errorf("zim: write padding: %w", err)
+		}
+	}
+
+	// Write articles.
+	for i := range p.articles {
+		if err := writeArticleTo(mw, &p.articles[i]); err != nil {
+			return 0, fmt.Errorf("zim: write article %q: %w",
+				p.articles[i].URL, err)
+		}
+	}
+
+	// Write cluster data.
+	for i := range clusters {
+		if _, err := mw.Write(clusters[i].data); err != nil {
+			return 0, fmt.Errorf("zim: write cluster %d: %w", i, err)
+		}
+	}
+
+	// Get the MD5 checksum.
+	checksum := hash.Sum(nil)
+
+	// Write the checksum.
+	if _, err := w.Write(checksum); err != nil {
+		return 0, fmt.Errorf("zim: write checksum: %w", err)
+	}
+
+	// Calculate body length (without checksum).
+	bodyLen := checksumPos
+
+	return int64(bodyLen), nil
+}
+
+// writeToBuffered writes the ZIM archive to a bytes.Buffer first,
+// then to the final writer. Used as fallback for non-seekable writers.
+func (p *Packer) writeToBuffered(w io.Writer,
+	mimeList, paddedMime []byte, clusters []cluster,
+	articleOffsets []uint64, articleDataSize, urlPtrListSize,
+	titlePtrListSize, clusterPtrListSize, mimeListSize,
+	mimeListPos, urlPtrPos, titlePtrPos, clusterPtrPos,
+	articlesPos, clusterDataPos, checksumPos uint64,
+	mainPage uint32) (int64, error) {
 
 	var buf bytes.Buffer
 
@@ -306,7 +469,14 @@ func (p *Packer) writeToWithCache(w io.Writer, compress bool,
 		}
 	}
 
-	// Write title pointer list (sorted by namespace+title).
+	// Padding after URL pointer list to align title pointer list.
+	if pad := (titlePtrPos - (urlPtrPos + urlPtrListSize)); pad > 0 {
+		if _, err := buf.Write(make([]byte, pad)); err != nil {
+			return 0, fmt.Errorf("zim: write padding: %w", err)
+		}
+	}
+
+	// Write title pointer list (4-byte URL indices, sorted by namespace+title).
 	titleOrder := make([]int, len(p.articles))
 	for i := range titleOrder {
 		titleOrder[i] = i
@@ -321,9 +491,15 @@ func (p *Packer) writeToWithCache(w io.Writer, compress bool,
 		return titleOrder[i] < titleOrder[j]
 	})
 	for _, idx := range titleOrder {
-		pos := articlesPos + calculateArticleOffset(articleOffsets, idx)
-		if err := binary.Write(&buf, binary.LittleEndian, pos); err != nil {
+		if err := binary.Write(&buf, binary.LittleEndian, uint32(idx)); err != nil {
 			return 0, fmt.Errorf("zim: write title pointer: %w", err)
+		}
+	}
+
+	// Padding after title pointer list to align cluster pointer list.
+	if pad := (clusterPtrPos - (titlePtrPos + titlePtrListSize)); pad > 0 {
+		if _, err := buf.Write(make([]byte, pad)); err != nil {
+			return 0, fmt.Errorf("zim: write padding: %w", err)
 		}
 	}
 
@@ -335,6 +511,13 @@ func (p *Packer) writeToWithCache(w io.Writer, compress bool,
 			return 0, fmt.Errorf("zim: write cluster pointer: %w", err)
 		}
 		currentOffset += uint64(len(clusters[i].data))
+	}
+
+	// Padding after cluster pointer list to align articles.
+	if pad := (articlesPos - (clusterPtrPos + clusterPtrListSize)); pad > 0 {
+		if _, err := buf.Write(make([]byte, pad)); err != nil {
+			return 0, fmt.Errorf("zim: write padding: %w", err)
+		}
 	}
 
 	// Write articles.
@@ -364,6 +547,32 @@ func (p *Packer) writeToWithCache(w io.Writer, compress bool,
 	}
 
 	return bodyLen, nil
+}
+
+// writeArticleTo writes a single article to an io.Writer using standard ZIM dirent format.
+func writeArticleTo(w io.Writer, a *article) error {
+	le := binary.LittleEndian
+	var head []byte
+	if a.ArticleType == ArticleTypeRedirect {
+		head = make([]byte, 12)
+		le.PutUint16(head[0:], redirectEntry)
+		head[3] = a.Namespace
+		le.PutUint32(head[8:], a.Redirect)
+	} else {
+		head = make([]byte, 16)
+		le.PutUint16(head[0:], a.MimeType)
+		head[3] = a.Namespace
+		le.PutUint32(head[8:], a.Cluster)
+		le.PutUint32(head[12:], a.Blob)
+	}
+	w.Write(head)
+
+	w.Write([]byte(a.URL))
+	w.Write([]byte{0})
+	w.Write([]byte(a.Title))
+	w.Write([]byte{0})
+
+	return nil
 }
 
 // resolveMainPage returns the article index of the main page.
@@ -411,12 +620,8 @@ func (p *Packer) registerMimeType(mime string) {
 func (p *Packer) buildMimeList() []byte {
 	var buf bytes.Buffer
 
-	// Empty first entry (index 0 is always empty per ZIM spec).
-	buf.WriteByte(0)
-
 	// MIME types are output in registration order so article MIME
 	// indices (assigned during AddContent/AddMetadata) match correctly.
-	// Build a reverse index to emit in index order [0..N-1].
 	n := len(p.mimeTypes)
 	mimeByIndex := make([]string, n)
 	for mime, idx := range p.mimeTypes {
@@ -428,6 +633,7 @@ func (p *Packer) buildMimeList() []byte {
 			buf.WriteByte(0)
 		}
 	}
+	buf.WriteByte(0)
 	return buf.Bytes()
 }
 
@@ -445,84 +651,138 @@ func (p *Packer) buildClustersWithCache(compress bool, cache *clusterCache,
 	_ *PackStats) ([]cluster, int) {
 	const maxClusterSize = 2 * 1024 * 1024 // 2 MiB per ZIM cluster
 
-	// Build reverse map from MIME index to MIME string for
-	// classifying content as text or binary.
 	mimeByIndex := make(map[uint16]string, len(p.mimeTypes))
 	for mime, idx := range p.mimeTypes {
 		mimeByIndex[idx] = mime
 	}
 
-	// Separate buffers: text content goes to compressed clusters,
-	// binary content (images, fonts, etc.) goes to uncompressed clusters.
-	var textBuf, binaryBuf []byte
-	var textClusters, binaryClusters []cluster
+	type clusterBlob struct {
+		data []byte
+	}
+	var textClusterBlobs, binaryClusterBlobs [][]clusterBlob
 
 	for i := range p.articles {
-		if p.articles[i].ArticleType != ArticleTypeArticle ||
-			len(p.articles[i].Data) == 0 {
+		if p.articles[i].ArticleType != ArticleTypeArticle {
+			continue
+		}
+
+		mime := mimeByIndex[p.articles[i].MimeType]
+		if !isTextMime(mime) {
 			continue
 		}
 
 		data := p.articles[i].Data
-		mime := mimeByIndex[p.articles[i].MimeType]
-
-		if isTextMime(mime) {
-			// Text content — goes to a compressible cluster.
-			if len(textBuf)+len(data)+4 > maxClusterSize {
-				if len(textBuf) > 0 {
-					textClusters = append(textClusters,
-						cluster{data: textBuf})
-				}
-				textBuf = nil
-			}
-			blobHeader := make([]byte, 4)
-			binary.LittleEndian.PutUint32(blobHeader, uint32(len(data)))
-			textBuf = append(textBuf, blobHeader...)
-			textBuf = append(textBuf, data...)
-		} else {
-			// Binary content — stored uncompressed.
-			if len(binaryBuf)+len(data)+4 > maxClusterSize {
-				if len(binaryBuf) > 0 {
-					binaryClusters = append(binaryClusters,
-						cluster{data: binaryBuf})
-				}
-				binaryBuf = nil
-			}
-			blobHeader := make([]byte, 4)
-			binary.LittleEndian.PutUint32(blobHeader, uint32(len(data)))
-			binaryBuf = append(binaryBuf, blobHeader...)
-			binaryBuf = append(binaryBuf, data...)
+		if len(textClusterBlobs) == 0 {
+			textClusterBlobs = append(textClusterBlobs, []clusterBlob{})
 		}
+
+		lastCluster := &textClusterBlobs[len(textClusterBlobs)-1]
+		estimatedSize := 0
+		for _, b := range *lastCluster {
+			estimatedSize += len(b.data)
+		}
+		estimatedSize += len(data) + 4
+
+		if estimatedSize > maxClusterSize && len(*lastCluster) > 0 {
+			textClusterBlobs = append(textClusterBlobs, []clusterBlob{})
+			lastCluster = &textClusterBlobs[len(textClusterBlobs)-1]
+		}
+
+		clusterIdx := uint32(len(textClusterBlobs) - 1)
+		blobIdx := uint32(len(*lastCluster))
+		*lastCluster = append(*lastCluster, clusterBlob{data: data})
+		p.articles[i].Cluster = clusterIdx
+		p.articles[i].Blob = blobIdx
+		p.articles[i].Data = nil
 	}
 
-	// Flush remaining buffers.
-	if len(textBuf) > 0 {
-		textClusters = append(textClusters, cluster{data: textBuf})
-	}
-	if len(binaryBuf) > 0 {
-		binaryClusters = append(binaryClusters, cluster{data: binaryBuf})
+	textClusterCount := len(textClusterBlobs)
+	for i := range p.articles {
+		if p.articles[i].ArticleType != ArticleTypeArticle {
+			continue
+		}
+
+		mime := mimeByIndex[p.articles[i].MimeType]
+		if isTextMime(mime) {
+			continue
+		}
+
+		data := p.articles[i].Data
+		if len(binaryClusterBlobs) == 0 {
+			binaryClusterBlobs = append(binaryClusterBlobs, []clusterBlob{})
+		}
+
+		lastCluster := &binaryClusterBlobs[len(binaryClusterBlobs)-1]
+		estimatedSize := 0
+		for _, b := range *lastCluster {
+			estimatedSize += len(b.data)
+		}
+		estimatedSize += len(data) + 4
+
+		if estimatedSize > maxClusterSize && len(*lastCluster) > 0 {
+			binaryClusterBlobs = append(binaryClusterBlobs, []clusterBlob{})
+			lastCluster = &binaryClusterBlobs[len(binaryClusterBlobs)-1]
+		}
+
+		clusterIdx := uint32(textClusterCount + len(binaryClusterBlobs) - 1)
+		blobIdx := uint32(len(*lastCluster))
+		*lastCluster = append(*lastCluster, clusterBlob{data: data})
+		p.articles[i].Cluster = clusterIdx
+		p.articles[i].Blob = blobIdx
+		p.articles[i].Data = nil
 	}
 
-	// Merge text and binary clusters in order (text first).
-	allClusters := append(textClusters, binaryClusters...)
+	allClusters := make([]cluster, 0, len(textClusterBlobs)+len(binaryClusterBlobs))
 
-	// Pre-compute uncompressed hashes for text clusters (needed for
-	// cache lookup BEFORE compression).
-	uncompHashes := make([]string, len(textClusters))
-	for i := range textClusters {
-		uncompHashes[i] = clusterHash(textClusters[i].data)
+	uncompHashes := make([]string, 0, len(textClusterBlobs))
+	for _, blobs := range textClusterBlobs {
+		n := len(blobs)
+		tableLen := 4 * (n + 1)
+		total := tableLen
+		for _, b := range blobs {
+			total += len(b.data)
+		}
+		data := make([]byte, tableLen, total)
+		off := uint32(tableLen)
+		binary.LittleEndian.PutUint32(data[0:], off)
+		for i, b := range blobs {
+			off += uint32(len(b.data))
+			binary.LittleEndian.PutUint32(data[4*(i+1):], off)
+		}
+		for _, b := range blobs {
+			data = append(data, b.data...)
+		}
+		uncompHashes = append(uncompHashes, clusterHash(data))
+		allClusters = append(allClusters, cluster{data: data})
 	}
 
-	// Check cache using uncompressed hashes BEFORE compression.
-	// This avoids redundant zstd work for unchanged clusters.
+	for _, blobs := range binaryClusterBlobs {
+		n := len(blobs)
+		tableLen := 4 * (n + 1)
+		total := tableLen
+		for _, b := range blobs {
+			total += len(b.data)
+		}
+		data := make([]byte, tableLen, total)
+		off := uint32(tableLen)
+		binary.LittleEndian.PutUint32(data[0:], off)
+		for i, b := range blobs {
+			off += uint32(len(b.data))
+			binary.LittleEndian.PutUint32(data[4*(i+1):], off)
+		}
+		for _, b := range blobs {
+			data = append(data, b.data...)
+		}
+		allClusters = append(allClusters, cluster{data: data})
+	}
+
 	reused := 0
 	reusedIdx := make(map[int]bool)
 	if cache != nil {
-		for i := range textClusters {
+		for i := 0; i < len(textClusterBlobs); i++ {
 			hash := uncompHashes[i]
 			if cached, ok := cache.entries[hash]; ok {
 				allClusters[i].data = cached
-				// Re-add to cache so saveClusterCache includes it.
 				cache.entries[hash] = cached
 				reused++
 				reusedIdx[i] = true
@@ -530,17 +790,10 @@ func (p *Packer) buildClustersWithCache(compress bool, cache *clusterCache,
 		}
 	}
 
-	// Use the shared zstd encoder for text clusters (skip reused ones).
 	enc := getZstdEncoder()
-	for i := range textClusters {
-		if reusedIdx[i] {
-			continue
-		}
-		if compress && enc != nil {
+	for i := 0; i < len(textClusterBlobs); i++ {
+		if compress && enc != nil && !reusedIdx[i] {
 			allClusters[i].data = enc.EncodeAll(allClusters[i].data, nil)
-			// Store in cache keyed by UNCOMPRESSED hash, so the same
-			// content is found on the next build regardless of compression
-			// output (zstd output is deterministic for the same input).
 			if cache != nil {
 				cache.entries[uncompHashes[i]] = copyBytes(allClusters[i].data)
 			}
@@ -552,14 +805,10 @@ func (p *Packer) buildClustersWithCache(compress bool, cache *clusterCache,
 		allClusters[i].data = append([]byte{compByte}, allClusters[i].data...)
 	}
 
-	// Binary clusters: always uncompressed.
-	binaryIdx := len(textClusters)
-	for i := range binaryClusters {
-		if reusedIdx[binaryIdx+i] {
-			continue
-		}
-		allClusters[binaryIdx+i].data = append(
-			[]byte{byte(CompressionNone)}, allClusters[binaryIdx+i].data...)
+	binaryIdx := len(textClusterBlobs)
+	for i := binaryIdx; i < len(allClusters); i++ {
+		allClusters[i].data = append(
+			[]byte{byte(CompressionNone)}, allClusters[i].data...)
 	}
 
 	return allClusters, reused
@@ -649,15 +898,13 @@ func (p *Packer) calculateArticleLayout() (offsets []uint64, totalSize uint64) {
 
 func (p *Packer) calculateSingleArticleSize(idx int) uint64 {
 	a := &p.articles[idx]
-	// Fixed prefix: 16B header + 8B extData + url + title.
-	prefix := uint64(articleHeaderSize + 8 + len(a.URL) + len(a.Title))
-	// Align prefix to 4 bytes (pad after url+title).
-	alignedPrefix := (prefix + 3) & ^uint64(3)
-	if a.ArticleType == ArticleTypeRedirect || len(a.Data) == 0 {
-		return alignedPrefix
+	// Header: 12 bytes for redirect, 16 bytes for content.
+	headerSize := uint64(16)
+	if a.ArticleType == ArticleTypeRedirect {
+		headerSize = 12
 	}
-	// Add data length (inline, no final padding needed).
-	return alignedPrefix + uint64(len(a.Data))
+	// URL + null + title + null.
+	return headerSize + uint64(len(a.URL)+1+len(a.Title)+1)
 }
 
 // calculateArticleOffset returns the byte offset of the article at idx.
@@ -666,42 +913,30 @@ func calculateArticleOffset(offsets []uint64, idx int) uint64 {
 	return offsets[idx]
 }
 
-// writeArticle serialises a single directory entry to w.
-// Layout: [16B header][8B extData][url][title][pad:4B][data][pad:4B]
-// Redirect entries skip the data section.
+// writeArticle serialises a single directory entry to w using standard ZIM dirent format.
+// Layout: [12/16B header][url][0][title][0]
+// Redirect entries have 12B header with redirectEntry sentinel, content entries have 16B header.
 func writeArticle(w *bytes.Buffer, a *article) error {
-	header := make([]byte, articleHeaderSize)
-	binary.LittleEndian.PutUint16(header[0:2], uint16(len(a.Title)))
-	binary.LittleEndian.PutUint16(header[2:4], uint16(len(a.URL)))
-	header[4] = a.Namespace
-	binary.LittleEndian.PutUint32(header[5:9], 0) // revision
-	header[9] = byte(a.ArticleType)
-	binary.LittleEndian.PutUint16(header[10:12], a.MimeType)
-	binary.LittleEndian.PutUint32(header[12:16], a.Redirect)
-	w.Write(header)
-
-	// Extended data (8 bytes).
-	extData := make([]byte, 8)
+	le := binary.LittleEndian
+	var head []byte
 	if a.ArticleType == ArticleTypeRedirect {
-		binary.LittleEndian.PutUint32(extData[0:4], a.Redirect)
+		head = make([]byte, 12)
+		le.PutUint16(head[0:], redirectEntry)
+		head[3] = a.Namespace
+		le.PutUint32(head[8:], a.Redirect)
+	} else {
+		head = make([]byte, 16)
+		le.PutUint16(head[0:], a.MimeType)
+		head[3] = a.Namespace
+		le.PutUint32(head[8:], a.Cluster)
+		le.PutUint32(head[12:], a.Blob)
 	}
-	w.Write(extData)
+	w.Write(head)
 
-	// URL and title strings.
 	w.WriteString(a.URL)
+	w.WriteByte(0)
 	w.WriteString(a.Title)
-
-	// Pad strings section to 4-byte alignment.
-	if pad := (4 - (w.Len() % 4)) % 4; pad > 0 {
-		w.Write(make([]byte, pad))
-	}
-
-	// Article data (inline, only for non-redirect content articles).
-	if a.ArticleType != ArticleTypeRedirect && len(a.Data) > 0 {
-		w.Write(a.Data)
-	}
-	// Note: no final padding needed since inline data dirents
-	// use the URL pointer list for boundary determination.
+	w.WriteByte(0)
 
 	return nil
 }

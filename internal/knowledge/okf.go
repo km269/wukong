@@ -258,6 +258,7 @@ func isExportableExt(ext string) bool {
 func sanitizeFilename(s string) string {
 	s = strings.ReplaceAll(s, "://", "_")
 	s = strings.ReplaceAll(s, "/", "_")
+	s = strings.ReplaceAll(s, "\\", "_")
 	s = strings.ReplaceAll(s, ":", "_")
 	s = strings.ReplaceAll(s, "?", "_")
 	s = strings.ReplaceAll(s, "&", "_")

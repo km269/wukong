@@ -5,7 +5,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"os"
 	"runtime"
 	"strings"
 	"time"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/health"
+	"github.com/km269/wukong/internal/util"
 	"github.com/km269/wukong/pkg/sandbox"
 )
 
@@ -60,7 +60,7 @@ func runHealth(cmd *cobra.Command, args []string) error {
 	sysInfo := collectSystemInfo()
 
 	// Try to load config if available
-	reg := health.NewRegistry(Version)
+	reg := health.NewRegistry(util.Version)
 	registerSystemHealth(reg, sysInfo)
 
 	// Load config and register config-dependent checkers
@@ -130,7 +130,7 @@ func collectSystemInfo() systemInfo {
 		GoVersion: runtime.Version(),
 		CPUs:      runtime.NumCPU(),
 		Sandbox:   sandboxStatus,
-		Version:   Version,
+		Version:   util.Version,
 	}
 }
 
@@ -139,8 +139,8 @@ func collectSystemInfo() systemInfo {
 func registerSystemHealth(reg *health.Registry, info systemInfo) {
 	reg.Register("platform", func(ctx context.Context) health.ComponentHealth {
 		return health.ComponentHealth{
-			Name:    "platform",
-			Status:  health.StatusHealthy,
+			Name:   "platform",
+			Status: health.StatusHealthy,
 			Message: fmt.Sprintf("%s/%s, %d CPUs, Go %s",
 				info.OS, info.Arch, info.CPUs, info.GoVersion),
 		}
@@ -178,8 +178,8 @@ func registerConfigHealth(reg *health.Registry, cfg *config.WukongConfig) {
 			}
 		}
 		return health.ComponentHealth{
-			Name:    "config",
-			Status:  health.StatusHealthy,
+			Name:   "config",
+			Status: health.StatusHealthy,
 			Message: fmt.Sprintf("provider=%s, log_level=%s",
 				cfg.DefaultProvider, cfg.LogLevel),
 		}
@@ -191,7 +191,7 @@ func registerConfigHealth(reg *health.Registry, cfg *config.WukongConfig) {
 		reg.Register("provider:"+cfg.DefaultProvider, func(ctx context.Context) health.ComponentHealth {
 			status := health.StatusHealthy
 			msg := fmt.Sprintf("type=%s, model=%s", p.Type, p.Model)
-			if p.APIKey == "" && p.Type != "ollama" && p.Type != "lmstudio" {
+			if p.APIKey == "" && p.Type != "ollama" && p.Type != "lmstudio" && p.Type != "vllm" {
 				status = health.StatusDegraded
 				msg += " (no API key)"
 			}
@@ -206,8 +206,8 @@ func registerConfigHealth(reg *health.Registry, cfg *config.WukongConfig) {
 	// Session backend
 	reg.Register("session", func(ctx context.Context) health.ComponentHealth {
 		return health.ComponentHealth{
-			Name:    "session",
-			Status:  health.StatusHealthy,
+			Name:   "session",
+			Status: health.StatusHealthy,
 			Message: fmt.Sprintf("backend=%s, path=%s",
 				cfg.Session.Backend, cfg.Session.DBPath),
 		}
@@ -260,8 +260,8 @@ func registerConfigHealth(reg *health.Registry, cfg *config.WukongConfig) {
 			endpoints = append(endpoints, "ACP MCP")
 		}
 		return health.ComponentHealth{
-			Name:    "servers",
-			Status:  health.StatusHealthy,
+			Name:   "servers",
+			Status: health.StatusHealthy,
 			Message: fmt.Sprintf("%d active: %s", enabled,
 				strings.Join(endpoints, ", ")),
 		}
@@ -270,8 +270,8 @@ func registerConfigHealth(reg *health.Registry, cfg *config.WukongConfig) {
 	// Security
 	reg.Register("security", func(ctx context.Context) health.ComponentHealth {
 		return health.ComponentHealth{
-			Name:    "security",
-			Status:  health.StatusHealthy,
+			Name:   "security",
+			Status: health.StatusHealthy,
 			Message: fmt.Sprintf("mode=%s, guardrail=%v",
 				cfg.Security.PermissionMode, cfg.Security.GuardrailEnabled),
 		}
@@ -281,8 +281,8 @@ func registerConfigHealth(reg *health.Registry, cfg *config.WukongConfig) {
 	if cfg.Evolution.Enabled {
 		reg.Register("evolution", func(ctx context.Context) health.ComponentHealth {
 			return health.ComponentHealth{
-				Name:    "evolution",
-				Status:  health.StatusHealthy,
+				Name:   "evolution",
+				Status: health.StatusHealthy,
 				Message: fmt.Sprintf("min_confidence=%.1f, cooldown=%s",
 					cfg.Evolution.MinConfidence, cfg.Evolution.CooldownPeriod),
 			}
@@ -382,6 +382,3 @@ func printHealthJSON(result health.CheckResult) {
 	fmt.Printf("  ]\n")
 	fmt.Printf("}\n")
 }
-
-// Ensure os import is used (for compile check).
-var _ = os.Getenv

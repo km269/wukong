@@ -127,6 +127,8 @@ func resolveDefaultBaseURL(providerType string) string {
 		return provider.OllamaBaseURL
 	case "lmstudio":
 		return provider.LMStudioBaseURL
+	case "vllm":
+		return provider.VLLMBaseURL
 	default:
 		return "(not set)"
 	}

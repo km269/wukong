@@ -310,8 +310,9 @@ func splitFrontmatter(content []byte) (Frontmatter, string, error) {
 // to other .md files. Returns relative paths.
 //
 // Matches patterns like:
-//   [text](path/to/file.md)
-//   [text](../tables/orders.md)
+//
+//	[text](path/to/file.md)
+//	[text](../tables/orders.md)
 func extractLinks(body string) []string {
 	var links []string
 	seen := make(map[string]bool)

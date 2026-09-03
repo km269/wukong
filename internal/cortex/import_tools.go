@@ -21,7 +21,7 @@ import (
 // tools for the agent.
 type ImportToolManager struct {
 	importFlow *ImportFlowService
-	jsonGen   graphflow.JSONGenerator
+	jsonGen    graphflow.JSONGenerator
 }
 
 // NewImportToolManager creates an import tool manager.
@@ -33,7 +33,7 @@ func NewImportToolManager(
 ) *ImportToolManager {
 	return &ImportToolManager{
 		importFlow: importFlow,
-		jsonGen:   jsonGen,
+		jsonGen:    jsonGen,
 	}
 }
 
@@ -91,10 +91,10 @@ type DDLAnalyzeReq struct {
 }
 
 type DDLAnalyzeRsp struct {
-	Success bool                   `json:"success"`
-	Tables  []importflow.DDLTable  `json:"tables,omitempty"`
-	Count   int                    `json:"count"`
-	Error   string                 `json:"error,omitempty"`
+	Success bool                  `json:"success"`
+	Tables  []importflow.DDLTable `json:"tables,omitempty"`
+	Count   int                   `json:"count"`
+	Error   string                `json:"error,omitempty"`
 }
 
 func (m *ImportToolManager) parseDDL(
@@ -122,10 +122,10 @@ type DDLPlanReq struct {
 }
 
 type DDLPlanRsp struct {
-	Success    bool                     `json:"success"`
-	Plan       *importflow.MappingPlan  `json:"plan,omitempty"`
-	TableCount int                      `json:"table_count"`
-	Error      string                   `json:"error,omitempty"`
+	Success    bool                    `json:"success"`
+	Plan       *importflow.MappingPlan `json:"plan,omitempty"`
+	TableCount int                     `json:"table_count"`
+	Error      string                  `json:"error,omitempty"`
 }
 
 func (m *ImportToolManager) planFromDDL(
@@ -157,11 +157,11 @@ type DDLPlanAIReq struct {
 }
 
 type DDLPlanAIRsp struct {
-	Success    bool                     `json:"success"`
-	Plan       *importflow.MappingPlan  `json:"plan,omitempty"`
-	TableCount int                      `json:"table_count"`
-	LLMUsed    bool                     `json:"llm_used"`
-	Error      string                   `json:"error,omitempty"`
+	Success    bool                    `json:"success"`
+	Plan       *importflow.MappingPlan `json:"plan,omitempty"`
+	TableCount int                     `json:"table_count"`
+	LLMUsed    bool                    `json:"llm_used"`
+	Error      string                  `json:"error,omitempty"`
 }
 
 func (m *ImportToolManager) planFromDDLAI(
@@ -192,8 +192,8 @@ func (m *ImportToolManager) planFromDDLAI(
 // --- CSV Import ---
 
 type CSVImportReq struct {
-	CSV       string                 `json:"csv" jsonschema:"description=CSV data to import (first row as headers)"`
-	Plan      importflow.MappingPlan `json:"plan" jsonschema:"description=Mapping plan from importflow_ddl_plan or importflow_ddl_plan_ai"`
+	CSV  string                 `json:"csv" jsonschema:"description=CSV data to import (first row as headers)"`
+	Plan importflow.MappingPlan `json:"plan" jsonschema:"description=Mapping plan from importflow_ddl_plan or importflow_ddl_plan_ai"`
 }
 
 type CSVImportRsp struct {

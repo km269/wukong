@@ -109,9 +109,10 @@ func (m *MemoryFlowService) IngestTurn(
 
 // WakeUp builds a layered context for the next agent run.
 // It assembles:
-//   Layer 1: Identity (agent persona)
-//   Layer 2: Recalled memories from past conversations
-//   Layer 3: Session-level context
+//
+//	Layer 1: Identity (agent persona)
+//	Layer 2: Recalled memories from past conversations
+//	Layer 3: Session-level context
 //
 // The returned string can be injected into the system prompt.
 func (m *MemoryFlowService) WakeUp(
@@ -119,6 +120,7 @@ func (m *MemoryFlowService) WakeUp(
 	identity string,
 	query string,
 	sessionID string,
+	userID string,
 ) (string, error) {
 	resp, err := m.flow.WakeUpLayers(ctx,
 		memoryflow.WakeUpLayersRequest{
@@ -126,6 +128,7 @@ func (m *MemoryFlowService) WakeUp(
 			Recall: memoryflow.RecallRequest{
 				Query:     query,
 				SessionID: sessionID,
+				UserID:    userID,
 				Scope:     cortexdb.MemoryScopeSession,
 				Namespace: m.cfg.Namespace,
 			},

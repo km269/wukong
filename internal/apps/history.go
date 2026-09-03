@@ -8,6 +8,7 @@ package apps
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -94,7 +95,11 @@ func (m *Manager) saveVersionLocked(app AppInfo, label string) error {
 	}
 	metaData, _ := json.MarshalIndent(meta, "", "  ")
 	metaPath := strings.TrimSuffix(htmlPath, ".html") + ".json"
-	_ = os.WriteFile(metaPath, metaData, 0644)
+	if err := os.WriteFile(metaPath, metaData, 0644); err != nil {
+		slog.Warn("apps: write version metadata failed",
+			"path", metaPath,
+			"error", err.Error())
+	}
 
 	// Prune old versions if over the limit.
 	m.pruneHistory(versionsDir)

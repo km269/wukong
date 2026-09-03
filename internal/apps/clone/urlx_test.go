@@ -1,6 +1,9 @@
 package clone
 
 import (
+	"fmt"
+	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -123,15 +126,15 @@ func TestLocalPath_Page(t *testing.T) {
 
 func TestLocalPath_Asset(t *testing.T) {
 	tests := []struct {
-		url  string
+		url        string
 		wantPrefix string
 	}{
 		{
-			url:  "https://example.com/css/style.css",
+			url:        "https://example.com/css/style.css",
 			wantPrefix: "_wukong/example.com/css/style.css",
 		},
 		{
-			url:  "https://cdn.example.com/img/logo.png",
+			url:        "https://cdn.example.com/img/logo.png",
 			wantPrefix: "_wukong/cdn.example.com/img/logo.png",
 		},
 	}
@@ -184,6 +187,762 @@ func TestRel(t *testing.T) {
 			if got != tt.want {
 				t.Errorf("Rel(%q, %q) = %q, want %q",
 					tt.from, tt.to, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInScope_ListSuffix(t *testing.T) {
+	tests := []struct {
+		name     string
+		seedURL  string
+		checkURL string
+		cfg      ScopeConfig
+		want     bool
+	}{
+		{
+			name:     "exact scope-prefix match",
+			seedURL:  "https://www.state.gov/biographies-list",
+			checkURL: "https://www.state.gov/biographies-list",
+			cfg:      ScopeConfig{ScopePrefix: "/biographies-list"},
+			want:     true,
+		},
+		{
+			name:     "-list suffix matches base prefix",
+			seedURL:  "https://www.state.gov/biographies-list",
+			checkURL: "https://www.state.gov/biographies/john-doe",
+			cfg:      ScopeConfig{ScopePrefix: "/biographies-list"},
+			want:     true,
+		},
+		{
+			name:     "-list suffix matches base prefix with trailing slash",
+			seedURL:  "https://www.state.gov/biographies-list",
+			checkURL: "https://www.state.gov/biographies/",
+			cfg:      ScopeConfig{ScopePrefix: "/biographies-list"},
+			want:     true,
+		},
+		{
+			name:     "no -list suffix, exact match only",
+			seedURL:  "https://www.state.gov/news",
+			checkURL: "https://www.state.gov/news/latest",
+			cfg:      ScopeConfig{ScopePrefix: "/news"},
+			want:     true,
+		},
+		{
+			name:     "no -list suffix, no match",
+			seedURL:  "https://www.state.gov/news",
+			checkURL: "https://www.state.gov/news2/latest",
+			cfg:      ScopeConfig{ScopePrefix: "/news"},
+			want:     false,
+		},
+		{
+			name:     "-list suffix, no match for different base",
+			seedURL:  "https://www.state.gov/biographies-list",
+			checkURL: "https://www.state.gov/articles/john-doe",
+			cfg:      ScopeConfig{ScopePrefix: "/biographies-list"},
+			want:     false,
+		},
+		{
+			name:     "base prefix matches -list path (bi-directional)",
+			seedURL:  "https://www.state.gov/biographies",
+			checkURL: "https://www.state.gov/biographies-list",
+			cfg:      ScopeConfig{ScopePrefix: "/biographies"},
+			want:     true,
+		},
+		{
+			name:     "base prefix matches -list subpage (bi-directional)",
+			seedURL:  "https://www.state.gov/biographies",
+			checkURL: "https://www.state.gov/biographies-list/page/2/",
+			cfg:      ScopeConfig{ScopePrefix: "/biographies"},
+			want:     true,
+		},
+		{
+			name:     "base prefix does not match unrelated -list path",
+			seedURL:  "https://www.state.gov/news",
+			checkURL: "https://www.state.gov/articles-list/page/2/",
+			cfg:      ScopeConfig{ScopePrefix: "/news"},
+			want:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			seed, _ := url.Parse(tt.seedURL)
+			check, _ := url.Parse(tt.checkURL)
+			got := InScope(seed, check, tt.cfg)
+			if got != tt.want {
+				t.Errorf("InScope(%q, %q, %+v) = %v, want %v",
+					tt.seedURL, tt.checkURL, tt.cfg, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMatchesScopePrefix_TrailingSlash(t *testing.T) {
+	tests := []struct {
+		name   string
+		path   string
+		prefix string
+		want   bool
+	}{
+		{
+			name:   "exact match without trailing slash",
+			path:   "/news",
+			prefix: "/news",
+			want:   true,
+		},
+		{
+			name:   "exact match with trailing slash on prefix",
+			path:   "/news",
+			prefix: "/news/",
+			want:   true,
+		},
+		{
+			name:   "exact match with trailing slash on path",
+			path:   "/news/",
+			prefix: "/news",
+			want:   true,
+		},
+		{
+			name:   "exact match with trailing slash on both",
+			path:   "/news/",
+			prefix: "/news/",
+			want:   true,
+		},
+		{
+			name:   "subpage match without trailing slash",
+			path:   "/news/latest",
+			prefix: "/news",
+			want:   true,
+		},
+		{
+			name:   "subpage match with trailing slash on prefix",
+			path:   "/news/latest",
+			prefix: "/news/",
+			want:   true,
+		},
+		{
+			name:   "subpage match with trailing slash on both",
+			path:   "/news/latest/",
+			prefix: "/news/",
+			want:   true,
+		},
+		{
+			name:   "no match for similar prefix without trailing slash",
+			path:   "/news2/latest",
+			prefix: "/news",
+			want:   false,
+		},
+		{
+			name:   "no match for similar prefix with trailing slash",
+			path:   "/news2/latest",
+			prefix: "/news/",
+			want:   false,
+		},
+		{
+			name:   "multi-level prefix with trailing slash",
+			path:   "/About-DLA/Leaders/Biographies/John-Doe",
+			prefix: "/About-DLA/Leaders/Biographies/",
+			want:   true,
+		},
+		{
+			name:   "multi-level exact match with trailing slash",
+			path:   "/About-DLA/Leaders/Biographies/",
+			prefix: "/About-DLA/Leaders/Biographies/",
+			want:   true,
+		},
+		{
+			name:   "root prefix matches everything",
+			path:   "/anything/here",
+			prefix: "/",
+			want:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchesScopePrefix(tt.path, tt.prefix)
+			if got != tt.want {
+				t.Errorf("matchesScopePrefix(%q, %q) = %v, want %v",
+					tt.path, tt.prefix, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPagination_PageQueryParam(t *testing.T) {
+	seedHost := "www.example.com"
+
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{
+			name: "first page (no query)",
+			url:  "https://www.example.com/list/",
+			want: "list/index.html",
+		},
+		{
+			name: "Page=2 (capital P)",
+			url:  "https://www.example.com/list/?Page=2",
+			want: "list/index_page_2.html",
+		},
+		{
+			name: "page=3 (lowercase)",
+			url:  "https://www.example.com/list/?page=3",
+			want: "list/index_page_3.html",
+		},
+		{
+			name: "p=5 (short form)",
+			url:  "https://www.example.com/list/?p=5",
+			want: "list/index_page_5.html",
+		},
+		{
+			name: "pg=10 (another short form)",
+			url:  "https://www.example.com/list/?pg=10",
+			want: "list/index_page_10.html",
+		},
+		{
+			name: "pageNum=7 (camelCase)",
+			url:  "https://www.example.com/list/?pageNum=7",
+			want: "list/index_page_7.html",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := LocalPath(seedHost, tt.url, KindPage)
+			got = strings.ReplaceAll(got, "\\", "/")
+			if got != tt.want {
+				t.Errorf("LocalPath(%q) = %q, want %q", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPagination_PathBased(t *testing.T) {
+	seedHost := "www.example.com"
+
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{
+			name: "first page",
+			url:  "https://www.example.com/articles/",
+			want: "articles/index.html",
+		},
+		{
+			name: "page 2",
+			url:  "https://www.example.com/articles/page/2/",
+			want: "articles/page/2/index.html",
+		},
+		{
+			name: "page 3",
+			url:  "https://www.example.com/articles/page/3/",
+			want: "articles/page/3/index.html",
+		},
+		{
+			name: "page 10",
+			url:  "https://www.example.com/articles/page/10/",
+			want: "articles/page/10/index.html",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := LocalPath(seedHost, tt.url, KindPage)
+			got = strings.ReplaceAll(got, "\\", "/")
+			if got != tt.want {
+				t.Errorf("LocalPath(%q) = %q, want %q", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPagination_OffsetLimit(t *testing.T) {
+	seedHost := "www.example.com"
+
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{
+			name: "offset=0&limit=25",
+			url:  "https://www.example.com/list/?offset=0&limit=25",
+			want: "list/index_offset_0_25.html",
+		},
+		{
+			name: "offset=50&limit=25",
+			url:  "https://www.example.com/list/?offset=50&limit=25",
+			want: "list/index_offset_50_25.html",
+		},
+		{
+			name: "start=100&size=20",
+			url:  "https://www.example.com/list/?start=100&size=20",
+			want: "list/index_offset_100_20.html",
+		},
+		{
+			name: "skip=50&count=25",
+			url:  "https://www.example.com/list/?skip=50&count=25",
+			want: "list/index_offset_50_25.html",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := LocalPath(seedHost, tt.url, KindPage)
+			got = strings.ReplaceAll(got, "\\", "/")
+			if got != tt.want {
+				t.Errorf("LocalPath(%q) = %q, want %q", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPagination_Cursor(t *testing.T) {
+	seedHost := "www.example.com"
+
+	tests := []struct {
+		name      string
+		url       string
+		wantParam string
+	}{
+		{
+			name:      "cursor param",
+			url:       "https://www.example.com/list/?cursor=abc123def456",
+			wantParam: "cursor",
+		},
+		{
+			name:      "after_id param",
+			url:       "https://www.example.com/list/?after_id=1000",
+			wantParam: "after_id",
+		},
+		{
+			name:      "next param",
+			url:       "https://www.example.com/list/?next=eyJvZmZzZXQiOjEwMH0",
+			wantParam: "next",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := LocalPath(seedHost, tt.url, KindPage)
+			got = strings.ReplaceAll(got, "\\", "/")
+
+			expectedPrefix := "list/index_" + tt.wantParam + "_"
+			if !strings.HasPrefix(got, expectedPrefix) {
+				t.Errorf("LocalPath(%q) = %q, want prefix %q", tt.url, got, expectedPrefix)
+			}
+			if !strings.HasSuffix(got, ".html") {
+				t.Errorf("LocalPath(%q) = %q, want .html suffix", tt.url, got)
+			}
+		})
+	}
+}
+
+func TestPagination_Seek(t *testing.T) {
+	seedHost := "www.example.com"
+
+	tests := []struct {
+		name      string
+		url       string
+		wantParam string
+	}{
+		{
+			name:      "after timestamp",
+			url:       "https://www.example.com/list/?after=2024-01-01T00:00:00Z",
+			wantParam: "after",
+		},
+		{
+			name:      "since timestamp",
+			url:       "https://www.example.com/list/?since=1704067200",
+			wantParam: "since",
+		},
+		{
+			name:      "before timestamp",
+			url:       "https://www.example.com/list/?before=2024-01-15",
+			wantParam: "before",
+		},
+		{
+			name:      "from timestamp",
+			url:       "https://www.example.com/list/?from=2024-01-01",
+			wantParam: "from",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := LocalPath(seedHost, tt.url, KindPage)
+			got = strings.ReplaceAll(got, "\\", "/")
+
+			expectedPrefix := "list/index_" + tt.wantParam + "_"
+			if !strings.HasPrefix(got, expectedPrefix) {
+				t.Errorf("LocalPath(%q) = %q, want prefix %q", tt.url, got, expectedPrefix)
+			}
+			if !strings.HasSuffix(got, ".html") {
+				t.Errorf("LocalPath(%q) = %q, want .html suffix", tt.url, got)
+			}
+		})
+	}
+}
+
+func TestPagination_Token(t *testing.T) {
+	seedHost := "www.example.com"
+
+	tests := []struct {
+		name      string
+		url       string
+		wantParam string
+	}{
+		{
+			name:      "pageToken param",
+			url:       "https://www.example.com/list/?pageToken=CjA2MTQwODIyRnN0YXRpY3",
+			wantParam: "pagetoken",
+		},
+		{
+			name:      "token param",
+			url:       "https://www.example.com/list/?token=eyJhbGciOiJIUzI1NiJ9",
+			wantParam: "token",
+		},
+		{
+			name:      "continuation param",
+			url:       "https://www.example.com/list/?continuation=abcdef123456",
+			wantParam: "continuation",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := LocalPath(seedHost, tt.url, KindPage)
+			got = strings.ReplaceAll(got, "\\", "/")
+
+			expectedPrefix := "list/index_" + tt.wantParam + "_"
+			if !strings.HasPrefix(got, expectedPrefix) {
+				t.Errorf("LocalPath(%q) = %q, want prefix %q", tt.url, got, expectedPrefix)
+			}
+			if !strings.HasSuffix(got, ".html") {
+				t.Errorf("LocalPath(%q) = %q, want .html suffix", tt.url, got)
+			}
+		})
+	}
+}
+
+func TestPagination_Deduplication(t *testing.T) {
+	seedHost := "www.example.com"
+
+	tests := []struct {
+		name     string
+		url1     string
+		url2     string
+		wantSame bool
+	}{
+		{
+			name:     "page 1 vs page 2 (query param)",
+			url1:     "https://www.example.com/list/?Page=1",
+			url2:     "https://www.example.com/list/?Page=2",
+			wantSame: false,
+		},
+		{
+			name:     "page 2 vs page 3 (path based)",
+			url1:     "https://www.example.com/articles/page/2/",
+			url2:     "https://www.example.com/articles/page/3/",
+			wantSame: false,
+		},
+		{
+			name:     "offset 0 vs offset 50",
+			url1:     "https://www.example.com/list/?offset=0&limit=25",
+			url2:     "https://www.example.com/list/?offset=50&limit=25",
+			wantSame: false,
+		},
+		{
+			name:     "cursor A vs cursor B",
+			url1:     "https://www.example.com/list/?cursor=abc123",
+			url2:     "https://www.example.com/list/?cursor=def456",
+			wantSame: false,
+		},
+		{
+			name:     "same page number, different param case (Page vs page)",
+			url1:     "https://www.example.com/list/?Page=2",
+			url2:     "https://www.example.com/list/?page=2",
+			wantSame: true,
+		},
+		{
+			name:     "same page number, different param name (page vs p)",
+			url1:     "https://www.example.com/list/?page=2",
+			url2:     "https://www.example.com/list/?p=2",
+			wantSame: true,
+		},
+		{
+			name:     "first page vs no query",
+			url1:     "https://www.example.com/list/",
+			url2:     "https://www.example.com/list/?Page=1",
+			wantSame: false,
+		},
+		{
+			name:     "complex query with sort",
+			url1:     "https://www.example.com/list/?page=2&sort=date",
+			url2:     "https://www.example.com/list/?page=2&sort=name",
+			wantSame: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key1 := PageKey(seedHost, tt.url1)
+			key2 := PageKey(seedHost, tt.url2)
+			gotSame := key1 == key2
+
+			if gotSame != tt.wantSame {
+				t.Errorf("PageKey equality:\n  url1: %s\n  key1: %s\n  url2: %s\n  key2: %s\n  same: %v, want %v",
+					tt.url1, key1, tt.url2, key2, gotSame, tt.wantSame)
+			}
+		})
+	}
+}
+
+func TestPagination_FallbackToHash(t *testing.T) {
+	seedHost := "www.example.com"
+
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{
+			name: "three query params",
+			url:  "https://www.example.com/list/?page=2&sort=date&order=asc",
+		},
+		{
+			name: "search query with page",
+			url:  "https://www.example.com/search?q=test&page=2",
+		},
+		{
+			name: "unknown single param",
+			url:  "https://www.example.com/list/?foobar=123",
+		},
+		{
+			name: "filter params only",
+			url:  "https://www.example.com/list/?category=news&tag=breaking",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := LocalPath(seedHost, tt.url, KindPage)
+			got = strings.ReplaceAll(got, "\\", "/")
+
+			if !strings.Contains(got, "__q-") {
+				t.Errorf("LocalPath(%q) = %q, expected hash suffix __q-", tt.url, got)
+			}
+			if !strings.HasSuffix(got, ".html") {
+				t.Errorf("LocalPath(%q) = %q, want .html suffix", tt.url, got)
+			}
+		})
+	}
+}
+
+func TestPagination_MultipleStyles(t *testing.T) {
+	seedHost := "www.dla.mil"
+
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{
+			name: "path-based page/2 (dla.mil style)",
+			url:  "https://www.dla.mil/biographies-list/page/2/",
+			want: "biographies-list/page/2/index.html",
+		},
+		{
+			name: "path-based page/3 (dla.mil style)",
+			url:  "https://www.dla.mil/biographies-list/page/3/",
+			want: "biographies-list/page/3/index.html",
+		},
+		{
+			name: "path-based page/10 (gap filling target)",
+			url:  "https://www.dla.mil/biographies-list/page/10/",
+			want: "biographies-list/page/10/index.html",
+		},
+		{
+			name: "query-param page=2",
+			url:  "https://www.dla.mil/list/?page=2",
+			want: "list/index_page_2.html",
+		},
+		{
+			name: "query-param Page=5",
+			url:  "https://www.dla.mil/list/?Page=5",
+			want: "list/index_page_5.html",
+		},
+		{
+			name: "offset pagination offset=50&limit=25",
+			url:  "https://www.dla.mil/list/?offset=50&limit=25",
+			want: "list/index_offset_50_25.html",
+		},
+		{
+			name: "offset pagination offset=100&limit=25",
+			url:  "https://www.dla.mil/list/?offset=100&limit=25",
+			want: "list/index_offset_100_25.html",
+		},
+		{
+			name: "cursor-based pagination",
+			url:  "https://www.dla.mil/list/?cursor=eyJpZCI6IjEyMzQ1In0",
+			want: "list/index_cursor_0d1db6.html",
+		},
+		{
+			name: "seek-based pagination",
+			url:  "https://www.dla.mil/list/?seek=2024-01-15T10:30:00Z",
+			want: "list/index__q-007570.html",
+		},
+		{
+			name: "token-based pagination",
+			url:  "https://www.dla.mil/list/?page_token=abc123",
+			want: "list/index_page_token_6ca13d.html",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := LocalPath(seedHost, tt.url, KindPage)
+			got = strings.ReplaceAll(got, "\\", "/")
+			if got != tt.want {
+				t.Errorf("LocalPath(%q) = %q, want %q", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPagination_PathRegexMatching(t *testing.T) {
+	pageRe := regexp.MustCompile(`^(.+)/page/(\d+)/?$`)
+
+	tests := []struct {
+		name     string
+		path     string
+		wantOK   bool
+		wantBase string
+		wantPage int
+	}{
+		{
+			name:     "dla.mil biographies page 2",
+			path:     "/biographies-list/page/2/",
+			wantOK:   true,
+			wantBase: "/biographies-list",
+			wantPage: 2,
+		},
+		{
+			name:     "dla.mil biographies page 3",
+			path:     "/biographies-list/page/3/",
+			wantOK:   true,
+			wantBase: "/biographies-list",
+			wantPage: 3,
+		},
+		{
+			name:     "dla.mil articles page 10",
+			path:     "/articles-list/page/10/",
+			wantOK:   true,
+			wantBase: "/articles-list",
+			wantPage: 10,
+		},
+		{
+			name:     "no trailing slash",
+			path:     "/list/page/5",
+			wantOK:   true,
+			wantBase: "/list",
+			wantPage: 5,
+		},
+		{
+			name:     "deeper path",
+			path:     "/category/news/page/7/",
+			wantOK:   true,
+			wantBase: "/category/news",
+			wantPage: 7,
+		},
+		{
+			name:   "not a pagination URL",
+			path:   "/about/",
+			wantOK: false,
+		},
+		{
+			name:   "page without number",
+			path:   "/list/page/latest/",
+			wantOK: false,
+		},
+		{
+			name:   "page number in middle",
+			path:   "/page/2/list/",
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := pageRe.FindStringSubmatch(tt.path)
+			if tt.wantOK {
+				if m == nil {
+					t.Errorf("regex did not match %q, expected match with base=%q page=%d", tt.path, tt.wantBase, tt.wantPage)
+					return
+				}
+				if m[1] != tt.wantBase {
+					t.Errorf("base path = %q, want %q", m[1], tt.wantBase)
+				}
+				var pageNum int
+				fmt.Sscanf(m[2], "%d", &pageNum)
+				if pageNum != tt.wantPage {
+					t.Errorf("page number = %d, want %d", pageNum, tt.wantPage)
+				}
+			} else {
+				if m != nil {
+					t.Errorf("regex matched %q unexpectedly, got %v", tt.path, m)
+				}
+			}
+		})
+	}
+}
+
+func TestPagination_RegexReplaceSafety(t *testing.T) {
+	pageRe := regexp.MustCompile(`^(.+)/page/(\d+)/?$`)
+
+	tests := []struct {
+		name     string
+		path     string
+		newPage  int
+		expected string
+	}{
+		{
+			name:     "normal replacement page 2 to 5",
+			path:     "/biographies-list/page/2/",
+			newPage:  5,
+			expected: "/biographies-list/page/5/",
+		},
+		{
+			name:     "no trailing slash",
+			path:     "/list/page/3",
+			newPage:  8,
+			expected: "/list/page/8",
+		},
+		{
+			name:     "dollar sign in path",
+			path:     "/path/with$/page/1/",
+			newPage:  3,
+			expected: "/path/with$/page/3/",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := pageRe.FindStringSubmatch(tt.path)
+			if m == nil {
+				t.Fatalf("regex did not match %q", tt.path)
+			}
+			newPath := fmt.Sprintf("%s/page/%d", m[1], tt.newPage)
+			if strings.HasSuffix(tt.path, "/") {
+				newPath += "/"
+			}
+			if newPath != tt.expected {
+				t.Errorf("got %q, want %q", newPath, tt.expected)
 			}
 		})
 	}

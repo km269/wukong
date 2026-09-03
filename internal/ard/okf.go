@@ -8,10 +8,12 @@
 // and MCP servers.
 //
 // New media type:
-//   application/okf-bundle+json — identifies an OKF Bundle entry
+//
+//	application/okf-bundle+json — identifies an OKF Bundle entry
 //
 // URN format for OKF entries:
-//   urn:air:<publisher>:knowledge:<bundle-name>
+//
+//	urn:air:<publisher>:knowledge:<bundle-name>
 package ard
 
 import (

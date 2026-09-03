@@ -95,14 +95,27 @@ func (e *Executor) Execute(
 	}
 	e.mu.RUnlock()
 
-	// Acquire concurrency slot to prevent goroutine exhaustion.
+	// Try non-blocking acquire first for immediate rejection.
+	// If full and context is cancellable, block until a slot frees.
 	select {
 	case e.sem <- struct{}{}:
 		defer func() { <-e.sem }()
-	case <-ctx.Done():
-		return ExecutionResult{
-			Success: false,
-			Error:   "code execution rejected: too many concurrent executions",
+	default:
+		if ctx.Done() != nil {
+			select {
+			case e.sem <- struct{}{}:
+				defer func() { <-e.sem }()
+			case <-ctx.Done():
+				return ExecutionResult{
+					Success: false,
+					Error:   "code execution rejected: too many concurrent executions",
+				}
+			}
+		} else {
+			return ExecutionResult{
+				Success: false,
+				Error:   "code execution rejected: too many concurrent executions",
+			}
 		}
 	}
 
@@ -196,10 +209,22 @@ func (e *Executor) ExecuteWithTools(
 	select {
 	case e.sem <- struct{}{}:
 		defer func() { <-e.sem }()
-	case <-ctx.Done():
-		return ExecutionResult{
-			Success: false,
-			Error:   "code execution rejected: too many concurrent executions",
+	default:
+		if ctx.Done() != nil {
+			select {
+			case e.sem <- struct{}{}:
+				defer func() { <-e.sem }()
+			case <-ctx.Done():
+				return ExecutionResult{
+					Success: false,
+					Error:   "code execution rejected: too many concurrent executions",
+				}
+			}
+		} else {
+			return ExecutionResult{
+				Success: false,
+				Error:   "code execution rejected: too many concurrent executions",
+			}
 		}
 	}
 

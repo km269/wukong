@@ -19,38 +19,38 @@ const SpecVersion = "1.0"
 
 // ARD Media Types (IANA registered).
 const (
-	MediaTypeA2AAgentCard    = "application/a2a-agent-card+json"
-	MediaTypeMCPServerCard    = "application/mcp-server-card+json"
-	MediaTypeAICatalog        = "application/ai-catalog+json"
-	MediaTypeAIRegistry       = "application/ai-registry+json"
+	MediaTypeA2AAgentCard  = "application/a2a-agent-card+json"
+	MediaTypeMCPServerCard = "application/mcp-server-card+json"
+	MediaTypeAICatalog     = "application/ai-catalog+json"
+	MediaTypeAIRegistry    = "application/ai-registry+json"
 )
 
 // HostInfo represents the host organization information.
 type HostInfo struct {
 	DisplayName string `json:"displayName"`
-	Identifier string `json:"identifier"` // DID or FQDN
+	Identifier  string `json:"identifier"` // DID or FQDN
 }
 
 // CatalogEntry represents a single agentic resource entry in the catalog.
 type CatalogEntry struct {
 	// Required fields
-	Identifier  string `json:"identifier"`            // URN format: urn:air:<publisher>:<namespace>:<name>
-	DisplayName string `json:"displayName"`           // Human-readable name
-	Type       string `json:"type"`                   // IANA Media Type
+	Identifier  string `json:"identifier"`  // URN format: urn:air:<publisher>:<namespace>:<name>
+	DisplayName string `json:"displayName"` // Human-readable name
+	Type        string `json:"type"`        // IANA Media Type
 
 	// Exactly one of URL or Data must be present
 	URL  string          `json:"url,omitempty"`  // Remote reference
 	Data json.RawMessage `json:"data,omitempty"` // Embedded document
 
 	// Optional fields
-	Description          string            `json:"description,omitempty"`
-	Tags                 []string          `json:"tags,omitempty"`
-	Capabilities         []string         `json:"capabilities,omitempty"`         // Tool/skill names for filtering
-	RepresentativeQueries []string        `json:"representativeQueries,omitempty"` // 2-5 sample queries for embedding
-	Version              string            `json:"version,omitempty"`
-	UpdatedAt            string            `json:"updatedAt,omitempty"` // ISO 8601
-	Metadata             map[string]any   `json:"metadata,omitempty"`
-	TrustManifest        *TrustManifest    `json:"trustManifest,omitempty"`
+	Description           string         `json:"description,omitempty"`
+	Tags                  []string       `json:"tags,omitempty"`
+	Capabilities          []string       `json:"capabilities,omitempty"`          // Tool/skill names for filtering
+	RepresentativeQueries []string       `json:"representativeQueries,omitempty"` // 2-5 sample queries for embedding
+	Version               string         `json:"version,omitempty"`
+	UpdatedAt             string         `json:"updatedAt,omitempty"` // ISO 8601
+	Metadata              map[string]any `json:"metadata,omitempty"`
+	TrustManifest         *TrustManifest `json:"trustManifest,omitempty"`
 }
 
 // HasURL returns true if entry uses URL reference.
@@ -74,9 +74,9 @@ func (e *CatalogEntry) IsValid() bool {
 
 // AICatalog represents the capability manifest (ai-catalog.json).
 type AICatalog struct {
-	SpecVersion string          `json:"specVersion"`
-	Host       HostInfo        `json:"host"`
-	Entries    []CatalogEntry  `json:"entries"`
+	SpecVersion string         `json:"specVersion"`
+	Host        HostInfo       `json:"host"`
+	Entries     []CatalogEntry `json:"entries"`
 }
 
 // NewAICatalog creates a new catalog with the given host info.
@@ -143,10 +143,10 @@ func (c *AICatalog) FilterEntries(filter EntryFilter) []CatalogEntry {
 
 // EntryFilter defines criteria for filtering catalog entries.
 type EntryFilter struct {
-	Type        string
-	Tags        []string
+	Type         string
+	Tags         []string
 	Capabilities []string
-	Query       string // For text search
+	Query        string // For text search
 }
 
 // Matches checks if an entry matches the filter criteria.
@@ -237,8 +237,8 @@ func contains(s, substr string) bool {
 
 // TrustManifest contains verifiable identity and trust metadata.
 type TrustManifest struct {
-	Identity     string       `json:"identity"`      // SPIFFE URI or similar
-	IdentityType string       `json:"identityType"` // spiffe, did, etc.
+	Identity     string        `json:"identity"`     // SPIFFE URI or similar
+	IdentityType string        `json:"identityType"` // spiffe, did, etc.
 	Attestations []Attestation `json:"attestations,omitempty"`
 }
 
@@ -257,10 +257,10 @@ type ProvenanceLink struct {
 
 // SearchRequest represents an ARD search request.
 type SearchRequest struct {
-	Query    string      `json:"query"`
-	Filters  SearchFilters `json:"filters,omitempty"`
-	Limit   int         `json:"limit,omitempty"`
-	Offset  int         `json:"offset,omitempty"`
+	Query   string        `json:"query"`
+	Filters SearchFilters `json:"filters,omitempty"`
+	Limit   int           `json:"limit,omitempty"`
+	Offset  int           `json:"offset,omitempty"`
 }
 
 // SearchFilters defines search filtering criteria.
@@ -274,19 +274,19 @@ type SearchFilters struct {
 // SearchResponse represents an ARD search response.
 type SearchResponse struct {
 	Results []SearchResult `json:"results"`
-	Total  int            `json:"total"`
-	Query  string         `json:"query"`
+	Total   int            `json:"total"`
+	Query   string         `json:"query"`
 }
 
 // SearchResult represents a single search result.
 type SearchResult struct {
 	Identifier  string          `json:"identifier"`
-	DisplayName string         `json:"displayName"`
-	Type       string          `json:"type"`
-	URL        string          `json:"url,omitempty"`
-	Data       json.RawMessage `json:"data,omitempty"`
-	Description string         `json:"description,omitempty"`
-	Score      float64         `json:"score"` // Relevance score 0-1
+	DisplayName string          `json:"displayName"`
+	Type        string          `json:"type"`
+	URL         string          `json:"url,omitempty"`
+	Data        json.RawMessage `json:"data,omitempty"`
+	Description string          `json:"description,omitempty"`
+	Score       float64         `json:"score"` // Relevance score 0-1
 }
 
 // ExploreRequest represents an ARD explore request (optional).
@@ -300,13 +300,13 @@ type ExploreRequest struct {
 // ExploreResponse represents an ARD explore response (optional).
 type ExploreResponse struct {
 	Entries []CatalogEntry `json:"entries"`
-	Total   int           `json:"total"`
+	Total   int            `json:"total"`
 }
 
 // ListResponse represents a list of catalog entries (optional).
 type ListResponse struct {
 	Entries []CatalogEntry `json:"entries"`
-	Total   int           `json:"total"`
+	Total   int            `json:"total"`
 }
 
 // ErrorResponse represents an ARD error response.

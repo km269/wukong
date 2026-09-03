@@ -14,7 +14,6 @@ on:
 permissions:
   contents: write
   packages: write
-  id-token: write
 
 jobs:
   goreleaser:
@@ -28,7 +27,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.26"
           cache: true
 
       - name: Set up QEMU (for arm64 Docker builds)
@@ -43,13 +42,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Import GPG key (for signing)
-        id: import_gpg
-        uses: crazy-max/ghaction-import-gpg@v6
-        with:
-          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
-          passphrase: ${{ secrets.GPG_PASSPHRASE }}
 
       - name: Determine release mode
         id: mode
@@ -68,18 +60,3 @@ jobs:
           args: release ${{ steps.mode.outputs.args }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GPG_FINGERPRINT: ${{ steps.import_gpg.outputs.fingerprint }}
-
-  checksums:
-    needs: goreleaser
-    runs-on: ubuntu-latest
-    steps:
-      - uses: sigstore/cosign-installer@v3
-
-      - name: Sign checksums
-        env:
-          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
-          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
-        run: |
-          # Workflow level sign is handled by the goreleaser sign pipe
-          echo "Cosign signing ready"

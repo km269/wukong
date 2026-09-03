@@ -15,9 +15,9 @@ func TestNewStore_SQLite(t *testing.T) {
 	defer pool.Close()
 
 	cfg := &config.RecallConfig{
-		Backend:              "sqlite",
-		DBPath:               dbPath,
-		MaxResults:           10,
+		Backend:               "sqlite",
+		DBPath:                dbPath,
+		MaxResults:            10,
 		MaxMessagesPerSession: 50,
 	}
 	store, err := NewStore(cfg, pool)
@@ -41,9 +41,9 @@ func TestStore_StoreAndSearch_LIKE(t *testing.T) {
 	defer pool.Close()
 
 	cfg := &config.RecallConfig{
-		Backend:              "sqlite",
-		DBPath:               dbPath,
-		MaxResults:           10,
+		Backend:               "sqlite",
+		DBPath:                dbPath,
+		MaxResults:            10,
 		MaxMessagesPerSession: 5,
 	}
 	store, err := NewStore(cfg, pool)
@@ -89,9 +89,9 @@ func TestStore_StoreMultipleMessages(t *testing.T) {
 	defer pool.Close()
 
 	cfg := &config.RecallConfig{
-		Backend:              "sqlite",
-		DBPath:               dbPath,
-		MaxResults:           10,
+		Backend:               "sqlite",
+		DBPath:                dbPath,
+		MaxResults:            10,
 		MaxMessagesPerSession: 3,
 	}
 	store, err := NewStore(cfg, pool)
@@ -132,9 +132,9 @@ func TestStore_DeleteSession(t *testing.T) {
 	defer pool.Close()
 
 	cfg := &config.RecallConfig{
-		Backend:              "sqlite",
-		DBPath:               dbPath,
-		MaxResults:           10,
+		Backend:               "sqlite",
+		DBPath:                dbPath,
+		MaxResults:            10,
 		MaxMessagesPerSession: 100,
 	}
 	store, err := NewStore(cfg, pool)
@@ -176,9 +176,9 @@ func TestStore_SearchBySession(t *testing.T) {
 	defer pool.Close()
 
 	cfg := &config.RecallConfig{
-		Backend:              "sqlite",
-		DBPath:               dbPath,
-		MaxResults:           10,
+		Backend:               "sqlite",
+		DBPath:                dbPath,
+		MaxResults:            10,
 		MaxMessagesPerSession: 100,
 	}
 	store, err := NewStore(cfg, pool)
@@ -231,9 +231,9 @@ func TestStore_SearchWithEmptyUserID(t *testing.T) {
 	defer pool.Close()
 
 	cfg := &config.RecallConfig{
-		Backend:              "sqlite",
-		DBPath:               dbPath,
-		MaxResults:           10,
+		Backend:               "sqlite",
+		DBPath:                dbPath,
+		MaxResults:            10,
 		MaxMessagesPerSession: 100,
 	}
 	store, err := NewStore(cfg, pool)

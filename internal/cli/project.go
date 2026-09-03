@@ -161,17 +161,20 @@ func runProjectInteractive(configPath string) error {
 
 	switch strings.ToLower(action) {
 	case "r", "recover":
-		fmt.Printf(
-			"\nTo recover, run:\n"+
-				"  cd %s && wukong session --session-id %s\n",
-			selected.Path, selected.SessionID)
-		// Auto-cd prompt for convenience.
-		currentDir, _ := os.Getwd()
-		if currentDir != selected.Path {
-			fmt.Printf("\nCurrent directory differs. "+
-				"Change first:\n  cd %s\n",
-				selected.Path)
+		// Directly start the session with the selected project
+		// directory and the recorded session ID, reusing the full
+		// bootstrap chain (same path as `wukong session`).
+		// chdir first: the agent and its tools resolve paths via
+		// os.Getwd(), so the session must run inside the project.
+		if err := os.Chdir(selected.Path); err != nil {
+			return fmt.Errorf("chdir to %s: %w",
+				selected.Path, err)
 		}
+		fmt.Printf("\nResuming session %s in %s...\n",
+			selected.SessionID[:8], selected.Path)
+		return startInteractiveSession(
+			configPath, "", "", -1, 0, false,
+			selected.SessionID, selected.Path)
 	case "n", "new":
 		fmt.Printf(
 			"\nTo start a fresh session:\n"+

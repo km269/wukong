@@ -19,9 +19,9 @@ BUILD_DATE  := $(shell date -u '+%Y-%m-%d_%H:%M:%S' 2>/dev/null || echo "unknown
 GO          := go
 GOFLAGS     := -trimpath
 LDFLAGS     := -s -w \
-	-X github.com/km269/wukong/internal/cli.Version=$(VERSION) \
-	-X github.com/km269/wukong/internal/cli.GitCommit=$(GIT_COMMIT) \
-	-X github.com/km269/wukong/internal/cli.BuildDate=$(BUILD_DATE)
+	-X github.com/km269/wukong/internal/util.Version=$(VERSION) \
+	-X github.com/km269/wukong/internal/util.GitCommit=$(GIT_COMMIT) \
+	-X github.com/km269/wukong/internal/util.BuildDate=$(BUILD_DATE)
 
 # Directories
 BUILD_DIR   := build

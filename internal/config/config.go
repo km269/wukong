@@ -8,10 +8,19 @@
 // # File Organization
 //
 // The config package is split across multiple files for maintainability:
-//   - config.go   — WukongConfig root struct, Loader, query helpers
-//   - types.go    — All sub-configuration struct type definitions
-//   - defaults.go — Built-in default values (setDefaults)
-//   - validate.go — Configuration validation (Validate, Warnings)
+//   - config.go              — WukongConfig root struct, Loader, query helpers
+//   - types_provider.go      — Provider & extension types
+//   - types_agent.go         — Agent & security (incl. sandbox) types
+//   - types_storage.go       — Session/memory/todo/recall types
+//   - types_cortex.go        — Cortex stack & revision types
+//   - types_browser.go       — Browser/search/proxy types
+//   - types_features.go      — Feature-tool types (visualiser, code_mode, ...)
+//   - types_apps.go          — Apps (clone & pack) types
+//   - types_orchestration.go — Orchestration & discovery types
+//   - types_server.go        — Service endpoint types (A2A/ACP/MCP/AG-UI)
+//   - types_observability.go — Telemetry/eval/artifact types
+//   - defaults.go            — Built-in default values (setDefaults)
+//   - validate.go            — Configuration validation (Validate, Warnings)
 //
 // # Configuration Priority
 //
@@ -30,21 +39,35 @@
 //
 // # Environment Variable Expansion
 //
-// API keys and secrets support ${ENV_VAR} syntax for runtime expansion.
-// This applies to:
-//   - providers[].api_key
-//   - summon.a2a_remotes[].api_key
-//   - summon.a2a_remotes[].jwt_secret
+// API keys, secrets, URLs, models, and other configurable string fields
+// support ${ENV_VAR} syntax for runtime expansion via expandSecrets().
+// Bash-style ${VAR:-default} fallback is also supported. Unresolved
+// ${VAR} references (no fallback, VAR unset) are surfaced via Warnings()
+// so typos like ${OEPNAI_API_KEY} are visible.
+//
+// Expansion is tag-driven: every string field whose struct tag includes
+// envexpand:"true" participates automatically. The walk is recursive
+// (nested structs, pointers to structs, and slices of structs), so a
+// field opts in exactly once at its definition site — no separate
+// field list to keep in sync. Currently tagged fields include
+// providers[].{api_key,base_url,model}, summon.a2a_remotes[].secrets,
+// gateway.feishu secrets, server endpoint security.auth.{api_key,
+// jwt_secret}, cortex.{embedding,reranker,vertical_routing} settings,
+// memoryflow/graphflow models, dify.{base_url,api_secret},
+// session.redis_url, memory.extractor_*, and all browser.search
+// backend keys.
 package config
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"runtime"
 	"strings"
-	"time"
 
+	"github.com/km269/wukong/internal/gateway"
 	"github.com/spf13/viper"
 )
 
@@ -76,7 +99,7 @@ func ResolvePath(rawPath string) string {
 // subsystem configurations for the wukong AI agent platform.
 //
 // Each field corresponds to a YAML section in config.yaml. Sub-config
-// struct types are defined in types.go.
+// struct types are defined in the types_*.go files.
 type WukongConfig struct {
 	// DefaultProvider is the name of the default LLM provider.
 	// Must match a ProviderConfig.Name in the Providers list.
@@ -193,9 +216,10 @@ type WukongConfig struct {
 	// Workflow configures multi-mode agent orchestration.
 	Workflow WorkflowConfig `mapstructure:"workflow"`
 
-	// Gateway configures the multi-platform messaging gateway
-	// (Feishu, WeCom, Slack, etc.).
-	Gateway GatewayConfig `mapstructure:"gateway"`
+	// Gateway configures the messaging gateway
+	// (Feishu, etc.). Each channel owns its own inbound transport.
+	// The type lives in internal/gateway; the root config embeds it.
+	Gateway gateway.GatewayConfig `mapstructure:"gateway"`
 
 	// A2AServer configures the local A2A protocol server.
 	A2AServer A2AServerConfig `mapstructure:"a2a_server"`
@@ -212,15 +236,19 @@ type WukongConfig struct {
 	// as an MCP Server for ACP agents.
 	ACPMCP ACPMCPConfig `mapstructure:"acp_mcp"`
 
+	// MCPServer configures the standalone MCP server that exposes
+	// Wukong extensions via the MCP JSON-RPC 2.0 protocol.
+	MCPServer MCPServerConfig `mapstructure:"mcp_server"`
+
 	// Telemetry configures OpenTelemetry observability.
 	Telemetry TelemetryConfig `mapstructure:"telemetry"`
 
 	// Eval configures the evaluation/regression testing system.
 	Eval EvalConfig `mapstructure:"eval"`
 
-	// ArtifactConfig configures artifact storage backend
+	// Artifact configures artifact storage backend
 	// settings.
-	ArtifactConfig ArtifactConfig `mapstructure:"artifact"`
+	Artifact ArtifactConfig `mapstructure:"artifact"`
 
 	// Observability configures enhanced observability
 	// (Langfuse, etc.).
@@ -229,6 +257,13 @@ type WukongConfig struct {
 	// ProjectDir is the directory for project tracking data.
 	// Default: ~/.config/wukong/ (resolved at runtime).
 	ProjectDir string `mapstructure:"project_dir"`
+
+	// unresolvedEnvVars tracks ${VAR} references (without :-default)
+	// that could not be resolved because VAR is unset in the
+	// environment. Populated by expandSecrets during Load() and
+	// surfaced via Warnings() so users can spot typos like
+	// ${OEPNAI_API_KEY}. Not populated from YAML directly.
+	unresolvedEnvVars []string `mapstructure:"-"`
 }
 
 // ============================================================================
@@ -299,71 +334,226 @@ func NewLoader(configPath string) (*Loader, error) {
 	return l, nil
 }
 
+// expandEnv expands ${ENV_VAR} and ${ENV_VAR:-default} syntax.
+// Unlike os.ExpandEnv, it supports the bash-style ${VAR:-default} fallback.
+func expandEnv(s string) string {
+	return os.Expand(s, func(key string) string {
+		if idx := strings.Index(key, ":-"); idx != -1 {
+			varName := key[:idx]
+			defaultVal := key[idx+2:]
+			if val := os.Getenv(varName); val != "" {
+				return val
+			}
+			return defaultVal
+		}
+		return os.Getenv(key)
+	})
+}
+
+// unresolvedVarRE matches ${VAR} references that do NOT use the
+// ${VAR:-default} fallback form. These references silently resolve
+// to empty strings when VAR is unset, which usually indicates a
+// typo or missing environment configuration.
+var unresolvedVarRE = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// expandEnvTracked is expandEnv with unresolved-variable tracking.
+// For each ${VAR} (without :-default) in the input where VAR is
+// unset, a descriptive message is appended to *unresolved so the
+// caller can surface it via Warnings().
+func expandEnvTracked(s, field string, unresolved *[]string) string {
+	if !strings.Contains(s, "${") {
+		return s
+	}
+	for _, m := range unresolvedVarRE.FindAllStringSubmatch(s, -1) {
+		if os.Getenv(m[1]) == "" {
+			*unresolved = append(*unresolved,
+				fmt.Sprintf("%s references unset env var ${%s}", field, m[1]))
+		}
+	}
+	return expandEnv(s)
+}
+
+// expandSecrets expands ${ENV_VAR} references in all string fields
+// tagged envexpand:"true". This is a security measure that keeps
+// secrets out of config files and version control.
+//
+// The walk is reflection-based and driven entirely by struct tags:
+// adding envexpand:"true" to a new string field (including fields in
+// nested structs, pointer structs, or slices of structs owned by other
+// packages such as gateway and server) is sufficient — there is no
+// parallel field list to maintain.
+//
+// Unresolved ${VAR} references (no :-default, VAR unset) are recorded
+// in cfg.unresolvedEnvVars and surfaced via Warnings() so users can
+// spot typos like ${OEPNAI_API_KEY}.
+func (l *Loader) expandSecrets(cfg *WukongConfig) {
+	expandEnvFields(reflect.ValueOf(cfg).Elem(), "",
+		&cfg.unresolvedEnvVars)
+}
+
+// expandEnvFields recursively walks a configuration struct and expands
+// every settable string field tagged envexpand:"true". prefix is the
+// dotted config path of v (empty at the root); it is used only to
+// build human-readable diagnostics.
+func expandEnvFields(v reflect.Value, prefix string, unresolved *[]string) {
+	if v.Kind() == reflect.Ptr {
+		if v.IsNil() {
+			return
+		}
+		expandEnvFields(v.Elem(), prefix, unresolved)
+		return
+	}
+	if v.Kind() != reflect.Struct {
+		return
+	}
+
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if field.PkgPath != "" {
+			continue // unexported
+		}
+		tag, ok := field.Tag.Lookup("mapstructure")
+		if !ok {
+			continue
+		}
+		key := strings.Split(tag, ",")[0]
+		if key == "" || key == "-" {
+			continue
+		}
+
+		fv := v.Field(i)
+		path := key
+		if prefix != "" {
+			path = prefix + "." + key
+		}
+
+		if _, expand := field.Tag.Lookup("envexpand"); expand &&
+			fv.Kind() == reflect.String && fv.CanSet() {
+			fv.SetString(expandEnvTracked(fv.String(), path, unresolved))
+			continue
+		}
+
+		switch fv.Kind() {
+		case reflect.Struct:
+			expandEnvFields(fv, path, unresolved)
+		case reflect.Ptr, reflect.Slice:
+			if fv.Type().Elem().Kind() != reflect.Struct {
+				continue
+			}
+			if fv.Kind() == reflect.Ptr {
+				expandEnvFields(fv, path, unresolved)
+				continue
+			}
+			for j := 0; j < fv.Len(); j++ {
+				elem := fv.Index(j)
+				// Prefer a human-readable element identifier
+				// (the element's Name field) over a bare index.
+				id := fmt.Sprintf("%d", j)
+				if n := elem.FieldByName("Name"); n.IsValid() &&
+					n.Kind() == reflect.String && n.String() != "" {
+					id = n.String()
+				}
+				expandEnvFields(elem,
+					fmt.Sprintf("%s[%s]", path, id), unresolved)
+			}
+		}
+	}
+}
+
 // Load parses the configuration into a WukongConfig.
 // Results are cached; subsequent calls return the same instance.
 func (l *Loader) Load() (*WukongConfig, error) {
-	if l.config != nil {
-		return l.config, nil
+	cfg, err := l.loadUnmarshaled()
+	if err != nil {
+		return nil, err
 	}
 
+	// Expand ${ENV_VAR} references in all secret fields.
+	l.expandSecrets(cfg)
+
+	l.config = cfg
+	return l.config, nil
+}
+
+// loadUnmarshaled unmarshals the configuration from Viper's merged
+// view (config file + env overrides + defaults) without expanding
+// ${ENV_VAR} references. It caches nothing, so callers that need
+// the raw (unexpanded) form, such as the `wukong configure --edit`
+// wizard baseline, can use it without persisting expanded secrets.
+func (l *Loader) loadUnmarshaled() (*WukongConfig, error) {
 	var cfg WukongConfig
 	if err := l.v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
+	return &cfg, nil
+}
 
-	// Expand ${ENV_VAR} references in API keys.
-	for i := range cfg.Providers {
-		cfg.Providers[i].APIKey = os.ExpandEnv(cfg.Providers[i].APIKey)
+// LoadUnresolved returns the configuration exactly as stored on
+// disk (plus defaults/env overrides), with ${ENV_VAR} secret
+// references left untouched. Used by the configure --edit wizard:
+// editing must round-trip the file's own values rather than the
+// expanded secrets, otherwise editing any unrelated field would
+// persist the expanded key material.
+func (l *Loader) LoadUnresolved() (*WukongConfig, error) {
+	return l.loadUnmarshaled()
+}
+
+// SecretValues returns all secret values that have been expanded
+// into the loaded configuration, for output redaction. It collects:
+//
+//   - providers[].api_key
+//   - extensions[].env values whose key looks like a secret
+//     (contains "key", "secret", "token", "password", or "credential")
+//   - summon.a2a_remotes[].{api_key, jwt_secret, oauth_client_secret}
+//   - server endpoint security.auth.{api_key, jwt_secret}
+//   - gateway AppSecret/EncryptKey/VerificationToken
+//
+// Values shorter than 2 characters are never yielded (they cannot be
+// meaningfully redacted). The returned slice is intended to be passed
+// to util.RedactSecrets before printing assistant/tool output.
+func (c *WukongConfig) SecretValues() []string {
+	var out []string
+	add := func(s string) {
+		if len(s) >= 2 {
+			out = append(out, s)
+		}
 	}
 
-	// Expand env vars in A2A remote secrets.
-	for i := range cfg.Summon.A2ARemotes {
-		cfg.Summon.A2ARemotes[i].APIKey =
-			os.ExpandEnv(cfg.Summon.A2ARemotes[i].APIKey)
-		cfg.Summon.A2ARemotes[i].JWTSecret =
-			os.ExpandEnv(cfg.Summon.A2ARemotes[i].JWTSecret)
+	for _, p := range c.Providers {
+		add(p.APIKey)
 	}
-
-	// Expand env vars in gateway channel secrets.
-	cfg.Gateway.Feishu.AppSecret =
-		os.ExpandEnv(cfg.Gateway.Feishu.AppSecret)
-	cfg.Gateway.Feishu.EncryptKey =
-		os.ExpandEnv(cfg.Gateway.Feishu.EncryptKey)
-	cfg.Gateway.Feishu.VerificationToken =
-		os.ExpandEnv(cfg.Gateway.Feishu.VerificationToken)
-	cfg.Gateway.WeCom.Secret =
-		os.ExpandEnv(cfg.Gateway.WeCom.Secret)
-	cfg.Gateway.WeCom.Token =
-		os.ExpandEnv(cfg.Gateway.WeCom.Token)
-	cfg.Gateway.WeCom.EncodingAESKey =
-		os.ExpandEnv(cfg.Gateway.WeCom.EncodingAESKey)
-
-	// Expand env vars in observability secrets.
-	cfg.Observability.LangfusePublicKey =
-		os.ExpandEnv(cfg.Observability.LangfusePublicKey)
-	cfg.Observability.LangfuseSecretKey =
-		os.ExpandEnv(cfg.Observability.LangfuseSecretKey)
-
-	// Expand env vars in artifact COS credentials.
-	cfg.ArtifactConfig.COSSecretID =
-		os.ExpandEnv(cfg.ArtifactConfig.COSSecretID)
-	cfg.ArtifactConfig.COSSecretKey =
-		os.ExpandEnv(cfg.ArtifactConfig.COSSecretKey)
-
-	// Expand env vars in ACPServer API key.
-	cfg.ACPServer.APIKey =
-		os.ExpandEnv(cfg.ACPServer.APIKey)
-
-	// Expand env vars in CortexDB embedding API key.
-	cfg.Cortex.EmbeddingAPIKey =
-		os.ExpandEnv(cfg.Cortex.EmbeddingAPIKey)
-
-	// Expand env vars in Dify API secret.
-	cfg.Dify.APISecret =
-		os.ExpandEnv(cfg.Dify.APISecret)
-
-	l.config = &cfg
-	return l.config, nil
+	for _, ext := range c.Extensions {
+		for k, v := range ext.Env {
+			kl := strings.ToLower(strings.TrimSpace(k))
+			if strings.Contains(kl, "key") ||
+				strings.Contains(kl, "secret") ||
+				strings.Contains(kl, "token") ||
+				strings.Contains(kl, "password") ||
+				strings.Contains(kl, "credential") {
+				add(v)
+			}
+		}
+	}
+	for _, r := range c.Summon.A2ARemotes {
+		add(r.APIKey)
+		add(r.JWTSecret)
+		add(r.OAuthClientSecret)
+	}
+	for _, sec := range []ServerSecurityConfig{
+		c.AGUI.Security,
+		c.ACPServer.Security,
+		c.MCPServer.Security,
+	} {
+		add(sec.Auth.APIKey)
+		add(sec.Auth.JWTSecret)
+	}
+	if w := c.Gateway.Feishu; w.Enabled {
+		add(w.AppSecret)
+		add(w.EncryptKey)
+		add(w.VerificationToken)
+	}
+	return out
 }
 
 // LoadAndValidate loads the configuration and then validates it.
@@ -386,6 +576,35 @@ func (l *Loader) GetConfig() *WukongConfig {
 	return l.config
 }
 
+// ConfigFileUsed returns the path of the config file the loader
+// actually read, or "" when running purely on built-in defaults.
+// Delegates to Viper so callers (e.g. `wukong config show`) never
+// need to re-implement the search-path priority.
+func (l *Loader) ConfigFileUsed() string {
+	return l.v.ConfigFileUsed()
+}
+
+// Defaults returns a WukongConfig populated exclusively from the
+// built-in default values — no YAML file and no environment
+// overrides are consulted. It is the single source of truth for
+// code-level defaults; callers that need a "fresh default config"
+// (e.g. the `wukong configure` wizard) must use it instead of
+// hand-maintaining a second copy that would drift.
+func Defaults() *WukongConfig {
+	v := viper.New()
+	l := &Loader{v: v}
+	l.setDefaults()
+
+	var cfg WukongConfig
+	if err := v.Unmarshal(&cfg); err != nil {
+		// Defaults are plain literals; unmarshal cannot fail.
+		// Panic is the only sane reaction to a programming error
+		// this early, before any caller could handle it.
+		panic(fmt.Sprintf("config: unmarshal built-in defaults: %v", err))
+	}
+	return &cfg
+}
+
 // ============================================================================
 // Configuration Query Helpers
 // ============================================================================
@@ -405,6 +624,67 @@ func (c *WukongConfig) FindProvider(name string) *ProviderConfig {
 // provider. Returns nil if the default provider is not found.
 func (c *WukongConfig) DefaultProviderConfig() *ProviderConfig {
 	return c.FindProvider(c.DefaultProvider)
+}
+
+// defaultContextWindowByType returns a conservative default context
+// window for a provider type when ContextWindow is not explicitly set.
+// Values reflect the lowest commonly-available tier for each family to
+// avoid overflow on small-footprint deployments. Users should set
+// ProviderConfig.ContextWindow explicitly when the actual model differs.
+func defaultContextWindowByType(t ProviderType) int {
+	switch t {
+	case ProviderOpenAI:
+		// gpt-4o family: 128K, but older gpt-3.5 tiers were 16K.
+		// Conservative default: 16K; users with gpt-4o should override.
+		return 16000
+	case ProviderAnthropic:
+		// claude-sonnet-4: 200K. Conservative default: 100K.
+		return 100000
+	case ProviderGoogle, ProviderGemini:
+		// gemini-2.0-flash: 1M. Conservative default: 32K.
+		return 32000
+	case ProviderDeepSeek:
+		// deepseek-chat: 64K.
+		return 64000
+	case ProviderOllama, ProviderLMStudio, ProviderVLLM:
+		// Local inference servers vary widely. Default to 8K — a
+		// floor that nearly all locally-served models exceed. Users
+		// must set ContextWindow explicitly for accurate clamping.
+		return 8000
+	case ProviderACP:
+		// ACP agents vary; default to 32K.
+		return 32000
+	default:
+		return 32000
+	}
+}
+
+// EffectiveContextWindow returns the effective context window for the
+// provider. If ContextWindow is set explicitly, that value wins;
+// otherwise fall back to defaultContextWindowByType. Returns 0 if p is nil.
+func (p *ProviderConfig) EffectiveContextWindow() int {
+	if p == nil {
+		return 0
+	}
+	if p.ContextWindow > 0 {
+		return p.ContextWindow
+	}
+	return defaultContextWindowByType(ProviderType(p.Type))
+}
+
+// EffectiveContextWindowForDefault returns the effective context window
+// for the default provider. Falls back to Revision.MaxContextTokens when
+// no default provider is configured. This is the value ContextRevisionEngine
+// should clamp against.
+func (c *WukongConfig) EffectiveContextWindowForDefault() int {
+	if p := c.DefaultProviderConfig(); p != nil {
+		return p.EffectiveContextWindow()
+	}
+	// No provider — use Revision as the configured global limit.
+	if c.Revision.MaxContextTokens > 0 {
+		return c.Revision.MaxContextTokens
+	}
+	return 32000
 }
 
 // EffectiveLightweightModel returns the effective lightweight model
@@ -451,31 +731,4 @@ func (c *WukongConfig) FindExtension(name string) *ExtensionConfig {
 		}
 	}
 	return nil
-}
-
-// EffectiveMemoryTTL returns the effective memory TTL duration.
-// Falls back to 720h (30 days) if MemoryTTL is zero.
-func (c *WukongConfig) EffectiveMemoryTTL() time.Duration {
-	if c.Memory.MemoryTTL > 0 {
-		return c.Memory.MemoryTTL
-	}
-	return 720 * time.Hour
-}
-
-// EffectiveCleanupTrigger returns the effective capacity fraction
-// that triggers memory cleanup. Falls back to 0.8 (80%).
-func (c *WukongConfig) EffectiveCleanupTrigger() float64 {
-	if c.Memory.CleanupTriggerThreshold > 0 {
-		return c.Memory.CleanupTriggerThreshold
-	}
-	return 0.8
-}
-
-// EffectiveCleanupTarget returns the effective target capacity
-// fraction after cleanup. Falls back to 0.6 (60%).
-func (c *WukongConfig) EffectiveCleanupTarget() float64 {
-	if c.Memory.CleanupTargetThreshold > 0 {
-		return c.Memory.CleanupTargetThreshold
-	}
-	return 0.6
 }

@@ -1,0 +1,24 @@
+# Normalize line endings: Go toolchain (gofmt/goimports) always writes LF.
+*.go text eol=lf
+*.mod text eol=lf
+*.sum text eol=lf
+
+# Shell scripts require LF for POSIX compatibility.
+*.sh text eol=lf
+
+# Windows batch files require CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Markdown/YAML/config: keep checkout-native but normalized on commit.
+*.md text
+*.yaml text
+*.yml text
+*.json text
+
+# Binary assets.
+*.png binary
+*.jpg binary
+*.ico binary
+*.exe binary
+*.zim binary

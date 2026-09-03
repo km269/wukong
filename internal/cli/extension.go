@@ -13,7 +13,6 @@ import (
 
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/extension"
-	"github.com/km269/wukong/internal/provider"
 	"github.com/km269/wukong/internal/security"
 	"github.com/km269/wukong/internal/util"
 )
@@ -271,7 +270,7 @@ func newExtensionListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List all registered extensions",
 		Long:  `List all registered MCP extensions with their status and details.`,
-		RunE: runExtensionList,
+		RunE:  runExtensionList,
 	}
 	return cmd
 }
@@ -507,18 +506,18 @@ Examples:
 func runExtensionRemove(cmd *cobra.Command, args []string) error {
 	name := args[0]
 
-	// Resolve the config file path first
-	resolvedCfg := resolveConfigPath("")
+	// Load configuration; the loader reports the file it actually
+	// read, so removal can fail early when running purely on
+	// built-in defaults (nothing on disk to edit).
+	loader, err := config.NewLoader("")
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	resolvedCfg := loader.ConfigFileUsed()
 	if resolvedCfg == "" {
 		return fmt.Errorf(
 			"config file not found — extension removal requires " +
 				"a config.yaml to write changes")
-	}
-
-	// Load configuration
-	loader, err := config.NewLoader("")
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
 	}
 	wukongCfg, err := loader.Load()
 	if err != nil {
@@ -572,7 +571,3 @@ func runExtensionRemove(cmd *cobra.Command, args []string) error {
 
 	return nil
 }
-
-// Ensure unused import warning is suppressed for provider package.
-var _ = provider.NewFactory
-var _ = util.Logger

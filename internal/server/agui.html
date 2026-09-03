@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wukong AG-UI Console</title>
+<!--
+  Reference client for Wukong's AG-UI SSE endpoint (roadmap P1-6).
+  Self-contained: no build step, no external assets, no CDN. Served
+  by the AG-UI server itself at "/" (same origin as /agui), so the
+  endpoint field below works out of the box and CORS never applies.
+
+  Wire protocol (internal/server/agui.go):
+    POST {endpoint}  body: {"user_id","session_id","message"}
+    SSE frames:      event: text_delta | tool_calls | error | done
+-->
+<style>
+  :root {
+    --bg: #0f1117; --panel: #171a23; --border: #262b38;
+    --text: #d7dae2; --dim: #7c8394; --accent: #6c9ef8;
+    --user: #2b4a7a; --tool: #3a3322; --err: #7a2e2e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.55 "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  header b { color: var(--accent); margin-right: 6px; }
+  header input {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 8px; font-size: 12px;
+  }
+  #endpoint { flex: 1 1 220px; }
+  #session { width: 210px; }
+  #apikey, #user { width: 130px; }
+  button {
+    background: var(--accent); color: #fff; border: 0; border-radius: 6px;
+    padding: 6px 12px; cursor: pointer; font-size: 12px;
+  }
+  button:disabled { opacity: .45; cursor: default; }
+  #log { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .bubble { max-width: 78%; padding: 8px 12px; border-radius: 10px; white-space: pre-wrap; word-break: break-word; }
+  .user { align-self: flex-end; background: var(--user); }
+  .assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
+  .tool, .error {
+    align-self: center; font-family: Consolas, monospace; font-size: 12px;
+    padding: 5px 10px; border-radius: 6px; max-width: 90%;
+  }
+  .tool { background: var(--tool); color: #d9c88a; }
+  .error { background: var(--err); color: #ffd9d9; }
+  footer {
+    display: flex; gap: 8px; padding: 10px 14px;
+    background: var(--panel); border-top: 1px solid var(--border);
+  }
+  #input {
+    flex: 1; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 9px 12px; font: inherit; resize: none; height: 44px;
+  }
+  .hint { color: var(--dim); font-size: 11px; margin: 0 14px 8px; }
+</style>
+</head>
+<body>
+<header>
+  <b>Wukong</b>
+  <input id="endpoint" placeholder="endpoint">
+  <input id="user" placeholder="user_id" value="agui-user">
+  <input id="session" placeholder="session_id (blank = new)">
+  <input id="apikey" type="password" placeholder="API key (optional)">
+  <button id="new" type="button">New session</button>
+</header>
+<div id="log"></div>
+<p class="hint">Enter to send · Shift+Enter for newline · the session id is
+adopted from the first reply so follow-ups stay in context</p>
+<footer>
+  <textarea id="input" placeholder="Say something to the agent…"></textarea>
+  <button id="send" type="button">Send</button>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var log = $("log"), input = $("input"), send = $("send");
+  $("endpoint").value = location.origin + "/agui";
+
+  function bubble(cls, text) {
+    var el = document.createElement("div");
+    el.className = "bubble " + cls;
+    el.textContent = text;
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+    return el;
+  }
+
+  function reset() {
+    $("session").value = "";
+    log.innerHTML = "";
+    bubble("assistant", "New session. Say hello.");
+  }
+  $("new").onclick = reset;
+  reset();
+
+  function setBusy(busy) {
+    send.disabled = busy;
+    input.disabled = busy;
+    if (!busy) input.focus();
+  }
+
+  function parseSSE(chunk, state) {
+    // Frames are separated by a blank line; each frame carries
+    // "event: <type>" and "data: <json>" lines.
+    state.buffer += chunk;
+    var frames = state.buffer.split("\n\n");
+    state.buffer = frames.pop();
+    frames.forEach(function (frame) {
+      var type = "", data = "";
+      frame.split("\n").forEach(function (line) {
+        if (line.indexOf("event: ") === 0) type = line.slice(7).trim();
+        if (line.indexOf("data: ") === 0) data += line.slice(6);
+      });
+      if (type && data) handleEvent(type, data);
+    });
+  }
+
+  var assistantEl = null;
+  function handleEvent(type, dataJSON) {
+    var data;
+    try { data = JSON.parse(dataJSON); } catch (e) { data = {}; }
+    if (type === "text_delta") {
+      if (!assistantEl) assistantEl = bubble("assistant", "");
+      assistantEl.textContent += (data.content || "");
+      log.scrollTop = log.scrollHeight;
+    } else if (type === "tool_calls") {
+      (data.tools || []).forEach(function (t) {
+        bubble("tool", "⚙ " + t.name + " " + (t.arguments || ""));
+      });
+    } else if (type === "error") {
+      bubble("error", "error: " + (data.message || "unknown"));
+    } else if (type === "done") {
+      if (data.session_id) $("session").value = data.session_id;
+      assistantEl = null;
+    }
+  }
+
+  function send1() {
+    var text = input.value.trim();
+    if (!text || send.disabled) return;
+    bubble("user", text);
+    input.value = "";
+    setBusy(true);
+
+    var headers = { "Content-Type": "application/json" };
+    var key = $("apikey").value.trim();
+    if (key) headers["X-API-Key"] = key;
+
+    fetch($("endpoint").value, {
+      method: "POST",
+      headers: headers,
+      body: JSON.stringify({
+        user_id: $("user").value.trim() || "agui-user",
+        session_id: $("session").value.trim(),
+        message: text
+      })
+    }).then(function (resp) {
+      if (!resp.ok) {
+        return resp.text().then(function (t) {
+          bubble("error", "HTTP " + resp.status + ": " + t);
+        });
+      }
+      var state = { buffer: "" };
+      var reader = resp.body.getReader();
+      var decoder = new TextDecoder();
+      function pump() {
+        return reader.read().then(function (chunk) {
+          if (chunk.done) { setBusy(false); return; }
+          parseSSE(decoder.decode(chunk, { stream: true }), state);
+          return pump();
+        });
+      }
+      return pump();
+    }).catch(function (err) {
+      bubble("error", "request failed: " + err);
+      setBusy(false);
+    });
+  }
+
+  send.onclick = send1;
+  input.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      send1();
+    }
+  });
+})();
+</script>
+</body>
+</html>

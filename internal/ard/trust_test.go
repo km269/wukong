@@ -113,13 +113,13 @@ func TestTrustedAttestation(t *testing.T) {
 	validUntil := time.Now().Add(365 * 24 * time.Hour)
 
 	att := TrustedAttestation{
-		Type:      AttestationTypeSOC2Type2,
-		URI:       "https://example.com/soc2.pdf",
-		Digest:    "sha256:abc123",
-		ValidFrom: &validFrom,
+		Type:       AttestationTypeSOC2Type2,
+		URI:        "https://example.com/soc2.pdf",
+		Digest:     "sha256:abc123",
+		ValidFrom:  &validFrom,
 		ValidUntil: &validUntil,
-		Issuer:    "Example Trust Authority",
-		Verified:  true,
+		Issuer:     "Example Trust Authority",
+		Verified:   true,
 	}
 
 	if att.Type != AttestationTypeSOC2Type2 {
@@ -207,8 +207,8 @@ func TestTrustVerifierVerifyTrust(t *testing.T) {
 		TrustScore:   0.8,
 		Attestations: []TrustedAttestation{
 			{
-				Type:      AttestationTypeSOC2Type2,
-				URI:       "https://example.com/soc2.pdf",
+				Type:       AttestationTypeSOC2Type2,
+				URI:        "https://example.com/soc2.pdf",
 				ValidUntil: &validUntil,
 			},
 		},
@@ -286,8 +286,8 @@ func TestTrustVerifierExpiredManifest(t *testing.T) {
 
 	expired := time.Now().Add(-24 * time.Hour)
 	manifest := &TrustedManifest{
-		Identity:   "did:web:test.com",
-		ExpiresAt:  &expired,
+		Identity:  "did:web:test.com",
+		ExpiresAt: &expired,
 	}
 
 	result, err := verifier.VerifyTrust(manifest)
@@ -435,8 +435,8 @@ func TestComplianceCheckerExpiredManifest(t *testing.T) {
 
 	expired := time.Now().Add(-24 * time.Hour)
 	manifest := &TrustedManifest{
-		Identity:   "did:web:test.com",
-		ExpiresAt:  &expired,
+		Identity:  "did:web:test.com",
+		ExpiresAt: &expired,
 	}
 
 	result := checker.CheckCompliance(manifest)
@@ -540,18 +540,18 @@ func TestProvenanceChain(t *testing.T) {
 	chain := &ProvenanceChain{
 		Links: []ProvenanceRecord{
 			{
-				Operation:   "create",
-				Actor:       "system@example.com",
-				Timestamp:   time.Now(),
+				Operation:    "create",
+				Actor:        "system@example.com",
+				Timestamp:    time.Now(),
 				PreviousHash: "",
-				Signature:   "sig1",
+				Signature:    "sig1",
 			},
 			{
-				Operation:   "update",
-				Actor:       "admin@example.com",
-				Timestamp:   time.Now(),
+				Operation:    "update",
+				Actor:        "admin@example.com",
+				Timestamp:    time.Now(),
 				PreviousHash: "sig1",
-				Signature:   "sig2",
+				Signature:    "sig2",
 			},
 		},
 	}
@@ -608,12 +608,12 @@ func TestProvenanceChainBuilderPreviousHash(t *testing.T) {
 
 func TestTrustPolicyConfig(t *testing.T) {
 	policy := &TrustPolicyConfig{
-		Name:                "strict",
-		Description:         "Strict trust policy",
-		MinTrustScore:       0.8,
+		Name:                 "strict",
+		Description:          "Strict trust policy",
+		MinTrustScore:        0.8,
 		RequiredAttestations: []AttestationType{AttestationTypeSOC2Type2},
 		AllowedIdentityTypes: []IdentityType{IdentityTypeSPIFFE, IdentityTypeDID},
-		TrustedPublishers:   []string{"trusted.com"},
+		TrustedPublishers:    []string{"trusted.com"},
 	}
 
 	if policy.Name != "strict" {
@@ -671,11 +671,11 @@ func TestComplianceViolation(t *testing.T) {
 
 func TestComplianceResult(t *testing.T) {
 	result := &ComplianceResult{
-		Compliant:       true,
-		Score:           1.0,
-		Violations:      []ComplianceViolation{},
-		Certifications:  []string{"SOC2-Type2"},
-		CheckedAt:       time.Now(),
+		Compliant:      true,
+		Score:          1.0,
+		Violations:     []ComplianceViolation{},
+		Certifications: []string{"SOC2-Type2"},
+		CheckedAt:      time.Now(),
 	}
 
 	if !result.Compliant {
@@ -697,8 +697,8 @@ func TestAttestationVerificationResult(t *testing.T) {
 			Type: AttestationTypeSOC2Type2,
 			URI:  "https://example.com/soc2.pdf",
 		},
-		Valid:   true,
-		Errors:  []string{},
+		Valid:    true,
+		Errors:   []string{},
 		Warnings: []string{"optional warning"},
 	}
 

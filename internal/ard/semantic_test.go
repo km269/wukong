@@ -122,24 +122,24 @@ func TestHybridSearch(t *testing.T) {
 
 	// Add test entries with valid URNs
 	err = registry.Register(CatalogEntry{
-		Identifier:   "urn:air:test.com:server:browser",
-		DisplayName:  "Browser Controller",
-		Type:         MediaTypeMCPServerCard,
-		URL:          "https://test.com/browser.json",
-		Description:  "Browser automation tool",
-		Tags:         []string{"browser", "automation"},
+		Identifier:  "urn:air:test.com:server:browser",
+		DisplayName: "Browser Controller",
+		Type:        MediaTypeMCPServerCard,
+		URL:         "https://test.com/browser.json",
+		Description: "Browser automation tool",
+		Tags:        []string{"browser", "automation"},
 	})
 	if err != nil {
 		t.Fatalf("Register browser error = %v", err)
 	}
 
 	err = registry.Register(CatalogEntry{
-		Identifier:   "urn:air:test.com:server:memory",
-		DisplayName:  "Memory Service",
-		Type:         MediaTypeMCPServerCard,
-		URL:          "https://test.com/memory.json",
-		Description:  "Long-term memory storage",
-		Tags:         []string{"memory", "knowledge"},
+		Identifier:  "urn:air:test.com:server:memory",
+		DisplayName: "Memory Service",
+		Type:        MediaTypeMCPServerCard,
+		URL:         "https://test.com/memory.json",
+		Description: "Long-term memory storage",
+		Tags:        []string{"memory", "knowledge"},
 	})
 	if err != nil {
 		t.Fatalf("Register memory error = %v", err)

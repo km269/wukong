@@ -57,6 +57,14 @@ func init() {
 		os.Exit(1)
 	}
 
+	// Apply process-level resource limits (RLIMIT_CPU/AS/FSIZE/NPROC)
+	// before exec so they bind the real command. setrlimit on self
+	// does not require elevated privileges.
+	if err := applyResourceLimits(&cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "sandbox: resource limits failed: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Resolve the real command path.
 	resolvedPath := realPath
 	if !filepath.IsAbs(resolvedPath) {

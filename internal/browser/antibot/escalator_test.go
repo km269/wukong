@@ -70,8 +70,8 @@ func TestEscalatorBackoff(t *testing.T) {
 	url := "https://blocked.example.com"
 
 	// 3 hits (exceeds MaxRetries of 2).
-	e.Check(url, ReasonForbidden, 403) // → LevelFlags, retry 1
-	e.Check(url, ReasonForbidden, 403) // → LevelStealth, retry 2
+	e.Check(url, ReasonForbidden, 403)                       // → LevelFlags, retry 1
+	e.Check(url, ReasonForbidden, 403)                       // → LevelStealth, retry 2
 	retry, _, level, _ := e.Check(url, ReasonForbidden, 403) // → LevelBackoff, retry 3
 
 	if retry {

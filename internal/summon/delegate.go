@@ -114,18 +114,18 @@ func (d *Delegate) Name() string {
 }
 
 // SummonManager manages multiple sub-agent delegates with
-// skills/recipes loading and lifecycle management.
+// delegate-definition loading and lifecycle management.
 type SummonManager struct {
 	mu        sync.RWMutex
 	cfg       *config.SummonConfig
 	delegates map[string]*Delegate
-	skills    map[string]SkillInfo
+	infos     map[string]DelegateInfo
 	model     model.Model
 	sem       chan struct{} // Concurrency limiter
 }
 
-// SkillInfo describes a loaded skill/recipe.
-type SkillInfo struct {
+// DelegateInfo describes a loaded delegate definition.
+type DelegateInfo struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	FilePath    string `json:"file_path"`
@@ -143,31 +143,32 @@ func NewSummonManager(
 	return &SummonManager{
 		cfg:       cfg,
 		delegates: make(map[string]*Delegate),
-		skills:    make(map[string]SkillInfo),
+		infos:     make(map[string]DelegateInfo),
 		model:     mdl,
 		sem:       make(chan struct{}, maxConcurrent),
 	}
 }
 
-// LoadSkills loads all skills/recipes from the skills directory.
-// Skills are Markdown files that define sub-agent behaviors.
-func (m *SummonManager) LoadSkills(ctx context.Context) error {
+// LoadDelegates loads all delegate definitions from the delegates
+// directory. Each Markdown file defines a sub-agent behavior that
+// becomes a Delegate instance available for sub-agent invocation.
+func (m *SummonManager) LoadDelegates(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	skillsDir := m.cfg.SkillsDir
-	if skillsDir == "" {
-		skillsDir = ".wukong_skills"
+	delegatesDir := m.cfg.DelegatesDir
+	if delegatesDir == "" {
+		delegatesDir = ".wukong/skills"
 	}
 
 	// Create directory if not exists
-	if err := os.MkdirAll(skillsDir, 0755); err != nil {
-		return fmt.Errorf("create skills dir: %w", err)
+	if err := os.MkdirAll(delegatesDir, 0755); err != nil {
+		return fmt.Errorf("create delegates dir: %w", err)
 	}
 
-	entries, err := os.ReadDir(skillsDir)
+	entries, err := os.ReadDir(delegatesDir)
 	if err != nil {
-		return fmt.Errorf("read skills dir: %w", err)
+		return fmt.Errorf("read delegates dir: %w", err)
 	}
 
 	for _, entry := range entries {
@@ -178,7 +179,7 @@ func (m *SummonManager) LoadSkills(ctx context.Context) error {
 			continue
 		}
 
-		filePath := filepath.Join(skillsDir, entry.Name())
+		filePath := filepath.Join(delegatesDir, entry.Name())
 		data, err := os.ReadFile(filePath)
 		if err != nil {
 			continue
@@ -187,20 +188,20 @@ func (m *SummonManager) LoadSkills(ctx context.Context) error {
 		content := string(data)
 		name := entry.Name()[:len(entry.Name())-3] // Remove .md
 
-		skill := SkillInfo{
+		info := DelegateInfo{
 			Name:        name,
 			Description: extractDescription(content),
 			FilePath:    filePath,
 			Instruction: content,
 		}
 
-		m.skills[name] = skill
+		m.infos[name] = info
 
-		// Create a delegate for this skill
+		// Create a delegate for this definition
 		delegate, err := NewDelegate(DelegateConfig{
 			Name:        "skill_" + name,
-			Description: skill.Description,
-			Instruction: skill.Instruction,
+			Description: info.Description,
+			Instruction: info.Instruction,
 			Model:       m.model,
 		})
 		if err != nil {
@@ -233,13 +234,14 @@ func (m *SummonManager) ListDelegates() []*Delegate {
 	return result
 }
 
-// ListSkills returns all loaded skills.
-func (m *SummonManager) ListSkills() []SkillInfo {
+// ListDelegateInfos returns metadata of all loaded delegate
+// definitions.
+func (m *SummonManager) ListDelegateInfos() []DelegateInfo {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	result := make([]SkillInfo, 0, len(m.skills))
-	for _, s := range m.skills {
+	result := make([]DelegateInfo, 0, len(m.infos))
+	for _, s := range m.infos {
 		result = append(result, s)
 	}
 	return result

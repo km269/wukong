@@ -9,6 +9,7 @@
 package cortex
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"math"
@@ -16,6 +17,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/km269/wukong/internal/migration"
 	"github.com/km269/wukong/internal/recall"
 )
 
@@ -41,16 +43,22 @@ func newLexicalStore(db *sql.DB) (*lexicalStore, error) {
 
 // storeMessage inserts a chat message into the chat_recall table.
 // Enforces MaxMessagesPerSession by pruning oldest messages.
+// Returns the auto-incremented message ID.
 func (ls *lexicalStore) storeMessage(
 	msg recall.ChatMessage, maxPerSession ...int,
-) error {
-	_, err := ls.db.Exec(
+) (int64, error) {
+	result, err := ls.db.Exec(
 		`INSERT INTO chat_recall (session_id, user_id, role, content, created_at)
 		 VALUES (?, ?, ?, ?, ?)`,
 		msg.SessionID, msg.UserID, msg.Role, msg.Content, msg.CreatedAt,
 	)
 	if err != nil {
-		return err
+		return 0, err
+	}
+
+	msgID, err := result.LastInsertId()
+	if err != nil {
+		return 0, err
 	}
 
 	// Enforce per-session message limit.
@@ -71,7 +79,7 @@ func (ls *lexicalStore) storeMessage(
 		)`,
 		msg.SessionID, limit, msg.SessionID,
 	)
-	return nil
+	return msgID, nil
 }
 
 // search performs FTS5 full-text search.
@@ -140,6 +148,9 @@ func (ls *lexicalStore) listSessions(userID string) ([]string, error) {
 			return nil, err
 		}
 		sessions = append(sessions, sid)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
 	}
 	return sessions, nil
 }
@@ -355,93 +366,10 @@ func (ls *lexicalStore) searchLikeBySession(
 // Schema initialization
 // ---------------------------------------------------------------------------
 
+// initSchema applies the versioned lexical-store migrations
+// (P0-3). The FTS5 set is optional on SQLite builds without FTS5.
 func (ls *lexicalStore) initSchema() error {
-	// Main recall table.
-	_, err := ls.db.Exec(`
-		CREATE TABLE IF NOT EXISTS chat_recall (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			session_id TEXT NOT NULL,
-			user_id TEXT NOT NULL,
-			role TEXT NOT NULL,
-			content TEXT NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);
-		CREATE INDEX IF NOT EXISTS idx_recall_session
-			ON chat_recall(session_id);
-		CREATE INDEX IF NOT EXISTS idx_recall_user
-			ON chat_recall(user_id);
-		CREATE INDEX IF NOT EXISTS idx_recall_created
-			ON chat_recall(created_at);
-	`)
-	if err != nil {
-		return err
-	}
-
-	// FTS5 virtual table for full-text search.
-	_, err = ls.db.Exec(`
-		CREATE VIRTUAL TABLE IF NOT EXISTS chat_recall_fts
-			USING fts5(
-				content,
-				content='chat_recall',
-				content_rowid='id',
-				tokenize='unicode61'
-			)
-	`)
-	if err != nil {
-		// FTS5 may not be available — non-fatal.
-	}
-
-	// FTS5 sync triggers.
-	_, _ = ls.db.Exec(`
-		CREATE TRIGGER IF NOT EXISTS recall_fts_insert
-		AFTER INSERT ON chat_recall
-		BEGIN
-			INSERT INTO chat_recall_fts(rowid, content)
-			VALUES (new.id, new.content);
-		END
-	`)
-	_, _ = ls.db.Exec(`
-		CREATE TRIGGER IF NOT EXISTS recall_fts_delete
-		AFTER DELETE ON chat_recall
-		BEGIN
-			INSERT INTO chat_recall_fts(
-				chat_recall_fts, rowid, content)
-			VALUES ('delete', old.id, old.content);
-		END
-	`)
-	_, _ = ls.db.Exec(`
-		CREATE TRIGGER IF NOT EXISTS recall_fts_update
-		AFTER UPDATE ON chat_recall
-		BEGIN
-			INSERT INTO chat_recall_fts(
-				chat_recall_fts, rowid, content)
-			VALUES ('delete', old.id, old.content);
-			INSERT INTO chat_recall_fts(rowid, content)
-			VALUES (new.id, new.content);
-		END
-	`)
-
-	// Vector index table for embedding similarity search.
-	_, err = ls.db.Exec(`
-		CREATE TABLE IF NOT EXISTS chat_recall_vec (
-			msg_id INTEGER PRIMARY KEY,
-			session_id TEXT NOT NULL,
-			user_id TEXT NOT NULL,
-			vector TEXT NOT NULL,
-			content_snippet TEXT NOT NULL,
-			FOREIGN KEY (msg_id) REFERENCES chat_recall(id)
-				ON DELETE CASCADE
-		);
-		CREATE INDEX IF NOT EXISTS idx_vec_session
-			ON chat_recall_vec(session_id);
-		CREATE INDEX IF NOT EXISTS idx_vec_user
-			ON chat_recall_vec(user_id);
-	`)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return migration.Apply(context.Background(), ls.db, migrations)
 }
 
 // ---------------------------------------------------------------------------
@@ -466,6 +394,9 @@ func scanResults(rows *sql.Rows) ([]recall.SearchResult, error) {
 			Preview: truncatePreview(msg.Content, 200),
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
+	}
 	return results, nil
 }
 
@@ -486,6 +417,9 @@ func scanResultsNoRank(
 			Score:   calcScore(query, msg.Content),
 			Preview: truncatePreview(msg.Content, 200),
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
 	}
 	return results, nil
 }

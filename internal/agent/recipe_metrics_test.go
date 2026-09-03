@@ -412,7 +412,7 @@ type testMetricsCollector struct {
 	metrics RecipeMetrics
 }
 
-func (c *testMetricsCollector) Name() string     { return c.name }
+func (c *testMetricsCollector) Name() string { return c.name }
 func (c *testMetricsCollector) Metrics() RecipeMetrics {
 	return c.metrics.snapshot()
 }

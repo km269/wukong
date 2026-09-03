@@ -15,7 +15,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/km269/wukong/internal/config"
-	"github.com/km269/wukong/internal/util"
 
 	"trpc.group/trpc-go/trpc-agent-go/session"
 )
@@ -308,6 +307,3 @@ func runStats(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	return nil
 }
-
-// Ensure util is used.
-var _ = util.Logger

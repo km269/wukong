@@ -24,7 +24,7 @@ type IgnoreRule struct {
 
 // IgnoreMatcher holds compiled ignore rules for file path checking.
 type IgnoreMatcher struct {
-	rules   []IgnoreRule
+	rules     []IgnoreRule
 	sourceDir string // directory containing the ignore file
 	enabled   bool
 }
@@ -44,7 +44,7 @@ func NewIgnoreMatcher(ignoreFile string, enabled bool) *IgnoreMatcher {
 		}
 
 		m := &IgnoreMatcher{
-			enabled:    true,
+			enabled:   true,
 			sourceDir: filepath.Dir(p),
 		}
 

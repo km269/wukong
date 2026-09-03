@@ -82,7 +82,9 @@ type landlockPathBeneathAttr struct {
 }
 
 type helperConfig struct {
-	WritableDirs []string `json:"w"`
+	WritableDirs     []string       `json:"w,omitempty"`
+	Limits           ResourceLimits `json:"l,omitempty"`
+	KillOnParentExit bool           `json:"k,omitempty"`
 }
 
 func abi() int {
@@ -140,18 +142,14 @@ func probeLinux() ProbeResult {
 }
 
 func applySandbox(cmd *exec.Cmd, ctx *sandboxCtx) error {
-	// Skip JSON marshal when writable dirs are empty or only "."
-	// to save allocation overhead for simple commands (ls, git status, etc.).
-	var cfgJSON []byte
-	if len(ctx.writable) == 0 || (len(ctx.writable) == 1 && ctx.writable[0] == ".") {
-		cfgJSON = []byte(`{"w":null}`)
-	} else {
-		cfg := helperConfig{WritableDirs: ctx.writable}
-		var err error
-		cfgJSON, err = json.Marshal(cfg)
-		if err != nil {
-			return fmt.Errorf("sandbox: marshal config: %w", err)
-		}
+	cfg := helperConfig{
+		WritableDirs:     ctx.writable,
+		Limits:           ctx.limits,
+		KillOnParentExit: ctx.killOnParentExit,
+	}
+	cfgJSON, err := json.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("sandbox: marshal config: %w", err)
 	}
 
 	// Use cached executable path (set at init()) to avoid
@@ -174,6 +172,54 @@ func applySandbox(cmd *exec.Cmd, ctx *sandboxCtx) error {
 		"__SANDBOX_CONFIG="+string(cfgJSON),
 	)
 
+	// Process-group tracking: make the child (and thus the real
+	// command, which replaces the helper via syscall.Exec keeping
+	// the same PID/session) its own process-group leader. This
+	// enables whole-tree kill on ctx cancel; true kernel-level
+	// kill-on-parent-exit needs cgroups and is out of scope here.
+	if ctx.killOnParentExit {
+		if cmd.SysProcAttr == nil {
+			cmd.SysProcAttr = &syscall.SysProcAttr{}
+		}
+		cmd.SysProcAttr.Setpgid = true
+	}
+
+	return nil
+}
+
+// rlimitNPROC is RLIMIT_NPROC (max processes per user). Go's syscall
+// package omits this constant (it's per-user and considered marginally
+// useful), so we define it locally. The value 6 is stable across all
+// Linux architectures (asm-generic/resource.h).
+const rlimitNPROC = 6
+
+// applyResourceLimits applies per-process resource caps via
+// setrlimit. Called by the self-exec helper after Landlock and before
+// syscall.Exec, so the limits apply to the real command. setrlimit
+// for self-limits does not require elevated privileges.
+func applyResourceLimits(cfg *helperConfig) error {
+	apply := func(rlimit int, val uint64, name string) error {
+		if val == 0 {
+			return nil
+		}
+		rl := syscall.Rlimit{Cur: val, Max: val}
+		if err := syscall.Setrlimit(rlimit, &rl); err != nil {
+			return fmt.Errorf("setrlimit %s=%d: %w", name, val, err)
+		}
+		return nil
+	}
+	if err := apply(syscall.RLIMIT_CPU, cfg.Limits.MaxCPUSeconds, "CPU"); err != nil {
+		return err
+	}
+	if err := apply(syscall.RLIMIT_AS, cfg.Limits.MaxMemoryBytes, "AS"); err != nil {
+		return err
+	}
+	if err := apply(syscall.RLIMIT_FSIZE, cfg.Limits.MaxFileBytes, "FSIZE"); err != nil {
+		return err
+	}
+	if err := apply(rlimitNPROC, cfg.Limits.MaxProcesses, "NPROC"); err != nil {
+		return err
+	}
 	return nil
 }
 

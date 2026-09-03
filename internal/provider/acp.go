@@ -121,10 +121,10 @@ type ACPMCPConfig struct {
 
 // ACPResponse is the response from the ACP agent's message/send.
 type ACPResponse struct {
-	Content    string            `json:"content,omitempty"`
-	ToolCalls  []ACPToolCall     `json:"tool_calls,omitempty"`
-	Error      string            `json:"error,omitempty"`
-	Metadata   map[string]string `json:"metadata,omitempty"`
+	Content   string            `json:"content,omitempty"`
+	ToolCalls []ACPToolCall     `json:"tool_calls,omitempty"`
+	Error     string            `json:"error,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
 }
 
 // ACPToolCall describes a tool call requested by the ACP agent.

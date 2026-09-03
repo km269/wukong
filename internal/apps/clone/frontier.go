@@ -68,6 +68,13 @@ func (f *frontier) visitedCount() int {
 	return len(f.visited)
 }
 
+// SeenCount returns the number of URLs that have been enqueued.
+func (f *frontier) seenCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.seen)
+}
+
 // ---------------------------------------------------------------------------
 // State persistence for resume support.
 // ---------------------------------------------------------------------------

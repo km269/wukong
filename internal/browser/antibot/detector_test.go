@@ -15,9 +15,11 @@ func TestDetectHTTP(t *testing.T) {
 		{"403 forbidden", 403, nil, ReasonForbidden},
 		{"429 rate limited", 429, nil, ReasonRateLimited},
 		{"503 unavailable", 503, nil, ReasonUnavailable},
-		{"503 cloudflare", 503, map[string]string{"cf-ray": "abc123"}, ReasonCloudflare},
+		{"503 cloudflare challenge", 503, map[string]string{"cf-chl-bypass": "1"}, ReasonCloudflare},
+		{"503 with cf-ray only", 503, map[string]string{"cf-ray": "abc123"}, ReasonUnavailable},
 		{"200 ok", 200, nil, ReasonNone},
-		{"200 with cf header", 200, map[string]string{"cf-ray": "abc"}, ReasonCloudflare},
+		{"200 with cf-ray (CDN only)", 200, map[string]string{"cf-ray": "abc"}, ReasonNone},
+		{"200 with cf-cache-status (CDN only)", 200, map[string]string{"cf-cache-status": "HIT"}, ReasonNone},
 		{"404 not found", 404, nil, ReasonNone},
 		{"500 server error", 500, nil, ReasonNone},
 	}
@@ -97,6 +99,16 @@ func TestDetectDOM(t *testing.T) {
 			"browser check",
 			"browser check required",
 			ReasonCaptcha,
+		},
+		{
+			"maintenance page",
+			"We're sorry, this site is currently experiencing technical difficulties. Please try again in a few moments.",
+			ReasonUnavailable,
+		},
+		{
+			"maintenance page with forbidden",
+			"We're sorry, this site is currently experiencing technical difficulties. Exception: forbidden",
+			ReasonUnavailable,
 		},
 	}
 

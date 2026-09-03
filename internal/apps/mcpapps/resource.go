@@ -57,9 +57,9 @@ type CSPConfig struct {
 
 // Permissions requests browser capabilities.
 type Permissions struct {
-	Camera       *struct{} `json:"camera,omitempty"`
-	Microphone   *struct{} `json:"microphone,omitempty"`
-	Geolocation  *struct{} `json:"geolocation,omitempty"`
+	Camera         *struct{} `json:"camera,omitempty"`
+	Microphone     *struct{} `json:"microphone,omitempty"`
+	Geolocation    *struct{} `json:"geolocation,omitempty"`
 	ClipboardWrite *struct{} `json:"clipboardWrite,omitempty"`
 }
 
@@ -143,15 +143,15 @@ func GenerateDefaultCSP() *CSPConfig {
 	return &CSPConfig{
 		ConnectDomains:  []string{},
 		ResourceDomains: []string{},
-		FrameDomains:   []string{},
-		BaseUriDomains: []string{},
+		FrameDomains:    []string{},
+		BaseUriDomains:  []string{},
 	}
 }
 
 // CSPFromConfig creates a CSP config from allowed domains.
 func CSPFromConfig(connect, resource, frame, baseURI []string) *CSPConfig {
 	return &CSPConfig{
-		ConnectDomains:   connect,
+		ConnectDomains:  connect,
 		ResourceDomains: resource,
 		FrameDomains:    frame,
 		BaseUriDomains:  baseURI,
@@ -174,10 +174,10 @@ func FromJSON(data []byte) (*UIResource, error) {
 
 // ResourceContent represents the content returned by resources/read.
 type ResourceContent struct {
-	URI      string      `json:"uri"`
-	MimeType string      `json:"mimeType"`
-	Text     string      `json:"text,omitempty"`
-	Blob     string      `json:"blob,omitempty"` // base64 encoded
+	URI      string       `json:"uri"`
+	MimeType string       `json:"mimeType"`
+	Text     string       `json:"text,omitempty"`
+	Blob     string       `json:"blob,omitempty"` // base64 encoded
 	Meta     *ContentMeta `json:"_meta,omitempty"`
 }
 
@@ -188,10 +188,10 @@ type ContentMeta struct {
 
 // UIMeta contains UI rendering metadata.
 type UIMeta struct {
-	CSP            *CSPConfig    `json:"csp,omitempty"`
-	Permissions    *Permissions  `json:"permissions,omitempty"`
-	Domain         string       `json:"domain,omitempty"`
-	PrefersBorder  *bool        `json:"prefersBorder,omitempty"`
+	CSP           *CSPConfig   `json:"csp,omitempty"`
+	Permissions   *Permissions `json:"permissions,omitempty"`
+	Domain        string       `json:"domain,omitempty"`
+	PrefersBorder *bool        `json:"prefersBorder,omitempty"`
 }
 
 // NewResourceContent creates content from HTML text.

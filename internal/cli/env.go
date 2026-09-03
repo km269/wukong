@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/util"
 	"github.com/km269/wukong/pkg/sandbox"
 )
 
@@ -85,9 +86,9 @@ type envInfo struct {
 
 func buildEnvInfo(configPath string) envInfo {
 	info := envInfo{
-		Version:    Version,
-		GitCommit:  GitCommit,
-		BuildDate:  BuildDate,
+		Version:    util.Version,
+		GitCommit:  util.GitCommit,
+		BuildDate:  util.BuildDate,
 		GoVersion:  runtime.Version(),
 		OS:         runtime.GOOS,
 		Arch:       runtime.GOARCH,
@@ -108,14 +109,20 @@ func buildEnvInfo(configPath string) envInfo {
 		info.DataDir = filepath.Join(home, ".config", "wukong", "data")
 	}
 
-	// Config file
-	resolved := resolveConfigPath(configPath)
-	if resolved == "" {
-		if info.ConfigDir != "" {
-			resolved = filepath.Join(info.ConfigDir, "config.yaml")
+	// Config file — the loader reports the file it actually read;
+	// fall back to the conventional user-level path when running
+	// purely on built-in defaults.
+	loader, loadErr := config.NewLoader(configPath)
+	if loadErr == nil {
+		if used := loader.ConfigFileUsed(); used != "" {
+			info.ConfigFile = used
 		}
 	}
-	info.ConfigFile = resolved
+	if info.ConfigFile == "" {
+		if info.ConfigDir != "" {
+			info.ConfigFile = filepath.Join(info.ConfigDir, "config.yaml")
+		}
+	}
 
 	// Sandbox
 	sb := sandbox.Probe()
@@ -126,10 +133,9 @@ func buildEnvInfo(configPath string) envInfo {
 	}
 
 	// Config-dependent info
-	loader, err := config.NewLoader(configPath)
-	if err == nil {
-		wukongCfg, loadErr := loader.Load()
-		if loadErr == nil {
+	if loadErr == nil {
+		wukongCfg, cfgErr := loader.Load()
+		if cfgErr == nil {
 			info.DefaultProv = wukongCfg.DefaultProvider
 			info.ProviderCount = len(wukongCfg.Providers)
 			info.LogLevel = wukongCfg.LogLevel

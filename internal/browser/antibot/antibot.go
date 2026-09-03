@@ -153,6 +153,16 @@ func (e *Engine) Reset() {
 	e.Escalator.Reset()
 }
 
+// RotateUserAgent returns a random realistic browser User-Agent profile.
+func (e *Engine) RotateUserAgent() *UAProfile {
+	return e.Escalator.RotateUserAgent()
+}
+
+// GetRandomDesktopUA returns a random desktop UA profile.
+func (e *Engine) GetRandomDesktopUA() *UAProfile {
+	return e.Escalator.GetRandomDesktopUA()
+}
+
 func containsAny(s string, substrs ...string) bool {
 	for _, sub := range substrs {
 		if strings.Contains(s, sub) {

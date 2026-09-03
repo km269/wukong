@@ -63,11 +63,14 @@ func NewEngine(ec EngineConfig) (*EvolutionEngine, error) {
 
 	// Create the analyzer
 	analyzerCfg := &EvolutionConfig{
-		Enabled:         evCfg.Enabled,
-		AutoPatch:       evCfg.AutoPatch,
-		MinConfidence:   evCfg.MinConfidence,
-		MaxPatchSize:    evCfg.MaxPatchSize,
-		AnalysisTimeout: evCfg.AnalysisTimeout,
+		Enabled:          evCfg.Enabled,
+		AutoPatch:        evCfg.AutoPatch,
+		AnalysisProvider: evCfg.AnalysisProvider,
+		AnalysisModel:    evCfg.AnalysisModel,
+		MinConfidence:    evCfg.MinConfidence,
+		MaxPatchSize:     evCfg.MaxPatchSize,
+		AnalysisTimeout:  evCfg.AnalysisTimeout,
+		ExportJSON:       evCfg.ExportJSON,
 	}
 	if analyzerCfg.MinConfidence <= 0 {
 		analyzerCfg.MinConfidence = 0.7
@@ -86,7 +89,7 @@ func NewEngine(ec EngineConfig) (*EvolutionEngine, error) {
 	if maxVersions <= 0 {
 		maxVersions = 10
 	}
-	patcher := NewEvolutionPatcher(store, maxVersions)
+	patcher := NewEvolutionPatcher(store, maxVersions, analyzerCfg.ExportJSON)
 
 	engine := &EvolutionEngine{
 		cfg:        analyzerCfg,
@@ -232,13 +235,21 @@ func (e *EvolutionEngine) processTrace(
 			"error", err.Error(),
 		)
 		// Record the attempt
-		_ = e.store.RecordEvolution(rec)
+		if err := e.store.RecordEvolution(rec); err != nil {
+			util.Logger.Warn("evolution: record failed",
+				"skill", trace.SkillName,
+				"error", err.Error())
+		}
 		return
 	}
 
 	if suggestion == nil {
 		// No issue found — record and return
-		_ = e.store.RecordEvolution(rec)
+		if err := e.store.RecordEvolution(rec); err != nil {
+			util.Logger.Warn("evolution: record failed",
+				"skill", trace.SkillName,
+				"error", err.Error())
+		}
 		return
 	}
 
@@ -263,7 +274,11 @@ func (e *EvolutionEngine) processTrace(
 				"skill", suggestion.SkillName,
 				"error", patchErr.Error(),
 			)
-			_ = e.store.RecordEvolution(rec)
+			if err := e.store.RecordEvolution(rec); err != nil {
+				util.Logger.Warn("evolution: record failed",
+					"skill", trace.SkillName,
+					"error", err.Error())
+			}
 			return
 		}
 
@@ -351,7 +366,7 @@ func (e *EvolutionEngine) readSkillContent(
 ) (string, string, error) {
 	skillsDir := e.wukongCfg.Skill.SkillsDir
 	if skillsDir == "" {
-		skillsDir = ".wukong_skills"
+		skillsDir = ".wukong/skills"
 	}
 
 	skillDir := filepath.Join(skillsDir, skillName)

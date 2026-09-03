@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/provider"
 
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/log"
@@ -39,17 +40,12 @@ type ContextRevisionEngine struct {
 	maxRecent     int
 
 	// Revision model (smaller/faster LLM for summarization)
-	revisionModel RevisionModel
+	revisionModel provider.RevisionModel
 
 	// Session service for triggering actual compression.
 	// When set, the engine can call EnqueueSummaryJob to
 	// offload summarization to the framework's async workers.
 	sessionService session.Service
-}
-
-// RevisionModel is the interface for the summarization model.
-type RevisionModel interface {
-	Summarize(ctx context.Context, content string, maxTokens int) (string, error)
 }
 
 // NewContextRevisionEngine creates a new context revision engine.
@@ -64,7 +60,7 @@ func NewContextRevisionEngine(cfg *config.WukongConfig) *ContextRevisionEngine {
 }
 
 // SetRevisionModel sets the summarization model for context revision.
-func (e *ContextRevisionEngine) SetRevisionModel(m RevisionModel) {
+func (e *ContextRevisionEngine) SetRevisionModel(m provider.RevisionModel) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.revisionModel = m

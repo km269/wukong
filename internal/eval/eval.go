@@ -22,20 +22,20 @@ import (
 
 // EvalSet defines a collection of test cases for evaluation.
 type EvalSet struct {
-	Name     string     `json:"name"`
-	Version  string     `json:"version"`
+	Name      string     `json:"name"`
+	Version   string     `json:"version"`
 	TestCases []TestCase `json:"test_cases"`
 }
 
 // TestCase represents a single evaluation test case.
 type TestCase struct {
-	ID              string          `json:"id"`
-	Description     string          `json:"description"`
-	Conversation    []Turn          `json:"conversation"`
-	ExpectedTools   []string        `json:"expected_tools,omitempty"`
-	ExpectedPattern string          `json:"expected_pattern,omitempty"`
-	MinResponseLen  int             `json:"min_response_len,omitempty"`
-	Metadata        map[string]any  `json:"metadata,omitempty"`
+	ID              string         `json:"id"`
+	Description     string         `json:"description"`
+	Conversation    []Turn         `json:"conversation"`
+	ExpectedTools   []string       `json:"expected_tools,omitempty"`
+	ExpectedPattern string         `json:"expected_pattern,omitempty"`
+	MinResponseLen  int            `json:"min_response_len,omitempty"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
 }
 
 // Turn represents a single turn in a conversation.
@@ -52,11 +52,11 @@ type EvalMetric struct {
 
 // EvalResult contains the evaluation result for a test case.
 type EvalResult struct {
-	TestCaseID string          `json:"test_case_id"`
-	Passed     bool            `json:"passed"`
-	Metrics    []MetricResult  `json:"metrics"`
-	Duration   time.Duration   `json:"duration"`
-	Error      string          `json:"error,omitempty"`
+	TestCaseID string         `json:"test_case_id"`
+	Passed     bool           `json:"passed"`
+	Metrics    []MetricResult `json:"metrics"`
+	Duration   time.Duration  `json:"duration"`
+	Error      string         `json:"error,omitempty"`
 }
 
 // MetricResult contains the score for a single metric.
@@ -69,9 +69,9 @@ type MetricResult struct {
 
 // Evaluator runs evaluation tests against an agent runner.
 type Evaluator struct {
-	runner    runner.Runner
-	metrics   []EvalMetric
-	results   []EvalResult
+	runner  runner.Runner
+	metrics []EvalMetric
+	results []EvalResult
 }
 
 // NewEvaluator creates a new evaluator.

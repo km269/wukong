@@ -1,10 +1,10 @@
 // Package gateway — Message Deduplication
 //
 // MessageDeduplicator provides thread-safe, TTL-based message dedup
-// for all incoming platform messages. When a platform (e.g. WeCom or
-// Feishu) retries a callback, it sends the same MessageID; the dedup
-// layer catches those duplicates and returns silently without hitting
-// the agent loop.
+// for all incoming platform messages. When a platform (e.g. Feishu)
+// re-delivers a message with the same MessageID (SDK retry after a
+// transient error), the dedup layer catches those duplicates and
+// returns silently without hitting the agent loop.
 //
 // Implementation:
 //   - Keys are "platform:messageID" strings stored in a sync.Map.

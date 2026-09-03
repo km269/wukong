@@ -24,11 +24,14 @@ type EvolutionAnalyzer struct {
 // EvolutionConfig re-exported for internal use without import cycle.
 // Matches config.EvolutionConfig with the fields the analyzer needs.
 type EvolutionConfig struct {
-	Enabled         bool
-	AutoPatch       bool
-	MinConfidence   float64
-	MaxPatchSize    int
-	AnalysisTimeout time.Duration
+	Enabled          bool
+	AutoPatch        bool
+	AnalysisProvider string
+	AnalysisModel    string
+	MinConfidence    float64
+	MaxPatchSize     int
+	AnalysisTimeout  time.Duration
+	ExportJSON       bool
 }
 
 // NewEvolutionAnalyzer creates a new analyzer with the given model factory.
@@ -56,8 +59,22 @@ func NewEvolutionAnalyzer(
 }
 
 // ensureModel creates or reuses the analysis model instance.
+// It uses the configured analysis_provider and analysis_model if specified,
+// otherwise falls back to the default model.
 func (a *EvolutionAnalyzer) ensureModel() error {
 	if a.model != nil {
+		return nil
+	}
+
+	providerName := a.config.AnalysisProvider
+	modelName := a.config.AnalysisModel
+
+	if providerName != "" || modelName != "" {
+		mdl, err := a.factory.CreateModelWithName(providerName, modelName)
+		if err != nil {
+			return fmt.Errorf("create analysis model: %w", err)
+		}
+		a.model = mdl
 		return nil
 	}
 

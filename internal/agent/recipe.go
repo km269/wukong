@@ -188,6 +188,11 @@ type RecipeToolSet struct {
 	agentCfg *config.AgentConfig
 	// allToolsFn provides base tools for reload operations.
 	allToolsFn func() []tool.Tool
+	// onReload is invoked after a successful Reload with the fresh
+	// tool slice (capability-registry sync, Phase C). Called with
+	// the toolset lock held: the callback must not call back into
+	// the toolset.
+	onReload func(tools []tool.Tool)
 }
 
 // NewRecipeToolSet scans the configured recipe directory for .yaml
@@ -216,149 +221,15 @@ func NewRecipeToolSet(
 		return nil
 	}
 
-	// Phase 1: Load all recipe configs.
-	recipes := make(map[string]*RecipeConfig)
-	loadFileRecipes(recipes, agentCfg.RecipeDir)
-	loadInlineRecipes(recipes, agentCfg.InlineRecipes)
-
-	if len(recipes) == 0 {
+	tools, subAgents, resolved, ok := buildRecipes(
+		factory, agentCfg, func() []tool.Tool { return allTools })
+	if !ok {
 		return nil
 	}
 
-	// Phase 2: Resolve extends (P2-B).
-	resolved, err := resolveAllExtends(recipes)
-	if err != nil {
-		util.Logger.Warn("recipe: failed to resolve extends",
-			slog.String("error", err.Error()))
-		resolved = recipes
-	}
-
-	// Phase 3: Topological sort by sub-recipe deps (P1-A).
-	recipeNames := make(map[string]bool, len(resolved))
-	for name := range resolved {
-		recipeNames[name] = true
-	}
-	order, err := topoSortRecipes(resolved)
-	if err != nil {
-		util.Logger.Error("recipe: dependency sort failed",
-			slog.String("error", err.Error()))
-		return nil
-	}
-
-	// P3-A: Default model — recipes without model field use this.
-	defaultMdl, err := factory.CreateDefaultModel()
-	if err != nil {
-		util.Logger.Warn("recipe: failed to create model",
-			slog.String("error", err.Error()))
-		return nil
-	}
-
-	baseTools := make(map[string]tool.Tool)
-	for _, t := range allTools {
-		if decl := t.Declaration(); decl != nil {
-			baseTools[decl.Name] = t
-		}
-	}
-
-	// Phase 4: Build recipe tools in dependency order.
-	recipeRegistry := make(map[string]tool.Tool)
-	ts := &RecipeToolSet{}
-
-	for _, name := range order {
-		recipe, ok := resolved[name]
-		if !ok {
-			continue
-		}
-
-		// P3-A: Per-recipe model override.
-		subMdl := createRecipeModel(
-			factory, recipe, defaultMdl)
-
-		grantedTools := mergeToolSets(
-			baseTools, recipeRegistry, recipe, recipeNames)
-
-		subAgent := createRecipeAgent(recipe, subMdl, grantedTools)
-		ts.subAgents = append(ts.subAgents, subAgent)
-
-		t := agenttool.NewTool(subAgent,
-			agenttool.WithSkipSummarization(
-				recipe.SkipSummarization),
-			agenttool.WithStreamInner(false),
-			agenttool.WithResponseMode(
-				agenttool.ResponseModeFinalOnly,
-			),
-		)
-
-		var finalTool tool.Tool = t
-		if len(recipe.Parameters) > 0 && recipe.Prompt != "" {
-			rt, rtErr := newRecipeTool(t, recipe)
-			if rtErr != nil {
-				util.Logger.Warn("recipe: skip parameterized wrapper",
-					slog.String("name", recipe.Name),
-					slog.String("error", rtErr.Error()))
-			} else {
-				finalTool = rt
-			}
-		}
-
-		// P1-B: Retry wrapper.
-		if recipe.Retry != nil {
-			callTool, ok := finalTool.(tool.CallableTool)
-			if !ok {
-				util.Logger.Warn("recipe: retry config ignored",
-					slog.String("name", recipe.Name))
-			} else {
-				validator := buildOutputValidator(
-					recipe.Response)
-				if recipe.Response == nil ||
-					!recipe.Response.ValidateOutput {
-					validator = nil
-				}
-				finalTool = newRetryTool(
-					callTool, recipe.Retry, validator)
-			}
-		}
-
-		// P3-B: Timeout wrapper.
-		if recipe.Timeout != "" {
-			callTool, ok := finalTool.(tool.CallableTool)
-			if !ok {
-				util.Logger.Warn("recipe: timeout config ignored",
-					slog.String("name", recipe.Name))
-			} else {
-				td, tdErr := time.ParseDuration(
-					recipe.Timeout)
-				if tdErr != nil {
-					util.Logger.Warn("recipe: invalid timeout",
-						slog.String("name", recipe.Name),
-						slog.String("timeout", recipe.Timeout),
-						slog.String("error", tdErr.Error()))
-				} else {
-					finalTool = newTimeoutTool(
-						callTool, td)
-				}
-			}
-		}
-
-		recipeRegistry[name] = finalTool
-		ts.tools = append(ts.tools, finalTool)
-
-		util.Logger.Info("recipe: registered",
-			slog.String("name", recipe.Name),
-			slog.Int("tools", len(recipe.Tools)),
-			slog.Bool("retry", recipe.Retry != nil),
-			slog.Bool("parameterized",
-				len(recipe.Parameters) > 0 &&
-					recipe.Prompt != ""),
-			slog.Bool("model_override",
-				recipe.Model != ""),
-			slog.Bool("timeout",
-				recipe.Timeout != ""),
-		)
-	}
-
-	if len(ts.tools) == 0 {
-		return nil
+	ts := &RecipeToolSet{
+		tools:     tools,
+		subAgents: subAgents,
 	}
 
 	// P3-C: Recipe discovery tool.
@@ -392,6 +263,16 @@ func NewRecipeToolSet(
 	return ts
 }
 
+// SetReloadCallback registers fn to run after every successful
+// Reload with the fresh tool slice. Used by CoreLoop to keep the
+// capability registry's recipe.* namespace in sync during hot
+// reload (roadmap P0-1 Phase C).
+func (ts *RecipeToolSet) SetReloadCallback(fn func(tools []tool.Tool)) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.onReload = fn
+}
+
 // Reload rebuilds all recipe tools from disk. Returns false if the
 // reload fails. Thread-safe.
 func (ts *RecipeToolSet) Reload() bool {
@@ -400,75 +281,122 @@ func (ts *RecipeToolSet) Reload() bool {
 
 	util.Logger.Info("recipe: manual reload triggered")
 
-	recipes := make(map[string]*RecipeConfig)
-	loadFileRecipes(recipes, ts.agentCfg.RecipeDir)
-	loadInlineRecipes(recipes, ts.agentCfg.InlineRecipes)
-	if len(recipes) == 0 {
-		util.Logger.Warn("recipe: reload found no recipes")
+	tools, subAgents, resolved, ok := buildRecipes(
+		ts.factory, ts.agentCfg, ts.allToolsFn)
+	if !ok {
 		return false
 	}
 
+	// Append the always-on auxiliary tools (discovery/reload/stats).
+	// The reload tool captures ts.Reload by closure; it is rebuilt here
+	// so the tool registered after a reload points at the same logic.
+	discoveryTool := newRecipeDiscoveryTool(resolved)
+	reloadTool := newReloadTool(func() string {
+		if ts.Reload() {
+			return "Recipes reloaded successfully."
+		}
+		return "Recipe reload failed."
+	})
+	statsTool := newRecipeStatsTool()
+	tools = append(tools, discoveryTool, reloadTool, statsTool)
+
+	ts.tools = tools
+	ts.subAgents = subAgents
+
+	util.Logger.Info("recipe: reload completed",
+		slog.Int("tools", len(tools)))
+
+	if ts.onReload != nil {
+		ts.onReload(tools)
+	}
+	return true
+}
+
+// buildRecipes runs the shared recipe-build pipeline (phases 1-7 of
+// NewRecipeToolSet): load configs → resolve extends → topological sort
+// → default model → per-recipe build (model override, granted tools,
+// agent tool, parameterized/retry/timeout wrappers). It returns the
+// built per-recipe tools and sub-agents, the resolved config map (used
+// by the caller to build the discovery tool), and ok=false on a fatal
+// failure (no recipes, sort failure, or model creation failure).
+//
+// This is extracted from both NewRecipeToolSet and Reload, which were
+// near-verbatim duplicates of the same pipeline. Non-fatal issues
+// (extends resolution, individual wrapper failures) are warned and
+// skipped, matching the constructor's defensive behavior.
+func buildRecipes(
+	factory providerModelFactory,
+	agentCfg *config.AgentConfig,
+	allToolsFn func() []tool.Tool,
+) (tools []tool.Tool, subAgents []agent.Agent, resolved map[string]*RecipeConfig, ok bool) {
+	// Phase 1: Load all recipe configs.
+	recipes := make(map[string]*RecipeConfig)
+	loadFileRecipes(recipes, agentCfg.RecipeDir)
+	loadInlineRecipes(recipes, agentCfg.InlineRecipes)
+	if len(recipes) == 0 {
+		return nil, nil, nil, false
+	}
+
+	// Phase 2: Resolve extends.
 	resolved, err := resolveAllExtends(recipes)
 	if err != nil {
-		util.Logger.Warn("recipe: reload extends failed",
+		util.Logger.Warn("recipe: failed to resolve extends",
 			slog.String("error", err.Error()))
 		resolved = recipes
 	}
 
+	// Phase 3: Topological sort by sub-recipe deps.
 	recipeNames := make(map[string]bool, len(resolved))
 	for name := range resolved {
 		recipeNames[name] = true
 	}
 	order, err := topoSortRecipes(resolved)
 	if err != nil {
-		util.Logger.Error("recipe: reload sort failed",
+		util.Logger.Error("recipe: dependency sort failed",
 			slog.String("error", err.Error()))
-		return false
+		return nil, nil, nil, false
 	}
 
-	defaultMdl, err := ts.factory.CreateDefaultModel()
+	// P3-A: Default model.
+	defaultMdl, err := factory.CreateDefaultModel()
 	if err != nil {
-		util.Logger.Error("recipe: reload model creation failed",
+		util.Logger.Warn("recipe: failed to create model",
 			slog.String("error", err.Error()))
-		return false
+		return nil, nil, nil, false
 	}
 
 	baseTools := make(map[string]tool.Tool)
-	for _, t := range ts.allToolsFn() {
+	for _, t := range allToolsFn() {
 		if decl := t.Declaration(); decl != nil {
 			baseTools[decl.Name] = t
 		}
 	}
 
+	// Phase 4: Build recipe tools in dependency order.
 	recipeRegistry := make(map[string]tool.Tool)
-	var newTools []tool.Tool
-	var newSubAgents []agent.Agent
-
 	for _, name := range order {
-		recipe, ok := resolved[name]
-		if !ok {
+		recipe, alright := resolved[name]
+		if !alright {
 			continue
 		}
 
-		subMdl := createRecipeModel(
-			ts.factory, recipe, defaultMdl)
+		// P3-A: Per-recipe model override.
+		subMdl := createRecipeModel(factory, recipe, defaultMdl)
 
 		grantedTools := mergeToolSets(
 			baseTools, recipeRegistry, recipe, recipeNames)
-		subAgent := createRecipeAgent(
-			recipe, subMdl, grantedTools)
-		newSubAgents = append(newSubAgents, subAgent)
+
+		subAgent := createRecipeAgent(recipe, subMdl, grantedTools)
+		subAgents = append(subAgents, subAgent)
 
 		t := agenttool.NewTool(subAgent,
-			agenttool.WithSkipSummarization(
-				recipe.SkipSummarization),
+			agenttool.WithSkipSummarization(recipe.SkipSummarization),
 			agenttool.WithStreamInner(false),
-			agenttool.WithResponseMode(
-				agenttool.ResponseModeFinalOnly,
-			),
+			agenttool.WithResponseMode(agenttool.ResponseModeFinalOnly),
 		)
 
 		var finalTool tool.Tool = t
+		// Parameterized wrapper.
 		if len(recipe.Parameters) > 0 && recipe.Prompt != "" {
 			rt, rtErr := newRecipeTool(t, recipe)
 			if rtErr != nil {
@@ -480,51 +408,59 @@ func (ts *RecipeToolSet) Reload() bool {
 			}
 		}
 
+		// P1-B: Retry wrapper.
 		if recipe.Retry != nil {
-			if callTool, ok := finalTool.(tool.CallableTool); ok {
-				validator := buildOutputValidator(
-					recipe.Response)
+			callTool, alright := finalTool.(tool.CallableTool)
+			if !alright {
+				util.Logger.Warn("recipe: retry config ignored",
+					slog.String("name", recipe.Name))
+			} else {
+				validator := buildOutputValidator(recipe.Response)
 				if recipe.Response == nil ||
 					!recipe.Response.ValidateOutput {
 					validator = nil
 				}
-				finalTool = newRetryTool(
-					callTool, recipe.Retry, validator)
+				finalTool = newRetryTool(callTool, recipe.Retry, validator)
 			}
 		}
 
+		// P3-B: Timeout wrapper.
 		if recipe.Timeout != "" {
-			if callTool, ok := finalTool.(tool.CallableTool); ok {
-				if td, tdErr := time.ParseDuration(
-					recipe.Timeout); tdErr == nil {
-					finalTool = newTimeoutTool(
-						callTool, td)
+			callTool, alright := finalTool.(tool.CallableTool)
+			if !alright {
+				util.Logger.Warn("recipe: timeout config ignored",
+					slog.String("name", recipe.Name))
+			} else {
+				td, tdErr := time.ParseDuration(recipe.Timeout)
+				if tdErr != nil {
+					util.Logger.Warn("recipe: invalid timeout",
+						slog.String("name", recipe.Name),
+						slog.String("timeout", recipe.Timeout),
+						slog.String("error", tdErr.Error()))
+				} else {
+					finalTool = newTimeoutTool(callTool, td)
 				}
 			}
 		}
 
 		recipeRegistry[name] = finalTool
-		newTools = append(newTools, finalTool)
+		tools = append(tools, finalTool)
+
+		util.Logger.Info("recipe: registered",
+			slog.String("name", recipe.Name),
+			slog.Int("tools", len(recipe.Tools)),
+			slog.Bool("retry", recipe.Retry != nil),
+			slog.Bool("parameterized",
+				len(recipe.Parameters) > 0 && recipe.Prompt != ""),
+			slog.Bool("model_override", recipe.Model != ""),
+			slog.Bool("timeout", recipe.Timeout != ""),
+		)
 	}
 
-	discoveryTool := newRecipeDiscoveryTool(resolved)
-	newTools = append(newTools, discoveryTool)
-	reloadTool := newReloadTool(func() string {
-		if ts.Reload() {
-			return "Recipes reloaded successfully."
-		}
-		return "Recipe reload failed."
-	})
-	newTools = append(newTools, reloadTool)
-	statsTool := newRecipeStatsTool()
-	newTools = append(newTools, statsTool)
-
-	ts.tools = newTools
-	ts.subAgents = newSubAgents
-
-	util.Logger.Info("recipe: reload completed",
-		slog.Int("tools", len(newTools)))
-	return true
+	if len(tools) == 0 {
+		return nil, nil, resolved, false
+	}
+	return tools, subAgents, resolved, true
 }
 
 // resolveRecipeDir resolves the recipe directory path to an absolute

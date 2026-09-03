@@ -8,6 +8,7 @@ package apps
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"github.com/km269/wukong/internal/apps/clone"
 	"github.com/km269/wukong/internal/apps/pack"
 	"github.com/km269/wukong/internal/apps/server"
+	"github.com/km269/wukong/internal/browser"
 	"github.com/km269/wukong/internal/config"
 )
 
@@ -82,17 +84,23 @@ type AppInfo struct {
 
 // Manager handles custom HTML app lifecycle.
 type Manager struct {
-	mu        sync.RWMutex
-	cfg       *config.AppsConfig
-	apps      map[string]AppInfo
-	appDir    string // 应用存储目录的绝对路径
+	mu             sync.RWMutex
+	cfg            *config.AppsConfig
+	apps           map[string]AppInfo
+	appDir         string // 应用存储目录的绝对路径
+	previewServers map[string]*previewServerEntry
+}
+
+type previewServerEntry struct {
+	url    string
+	cancel context.CancelFunc
 }
 
 // NewManager creates a new apps manager.
 func NewManager(cfg *config.AppsConfig) (*Manager, error) {
 	appDir := cfg.AppDir
 	if appDir == "" {
-		appDir = ".wukong_apps"
+		appDir = ".wukong/apps"
 	}
 
 	// 确保目录存在
@@ -107,9 +115,10 @@ func NewManager(cfg *config.AppsConfig) (*Manager, error) {
 	}
 
 	m := &Manager{
-		cfg:    cfg,
-		apps:   make(map[string]AppInfo),
-		appDir: absAppDir,
+		cfg:            cfg,
+		apps:           make(map[string]AppInfo),
+		appDir:         absAppDir,
+		previewServers: make(map[string]*previewServerEntry),
 	}
 
 	// 加载已有应用
@@ -125,12 +134,17 @@ func (m *Manager) CreateApp(
 }
 
 // CreateAppWithType creates a new HTML app with specified type and status.
+// Returns an error if an app with the same name already exists.
 func (m *Manager) CreateAppWithType(
 	name, description, htmlContent string,
 	appType AppType, status AppStatus,
 ) (AppInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if _, exists := m.apps[name]; exists {
+		return AppInfo{}, fmt.Errorf("app %q already exists", name)
+	}
 
 	filename := sanitizeAppName(name) + ".html"
 	filePath := filepath.Join(m.appDir, filename)
@@ -157,6 +171,13 @@ func (m *Manager) CreateAppWithType(
 	}
 
 	m.apps[name] = app
+
+	if err := saveManifest(app); err != nil {
+		delete(m.apps, name)
+		os.Remove(filePath)
+		return AppInfo{}, fmt.Errorf("save manifest: %w", err)
+	}
+
 	return app, nil
 }
 
@@ -180,43 +201,247 @@ func (m *Manager) CreateAppFromImport(
 // frontier-based resume, robots.txt compliance, sitemap discovery,
 // content deduplication, CSS rewriting, and mobile-friendly output.
 func (m *Manager) CloneApp(ctx context.Context, seedURL string, opts CloneOptions) (AppInfo, *CloneResult, error) {
-	// Start from config file defaults, then override with CLI options.
+	eco := mergeCloneOptions(opts, m.cfg.Clone)
+
+	// 设置输出目录到 apps 目录下。
+	host := extractHost(seedURL)
+	outputDir := filepath.Join(m.appDir, "cloned", host)
+	eco.OutputDir = outputDir
+
+	// 使用增强克隆器执行克隆。
+	cloner := clone.NewEnhancedCloner(eco)
+	cloneRes, err := cloner.Clone(ctx, seedURL)
+	if err != nil {
+		return AppInfo{}, nil, fmt.Errorf("clone website: %w", err)
+	}
+
+	// 转换结果。
+	result := &CloneResult{
+		Success:           cloneRes.Success,
+		SeedURL:           cloneRes.SeedURL,
+		Host:              cloneRes.Host,
+		OutputDir:         cloneRes.OutputDir,
+		Pages:             cloneRes.Pages,
+		Assets:            cloneRes.Assets,
+		SizeBytes:         cloneRes.SizeBytes,
+		Duration:          cloneRes.Duration.String(),
+		Errors:            cloneRes.Errors,
+		DedupFiles:        cloneRes.DedupFiles,
+		DedupBytesSaved:   cloneRes.DedupBytesSaved,
+		AntibotDetections: cloneRes.AntibotDetections,
+		AntibotStats:      cloneRes.AntibotStats,
+	}
+
+	// 创建应用信息。
+	now := time.Now()
+	app := AppInfo{
+		Name:        host,
+		Description: fmt.Sprintf("克隆于 %s", seedURL),
+		FilePath:    filepath.Join(outputDir, "pages", "index.html"),
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		Type:        AppTypeCloned,
+		Status:      AppStatusActive,
+		Version:     "1.0.0",
+		SourceURL:   seedURL,
+		Pages:       result.Pages,
+		Assets:      result.Assets,
+		Size:        result.SizeBytes,
+		AppDir:      outputDir,
+	}
+
+	m.mu.Lock()
+	m.apps[host] = app
+	m.mu.Unlock()
+
+	if err := saveManifest(app); err != nil {
+		return app, result, fmt.Errorf("save manifest: %w", err)
+	}
+
+	return app, result, nil
+}
+
+// CloneOptions defines options for website cloning.
+type CloneOptions struct {
+	OutputDir           string   // 输出根目录（空 = 默认 $HOME/.wukong/apps/cloned）
+	MaxPages            int      // 最大页面数量（0 = 无限制）
+	MaxDepth            int      // 最大链接深度（0 = 无限制）
+	Traversal           string   // 遍历策略：bfs / dfs（空 = 默认bfs）
+	ScopePrefix         string   // 路径前缀限制
+	ScopeAnchor         string   // 锚点限制（只爬取带有特定URL fragment的页面）
+	Exclude             []string // 排除的路径前缀（可重复）
+	Subdomains          bool     // 是否包含子域名
+	Scroll              bool     // 是否滚动加载懒加载内容
+	Timeout             int      // HTTP 请求超时（秒）
+	RenderTimeout       int      // 页面渲染硬超时（秒，默认30）
+	Settle              int      // 网络空闲等待时间（毫秒，1500 = 默认）
+	Workers             int      // 并发页面渲染线程数
+	AssetWorkers        int      // 并发资源下载线程数（0 = 与Workers相同）
+	RespectRobots       *bool    // 是否遵守robots.txt（nil = 默认true）
+	EnableResume        *bool    // 是否启用断点续抓（nil = 默认true）
+	DedupContent        *bool    // 是否启用内容去重（nil = 默认true）
+	MobileReadable      *bool    // 是否注入移动端CSS（nil = 默认true）
+	AssetSameDomain     *bool    // 仅下载同域资源（nil = 默认true）
+	AssetDomains        []string // 额外允许的资源域名列表
+	CrawlDelay          int      // 爬取延迟（毫秒，0 = 使用robots.txt设定）
+	RateLimitWhitelist  []string // 限速豁免域名（完全跳过 per-host 限速与 429/503 惩罚）
+	RateLimitIPSegment  *bool    // IP 段惩罚传播（nil = 默认开启）
+	RateLimitIPPrefixV4 int      // IPv4 段前缀长度（0 = 默认 24）
+	RateLimitIPPrefixV6 int      // IPv6 段前缀长度（0 = 默认 64）
+	Incremental         *bool    // 是否启用增量缓存（nil = 默认false）
+	CacheMaxAge         int      // 缓存最长有效时间（秒，默认86400）
+	ChromePath          string   // Chrome 浏览器路径（空=自动检测）
+	ChromeProfile       string   // Chrome 用户数据目录（覆盖默认 ./wukong_chrome_profile）
+	NoHeadless          bool     // 禁用 headless 模式（显示可见窗口）
+	NoChromeProfile     bool     // 禁用 Chrome Profile（默认启用）
+	NoStealth           bool     // 禁用 Stealth 反检测（默认启用）
+	AntibotEnabled      *bool    // 自动反爬检测（nil=默认true）
+	AntibotAutoEscalate *bool    // 自动升级隐身级别（nil=默认true）
+	CookieFile          string   // Cookie文件路径 (Netscape格式, 用于登录态克隆)
+	Force               bool     // 是否强制删除已有克隆
+	Refresh             bool     // 是否刷新已有页面
+	BrowserBackend      string   // 浏览器后端：chromedp / rod（空 = 使用配置）
+	KeepMedia           bool     // 下载媒体文件（视频、音频、PDF、压缩包等）
+	SkipExt             []string // 额外跳过的文件扩展名
+	AllowDownloads      bool     // 允许浏览器自动下载文件（默认禁止, 由 cloner 统一管理资源）
+	ArchiveFallback     *bool    // 死链回退到 Wayback Machine（nil = 默认false）
+}
+
+// mergeCloneOptions merges config defaults and CLI options into EnhancedClonerOptions.
+// Priority: clone.DefaultEnhancedOptions() < config.Clone < opts
+func mergeCloneOptions(opts CloneOptions, dc config.CloneDefaults) clone.EnhancedClonerOptions {
 	eco := clone.DefaultEnhancedOptions()
-	dc := m.cfg.Clone
 
-	// ── Config file defaults (CloneDefaults → EnhancedClonerOptions) ──
-	if dc.MaxPages > 0 { eco.MaxPages = dc.MaxPages }
-	if dc.MaxDepth > 0 { eco.MaxDepth = dc.MaxDepth }
-	if dc.Traversal != "" { eco.Traversal = clone.TraversalMode(dc.Traversal) }
-	if dc.Subdomains { eco.Subdomains = true }
-	if dc.Scroll { eco.Scroll = true }
-	if dc.Workers > 0 { eco.Workers = dc.Workers }
-	if dc.AssetWorkers > 0 { eco.AssetWorkers = dc.AssetWorkers }
-	if dc.BrowserPages > 0 { eco.BrowserPages = dc.BrowserPages }
-	if dc.Timeout > 0 { eco.Timeout = time.Duration(dc.Timeout) * time.Second }
-	if dc.RenderTimeout > 0 { eco.RenderTimeout = time.Duration(dc.RenderTimeout) * time.Second }
-	if dc.Settle > 0 { eco.Settle = time.Duration(dc.Settle) * time.Millisecond }
-	if dc.RespectRobots { eco.RespectRobots = dc.RespectRobots }
-	if dc.CrawlDelay > 0 { eco.CrawlDelay = time.Duration(dc.CrawlDelay) * time.Millisecond }
-	if dc.NoSitemap { eco.NoSitemap = true }
-	if dc.DedupContent { eco.DedupContent = dc.DedupContent }
-	if dc.MobileReadable { eco.MobileReadable = dc.MobileReadable }
-	if dc.EnableResume { eco.EnableResume = dc.EnableResume }
-	if dc.Persist { eco.Persist = dc.Persist }
-	if dc.Incremental { eco.Incremental = dc.Incremental }
-	if dc.CacheMaxAge > 0 { eco.CacheMaxAge = time.Duration(dc.CacheMaxAge) * time.Second }
-	if dc.Headless { eco.Headless = dc.Headless }
-	if dc.Stealth { eco.Stealth = dc.Stealth }
-	if dc.ChromeProfile != "" { eco.ChromeProfile = dc.ChromeProfile }
-	if dc.ChromePath != "" { eco.ChromePath = dc.ChromePath }
-	if dc.AntibotEnabled { eco.AntibotEnabled = dc.AntibotEnabled }
-	if dc.AntibotAutoEscalate { eco.AntibotAutoEscalate = dc.AntibotAutoEscalate }
-	if dc.AssetSameDomain { eco.AssetSameDomain = dc.AssetSameDomain }
-	if dc.MaxAssetBytes > 0 { eco.MaxAssetBytes = dc.MaxAssetBytes }
-	if dc.CookieFile != "" { eco.CookieFile = dc.CookieFile }
-	if dc.UserAgent != "" { eco.UserAgent = dc.UserAgent }
+	applyConfigDefaults(&eco, dc)
+	applyCLIOptions(&eco, opts)
 
-	// ── CLI overrides (CloneOptions → EnhancedClonerOptions) ──
+	return eco
+}
+
+// applyConfigDefaults applies config file defaults to EnhancedClonerOptions.
+func applyConfigDefaults(eco *clone.EnhancedClonerOptions, dc config.CloneDefaults) {
+	if dc.MaxPages > 0 {
+		eco.MaxPages = dc.MaxPages
+	}
+	if dc.MaxDepth > 0 {
+		eco.MaxDepth = dc.MaxDepth
+	}
+	if dc.Traversal != "" {
+		eco.Traversal = clone.TraversalMode(dc.Traversal)
+	}
+	if dc.Subdomains {
+		eco.Subdomains = true
+	}
+	if dc.Scroll {
+		eco.Scroll = true
+	}
+	if dc.Workers > 0 {
+		eco.Workers = dc.Workers
+	}
+	if dc.AssetWorkers > 0 {
+		eco.AssetWorkers = dc.AssetWorkers
+	}
+	if dc.Timeout > 0 {
+		eco.Timeout = time.Duration(dc.Timeout) * time.Second
+	}
+	if dc.RenderTimeout > 0 {
+		eco.RenderTimeout = time.Duration(dc.RenderTimeout) * time.Second
+	}
+	if dc.Settle > 0 {
+		eco.Settle = time.Duration(dc.Settle) * time.Millisecond
+	}
+	if dc.RespectRobots {
+		eco.RespectRobots = dc.RespectRobots
+	}
+	if dc.CrawlDelay > 0 {
+		eco.CrawlDelay = time.Duration(dc.CrawlDelay) * time.Millisecond
+	}
+	if len(dc.RateLimitWhitelist) > 0 {
+		eco.RateLimitWhitelist = dc.RateLimitWhitelist
+	}
+	// Boolean default-true: viper always populates it (defaults.go
+	// registers the key), so assign unconditionally — config false
+	// must be able to disable the feature.
+	eco.RateLimitIPSegment = dc.RateLimitIPSegment
+	if dc.RateLimitIPPrefixV4 > 0 {
+		eco.RateLimitIPPrefixV4 = dc.RateLimitIPPrefixV4
+	}
+	if dc.RateLimitIPPrefixV6 > 0 {
+		eco.RateLimitIPPrefixV6 = dc.RateLimitIPPrefixV6
+	}
+	if dc.NoSitemap {
+		eco.NoSitemap = true
+	}
+	if dc.DedupContent {
+		eco.DedupContent = dc.DedupContent
+	}
+	if dc.MobileReadable {
+		eco.MobileReadable = dc.MobileReadable
+	}
+	if dc.EnableResume {
+		eco.EnableResume = dc.EnableResume
+	}
+	if dc.Persist {
+		eco.Persist = dc.Persist
+	}
+	if dc.Incremental {
+		eco.Incremental = dc.Incremental
+	}
+	if dc.CacheMaxAge > 0 {
+		eco.CacheMaxAge = time.Duration(dc.CacheMaxAge) * time.Second
+	}
+	if dc.Headless {
+		eco.Headless = dc.Headless
+	}
+	if dc.Stealth {
+		eco.Stealth = dc.Stealth
+	}
+	if dc.ChromeProfile != "" {
+		eco.ChromeProfile = dc.ChromeProfile
+	}
+	if dc.ChromePath != "" {
+		eco.ChromePath = dc.ChromePath
+	}
+	if dc.AntibotEnabled {
+		eco.AntibotEnabled = dc.AntibotEnabled
+	}
+	if dc.AntibotAutoEscalate {
+		eco.AntibotAutoEscalate = dc.AntibotAutoEscalate
+	}
+	if dc.AssetSameDomain {
+		eco.AssetSameDomain = dc.AssetSameDomain
+	}
+	if dc.MaxAssetBytes > 0 {
+		eco.MaxAssetBytes = dc.MaxAssetBytes
+	}
+	if dc.CookieFile != "" {
+		eco.CookieFile = dc.CookieFile
+	}
+	if dc.UserAgent != "" {
+		eco.UserAgent = dc.UserAgent
+	}
+	if dc.BrowserBackend != "" {
+		eco.BrowserBackend = dc.BrowserBackend
+	}
+	if dc.ArchiveFallback {
+		eco.ArchiveFallback = dc.ArchiveFallback
+	}
+	if dc.InsecureTLS {
+		eco.InsecureTLS = dc.InsecureTLS
+	}
+	if dc.TLSCACertPath != "" {
+		eco.TLSCACertPath = dc.TLSCACertPath
+	}
+}
+
+// applyCLIOptions applies CLI options to EnhancedClonerOptions.
+func applyCLIOptions(eco *clone.EnhancedClonerOptions, opts CloneOptions) {
+	if opts.OutputDir != "" {
+		eco.OutputDir = opts.OutputDir
+	}
+	if opts.Exclude != nil && len(opts.Exclude) > 0 {
+		eco.Exclude = opts.Exclude
+	}
 	if opts.MaxPages > 0 {
 		eco.MaxPages = opts.MaxPages
 	}
@@ -250,13 +475,27 @@ func (m *Manager) CloneApp(ctx context.Context, seedURL string, opts CloneOption
 	if opts.ScopePrefix != "" {
 		eco.ScopePrefix = opts.ScopePrefix
 	}
+	if opts.ScopeAnchor != "" {
+		eco.ScopeAnchor = opts.ScopeAnchor
+	}
 	if opts.CrawlDelay > 0 {
 		eco.CrawlDelay = time.Duration(opts.CrawlDelay) * time.Millisecond
+	}
+	if len(opts.RateLimitWhitelist) > 0 {
+		eco.RateLimitWhitelist = opts.RateLimitWhitelist
+	}
+	if opts.RateLimitIPSegment != nil {
+		eco.RateLimitIPSegment = *opts.RateLimitIPSegment
+	}
+	if opts.RateLimitIPPrefixV4 > 0 {
+		eco.RateLimitIPPrefixV4 = opts.RateLimitIPPrefixV4
+	}
+	if opts.RateLimitIPPrefixV6 > 0 {
+		eco.RateLimitIPPrefixV6 = opts.RateLimitIPPrefixV6
 	}
 	eco.Force = opts.Force
 	eco.Refresh = opts.Refresh
 
-	// 可选的布尔参数（nil 表示使用默认值）。
 	if opts.RespectRobots != nil {
 		eco.RespectRobots = *opts.RespectRobots
 	}
@@ -271,6 +510,9 @@ func (m *Manager) CloneApp(ctx context.Context, seedURL string, opts CloneOption
 	}
 	if opts.AssetSameDomain != nil {
 		eco.AssetSameDomain = *opts.AssetSameDomain
+	}
+	if len(opts.AssetDomains) > 0 {
+		eco.AssetDomains = opts.AssetDomains
 	}
 	if opts.Incremental != nil {
 		eco.Incremental = *opts.Incremental
@@ -302,109 +544,167 @@ func (m *Manager) CloneApp(ctx context.Context, seedURL string, opts CloneOption
 	if opts.CookieFile != "" {
 		eco.CookieFile = opts.CookieFile
 	}
-
-	// 设置输出目录到 apps 目录下。
-	host := extractHost(seedURL)
-	outputDir := filepath.Join(m.appDir, "cloned", host)
-	eco.OutputDir = outputDir
-
-	// 使用增强克隆器执行克隆。
-	cloner := clone.NewEnhancedCloner(eco)
-	cloneRes, err := cloner.Clone(ctx, seedURL)
-	if err != nil {
-		return AppInfo{}, nil, fmt.Errorf("clone website: %w", err)
+	if opts.BrowserBackend != "" {
+		eco.BrowserBackend = browser.BackendType(opts.BrowserBackend)
 	}
-
-	// 转换结果。
-	result := &CloneResult{
-		Success:            cloneRes.Success,
-		SeedURL:            cloneRes.SeedURL,
-		Host:               cloneRes.Host,
-		OutputDir:          cloneRes.OutputDir,
-		Pages:              cloneRes.Pages,
-		Assets:             cloneRes.Assets,
-		SizeBytes:          cloneRes.SizeBytes,
-		Duration:           cloneRes.Duration.String(),
-		Errors:             cloneRes.Errors,
-		DedupFiles:         cloneRes.DedupFiles,
-		DedupBytesSaved:    cloneRes.DedupBytesSaved,
-		AntibotDetections:  cloneRes.AntibotDetections,
-		AntibotStats:       cloneRes.AntibotStats,
+	if opts.KeepMedia {
+		eco.SkipAssetExts = make(map[string]bool)
 	}
-
-	// 创建应用信息。
-	now := time.Now()
-	app := AppInfo{
-		Name:        host,
-		Description: fmt.Sprintf("克隆于 %s", seedURL),
-		FilePath:    filepath.Join(outputDir, "pages", "index.html"),
-		CreatedAt:   now,
-		UpdatedAt:   now,
-		Type:        AppTypeCloned,
-		Status:      AppStatusActive,
-		Version:     "1.0.0",
-		SourceURL:   seedURL,
-		Pages:       result.Pages,
-		Assets:      result.Assets,
-		Size:        result.SizeBytes,
-		AppDir:      outputDir,
+	if opts.SkipExt != nil && len(opts.SkipExt) > 0 {
+		if eco.SkipAssetExts == nil {
+			eco.SkipAssetExts = clone.DefaultSkipAssetExts()
+		}
+		for _, ext := range opts.SkipExt {
+			if !strings.HasPrefix(ext, ".") {
+				ext = "." + ext
+			}
+			eco.SkipAssetExts[strings.ToLower(ext)] = true
+		}
 	}
-
-	m.mu.Lock()
-	m.apps[host] = app
-	m.mu.Unlock()
-
-	return app, result, nil
-}
-
-// CloneOptions defines options for website cloning.
-type CloneOptions struct {
-	MaxPages       int    // 最大页面数量（0 = 无限制）
-	MaxDepth       int    // 最大链接深度（0 = 无限制）
-	Traversal      string // 遍历策略：bfs / dfs（空 = 默认bfs）
-	Subdomains     bool   // 是否包含子域名
-	Scroll         bool   // 是否滚动加载懒加载内容
-	Timeout        int    // HTTP 请求超时（秒）
-	RenderTimeout  int    // 页面渲染硬超时（秒，默认30）
-	Settle         int    // 网络空闲等待时间（毫秒，1500 = 默认）
-	Workers        int    // 并发页面渲染线程数
-	AssetWorkers   int    // 并发资源下载线程数（0 = 与Workers相同）
-	ScopePrefix    string // 路径前缀限制
-	RespectRobots  *bool  // 是否遵守robots.txt（nil = 默认true）
-	EnableResume   *bool  // 是否启用断点续抓（nil = 默认true）
-	DedupContent   *bool  // 是否启用内容去重（nil = 默认true）
-	MobileReadable *bool  // 是否注入移动端CSS（nil = 默认true）
-	AssetSameDomain *bool // 仅下载同域资源（nil = 默认true）
-	CrawlDelay     int    // 爬取延迟（毫秒，0 = 使用robots.txt设定）
-	Incremental    *bool  // 是否启用增量缓存（nil = 默认false）
-	CacheMaxAge    int    // 缓存最长有效时间（秒，默认86400）
-	ChromePath       string // Chrome 浏览器路径（空=自动检测）
-	ChromeProfile    string // Chrome 用户数据目录（覆盖默认 ./wukong_chrome_profile）
-	NoHeadless       bool   // 禁用 headless 模式（显示可见窗口）
-	NoChromeProfile  bool   // 禁用 Chrome Profile（默认启用）
-	NoStealth        bool   // 禁用 Stealth 反检测（默认启用）
-	AntibotEnabled       *bool  // 自动反爬检测（nil=默认true）
-	AntibotAutoEscalate  *bool  // 自动升级隐身级别（nil=默认true）
-	CookieFile           string // Cookie文件路径 (Netscape格式, 用于登录态克隆)
-	Force                bool   // 是否强制删除已有克隆
-	Refresh              bool   // 是否刷新已有页面
+	// 默认禁止浏览器自动下载文件; 仅当用户显式指定 --allow-downloads 时开启.
+	eco.DisableDownloads = !opts.AllowDownloads
+	if opts.ArchiveFallback != nil {
+		eco.ArchiveFallback = *opts.ArchiveFallback
+	}
 }
 
 // CloneResult wraps the clone package result for external use.
 type CloneResult struct {
-	Success            bool
-	SeedURL            string
-	Host               string
-	OutputDir          string
-	Pages              int
-	Assets             int
-	SizeBytes          int64
-	Duration           string
-	Errors             []string
-	DedupFiles         int
-	DedupBytesSaved    int64
-	AntibotDetections  int
-	AntibotStats       string
+	Success           bool
+	SeedURL           string
+	Host              string
+	OutputDir         string
+	Pages             int
+	Assets            int
+	SizeBytes         int64
+	Duration          string
+	Errors            []string
+	DedupFiles        int
+	DedupBytesSaved   int64
+	AntibotDetections int
+	AntibotStats      string
+}
+
+// DownloadOptions defines options for file downloading.
+type DownloadOptions struct {
+	OutputDir string
+	MaxPages  int
+	MaxDepth  int
+	Workers   int
+	Headless  bool
+	Stealth   bool
+	Antibot   bool
+	Resume    bool
+	Force     bool
+	Refresh   bool
+	FileExts  map[string]bool
+}
+
+// DownloadResult wraps the download result for CLI output.
+type DownloadResult struct {
+	Success         bool
+	SeedURL         string
+	Host            string
+	OutputDir       string
+	FilesDownloaded int
+	FilesSkipped    int
+	FilesFailed     int
+	TotalSize       int64
+	Duration        time.Duration
+	StartTime       time.Time
+	EndTime         time.Time
+	Files           []DownloadedFile
+	Errors          []string
+	AntibotStats    string
+}
+
+// DownloadedFile represents a single downloaded file for CLI display.
+type DownloadedFile struct {
+	URL         string
+	FilePath    string
+	FileName    string
+	Size        int64
+	ContentType string
+	Extension   string
+	Depth       int
+	Error       string
+}
+
+// DownloadFiles downloads files from a website by crawling its pages.
+func (m *Manager) DownloadFiles(ctx context.Context, seedURL string, opts DownloadOptions) (*DownloadResult, error) {
+	// Set default output directory if not specified
+	if opts.OutputDir == "" {
+		host := extractHost(seedURL)
+		opts.OutputDir = filepath.Join(m.appDir, "downloads", host)
+	}
+
+	// Build downloader options
+	dlOpts := clone.DownloaderOptions{
+		OutputDir: opts.OutputDir,
+		MaxPages:  opts.MaxPages,
+		MaxDepth:  opts.MaxDepth,
+		Workers:   opts.Workers,
+		Headless:  opts.Headless,
+		Stealth:   opts.Stealth,
+		Antibot:   opts.Antibot,
+		Resume:    opts.Resume,
+		Force:     opts.Force,
+		Refresh:   opts.Refresh,
+	}
+
+	if opts.FileExts != nil {
+		dlOpts.FileExts = opts.FileExts
+	}
+
+	// Propagate the clone module's TLS policy to the file downloader.
+	dlOpts.InsecureTLS = m.cfg.Clone.InsecureTLS
+	dlOpts.TLSCACertPath = m.cfg.Clone.TLSCACertPath
+
+	// Create downloader
+	downloader := clone.NewDownloader(dlOpts)
+
+	// Execute download
+	dlResult, err := downloader.Download(ctx, seedURL)
+	if err != nil {
+		return nil, fmt.Errorf("download files: %w", err)
+	}
+
+	// Convert result
+	result := &DownloadResult{
+		Success:         dlResult.Success,
+		SeedURL:         dlResult.SeedURL,
+		Host:            dlResult.Host,
+		OutputDir:       dlResult.OutputDir,
+		FilesDownloaded: dlResult.FilesDownloaded,
+		FilesSkipped:    dlResult.FilesSkipped,
+		FilesFailed:     dlResult.FilesFailed,
+		TotalSize:       dlResult.TotalSize,
+		Duration:        dlResult.Duration,
+		StartTime:       dlResult.StartTime,
+		EndTime:         dlResult.EndTime,
+		AntibotStats:    dlResult.AntibotStats,
+	}
+
+	// Convert downloaded files
+	result.Files = make([]DownloadedFile, len(dlResult.Files))
+	for i, f := range dlResult.Files {
+		result.Files[i] = DownloadedFile{
+			URL:         f.URL,
+			FilePath:    f.FilePath,
+			FileName:    f.FileName,
+			Size:        f.Size,
+			ContentType: f.ContentType,
+			Extension:   f.Extension,
+			Depth:       f.Depth,
+			Error:       f.Error,
+		}
+	}
+
+	// Copy errors
+	result.Errors = make([]string, len(dlResult.Errors))
+	copy(result.Errors, dlResult.Errors)
+
+	return result, nil
 }
 
 // extractHost extracts the hostname from a URL.
@@ -424,6 +724,46 @@ func extractHost(urlStr string) string {
 	}
 
 	return parsed.Host
+}
+
+// deriveMainPageFromSeedURL converts a clone seed URL to the relative
+// main page path expected inside the ZIM archive (pages/ prefix stripped).
+// Examples:
+//
+//	"https://www.state.gov/biographies-list"     → "biographies-list.html"
+//	"https://www.state.gov/biographies-list/"    → "biographies-list/index.html"
+//	"https://www.state.gov/"                     → "index.html"
+//	"https://www.state.gov"                      → "index.html"
+func deriveMainPageFromSeedURL(seedURL string) string {
+	if seedURL == "" {
+		return ""
+	}
+
+	parsed, err := url.Parse(seedURL)
+	if err != nil {
+		return ""
+	}
+
+	path := parsed.Path
+	path = strings.TrimPrefix(path, "/")
+	path = strings.TrimSuffix(path, "/")
+
+	if path == "" {
+		return "index.html"
+	}
+
+	// If the path ends with a known file extension, use it as-is.
+	// (Rare for seed URLs but handle it defensively.)
+	ext := filepath.Ext(path)
+	if ext != "" && len(ext) <= 5 {
+		return path
+	}
+
+	// Path like "biographies/abram-paley" → could be either
+	// "biographies/abram-paley.html" or "biographies/abram-paley/index.html".
+	// We return the .html variant; the packer has redirect logic that
+	// maps both forms to each other, so either works as the main page.
+	return path + ".html"
 }
 
 // PackApp packages an application into the specified format.
@@ -464,6 +804,14 @@ func (m *Manager) PackApp(ctx context.Context, appName string, opts PackOptions)
 		packOpts.AppDescription = opts.Description
 	}
 
+	// For cloned apps, derive the main page from the seed URL so users
+	// land on the page they originally cloned, not a generic content index.
+	if app.Type == AppTypeCloned && app.SourceURL != "" {
+		if mainPath := deriveMainPageFromSeedURL(app.SourceURL); mainPath != "" {
+			packOpts.MainPagePath = mainPath
+		}
+	}
+
 	// 创建打包器
 	packer := pack.NewPacker(packOpts)
 
@@ -492,17 +840,17 @@ func (m *Manager) PackApp(ctx context.Context, appName string, opts PackOptions)
 
 // PackOptions defines options for application packaging.
 type PackOptions struct {
-	Format        string // html | zim | binary | app
-	OutputPath    string
-	BaseBinary    string
-	IconPath      string
-	Compress      bool
-	Incremental   bool   // 增量 ZIM 打包（复用未变更集群）
-	Language      string // ZIM 语言代码（默认 "eng"）
-	Title         string // ZIM 标题（覆盖自动检测）
-	Description   string
-	Date          string // YYYY-MM-DD
-	Creator       string
+	Format      string // html | zim | binary | app
+	OutputPath  string
+	BaseBinary  string
+	IconPath    string
+	Compress    bool
+	Incremental bool   // 增量 ZIM 打包（复用未变更集群）
+	Language    string // ZIM 语言代码（默认 "eng"）
+	Title       string // ZIM 标题（覆盖自动检测）
+	Description string
+	Date        string // YYYY-MM-DD
+	Creator     string
 }
 
 // PackResult holds the outcome of a packaging operation.
@@ -521,15 +869,28 @@ type PackResult struct {
 
 // PreviewServer manages the preview server lifecycle.
 type PreviewServer struct {
-	srv   *server.Server
-	mu    sync.RWMutex
-	ctx   context.Context
+	srv    *server.Server
+	mu     sync.RWMutex
+	ctx    context.Context
 	cancel context.CancelFunc
 }
 
 // PreviewApp starts a local preview server for an app.
+// If a preview server is already running for this app, returns the existing URL.
 func (m *Manager) PreviewApp(ctx context.Context, appName string) (*PreviewResult, error) {
-	// 获取应用信息
+	m.mu.RLock()
+	if entry, exists := m.previewServers[appName]; exists {
+		m.mu.RUnlock()
+		return &PreviewResult{
+			Success: true,
+			URL:     entry.url,
+			AppName: appName,
+			Message: fmt.Sprintf("预览服务器已在运行，请访问 %s", entry.url),
+			Cancel:  entry.cancel,
+		}, nil
+	}
+	m.mu.RUnlock()
+
 	m.mu.RLock()
 	app, ok := m.apps[appName]
 	m.mu.RUnlock()
@@ -538,28 +899,40 @@ func (m *Manager) PreviewApp(ctx context.Context, appName string) (*PreviewResul
 		return nil, fmt.Errorf("app %q not found", appName)
 	}
 
-	// 确定预览目录
 	previewDir := app.AppDir
 	if previewDir == "" {
 		previewDir = filepath.Dir(app.FilePath)
 	}
 
-	// 创建预览服务器
 	cfg := server.DefaultConfig()
 	cfg.RootDir = previewDir
 	cfg.AppName = appName
 
 	srv := server.NewServer(cfg)
 
-	// 创建可取消的上下文
 	previewCtx, cancel := context.WithCancel(ctx)
 
-	// 启动服务器
 	addr, err := srv.StartAndWait(previewCtx)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("start preview server: %w", err)
 	}
+
+	entry := &previewServerEntry{
+		url:    addr,
+		cancel: cancel,
+	}
+
+	m.mu.Lock()
+	m.previewServers[appName] = entry
+	m.mu.Unlock()
+
+	go func() {
+		<-previewCtx.Done()
+		m.mu.Lock()
+		delete(m.previewServers, appName)
+		m.mu.Unlock()
+	}()
 
 	return &PreviewResult{
 		Success: true,
@@ -639,10 +1012,10 @@ func (m *Manager) ExportApp(appName, outputPath string) (*ExportResult, error) {
 	info, _ := os.Stat(outputPath)
 
 	return &ExportResult{
-		Success:   true,
+		Success:    true,
 		OutputPath: outputPath,
-		Size:      info.Size(),
-		Message:   fmt.Sprintf("应用已导出到 %s", outputPath),
+		Size:       info.Size(),
+		Message:    fmt.Sprintf("应用已导出到 %s", outputPath),
 	}, nil
 }
 
@@ -763,7 +1136,7 @@ func inlineCSSUrls(html, appDir string) string {
 		if tagEnd == -1 {
 			return match
 		}
-		openTag := match[tagStart:tagEnd+1]
+		openTag := match[tagStart : tagEnd+1]
 
 		return fmt.Sprintf(`%s>%s</style>`, openTag, styleWithUrls)
 	})
@@ -890,6 +1263,7 @@ func (m *Manager) ListApps() []AppInfo {
 }
 
 // DeleteApp removes an app.
+// For cloned apps, removes the entire app directory including all pages and assets.
 func (m *Manager) DeleteApp(name string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -899,8 +1273,16 @@ func (m *Manager) DeleteApp(name string) error {
 		return fmt.Errorf("app %q not found", name)
 	}
 
-	if err := os.Remove(app.FilePath); err != nil {
-		return fmt.Errorf("delete app file: %w", err)
+	if app.Type == AppTypeCloned && app.AppDir != "" {
+		if err := os.RemoveAll(app.AppDir); err != nil {
+			return fmt.Errorf("delete cloned app directory: %w", err)
+		}
+	} else {
+		if err := os.Remove(app.FilePath); err != nil {
+			return fmt.Errorf("delete app file: %w", err)
+		}
+		manifestPath := getManifestPath(app)
+		os.Remove(manifestPath)
 	}
 
 	delete(m.apps, name)
@@ -929,6 +1311,11 @@ func (m *Manager) UpdateApp(name, htmlContent string) (AppInfo, error) {
 	// 增加版本号
 	app.Version = incrementVersion(app.Version)
 	m.apps[name] = app
+
+	if err := saveManifest(app); err != nil {
+		return app, fmt.Errorf("save manifest: %w", err)
+	}
+
 	return app, nil
 }
 
@@ -945,6 +1332,11 @@ func (m *Manager) UpdateAppStatus(name string, status AppStatus) (AppInfo, error
 	app.Status = status
 	app.UpdatedAt = time.Now()
 	m.apps[name] = app
+
+	if err := saveManifest(app); err != nil {
+		return app, fmt.Errorf("save manifest: %w", err)
+	}
+
 	return app, nil
 }
 
@@ -966,6 +1358,11 @@ func (m *Manager) UpdateAppMetadata(name string, updates AppMetadataUpdate) (App
 	}
 	app.UpdatedAt = time.Now()
 	m.apps[name] = app
+
+	if err := saveManifest(app); err != nil {
+		return app, fmt.Errorf("save manifest: %w", err)
+	}
+
 	return app, nil
 }
 
@@ -993,12 +1390,21 @@ func (m *Manager) loadExisting() {
 		}
 
 		filePath := filepath.Join(m.appDir, entry.Name())
+		name := entry.Name()[:len(entry.Name())-5] // Remove .html
+
+		// Try to load from manifest first.
+		manifestPath := filepath.Join(m.appDir, manifestFileName)
+		if manifestData, err := loadManifest(manifestPath); err == nil && manifestData.Name == name {
+			m.apps[name] = *manifestData
+			continue
+		}
+
+		// Fallback to file system scan.
 		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
 
-		name := entry.Name()[:len(entry.Name())-5] // Remove .html
 		m.apps[name] = AppInfo{
 			Name:      name,
 			FilePath:  filePath,
@@ -1023,6 +1429,13 @@ func (m *Manager) loadExisting() {
 			continue
 		}
 		clonePath := filepath.Join(clonedDir, entry.Name())
+
+		// Try to load from manifest first.
+		manifestPath := filepath.Join(clonePath, manifestFileName)
+		if manifestData, err := loadManifest(manifestPath); err == nil {
+			m.apps[manifestData.Name] = *manifestData
+			continue
+		}
 
 		// Verify it has a pages/ subdirectory (marker of a cloned site).
 		pagesDir := filepath.Join(clonePath, "pages")
@@ -1072,6 +1485,39 @@ func (m *Manager) loadExisting() {
 			AppDir:      clonePath,
 		}
 	}
+}
+
+const manifestFileName = ".manifest.json"
+
+// getManifestPath returns the path to the manifest file for an app.
+func getManifestPath(app AppInfo) string {
+	if app.AppDir != "" && app.Type == AppTypeCloned {
+		return filepath.Join(app.AppDir, manifestFileName)
+	}
+	return filepath.Join(filepath.Dir(app.FilePath), manifestFileName)
+}
+
+// saveManifest saves app metadata to a manifest file.
+func saveManifest(app AppInfo) error {
+	path := getManifestPath(app)
+	data, err := json.MarshalIndent(app, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal manifest: %w", err)
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+// loadManifest loads app metadata from a manifest file.
+func loadManifest(path string) (*AppInfo, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var app AppInfo
+	if err := json.Unmarshal(data, &app); err != nil {
+		return nil, fmt.Errorf("unmarshal manifest: %w", err)
+	}
+	return &app, nil
 }
 
 // incrementVersion increments a version string (e.g., "1.0.0" -> "1.0.1").
@@ -1294,12 +1740,83 @@ func generateCalculatorTemplate(title string) string {
     function appendOp(op) { expression += op; updateDisplay(); }
     function clearDisplay() { expression = ''; updateDisplay(); }
     function calculate() {
+      if (!expression) return;
       try {
-        expression = eval(expression).toString();
+        expression = safeEval(expression).toString();
         updateDisplay();
       } catch(e) {
         expression = 'Error'; updateDisplay(); expression = '';
       }
+    }
+    function safeEval(expr) {
+      const validChars = /^[0-9+\-*/().\s]+$/;
+      if (!validChars.test(expr)) {
+        throw new Error('Invalid characters');
+      }
+      const tokens = tokenize(expr);
+      const postfix = infixToPostfix(tokens);
+      return evaluatePostfix(postfix);
+    }
+    function tokenize(expr) {
+      const tokens = [];
+      let num = '';
+      for (let i = 0; i < expr.length; i++) {
+        const c = expr[i];
+        if (/\d/.test(c) || c === '.') {
+          num += c;
+        } else if (['+', '-', '*', '/', '(', ')'].includes(c)) {
+          if (num) { tokens.push({type: 'num', value: parseFloat(num)}); num = ''; }
+          tokens.push({type: 'op', value: c});
+        } else if (c !== ' ') {
+          throw new Error('Invalid character: ' + c);
+        }
+      }
+      if (num) tokens.push({type: 'num', value: parseFloat(num)});
+      return tokens;
+    }
+    function infixToPostfix(tokens) {
+      const output = [];
+      const stack = [];
+      const precedence = { '+': 1, '-': 1, '*': 2, '/': 2 };
+      for (const token of tokens) {
+        if (token.type === 'num') {
+          output.push(token);
+        } else if (token.value === '(') {
+          stack.push(token);
+        } else if (token.value === ')') {
+          while (stack.length && stack[stack.length-1].value !== '(') {
+            output.push(stack.pop());
+          }
+          stack.pop();
+        } else {
+          while (stack.length && stack[stack.length-1].value !== '(' &&
+                 precedence[stack[stack.length-1].value] >= precedence[token.value]) {
+            output.push(stack.pop());
+          }
+          stack.push(token);
+        }
+      }
+      while (stack.length) output.push(stack.pop());
+      return output;
+    }
+    function evaluatePostfix(postfix) {
+      const stack = [];
+      for (const token of postfix) {
+        if (token.type === 'num') {
+          stack.push(token.value);
+        } else {
+          const b = stack.pop();
+          const a = stack.pop();
+          if (token.value === '+') stack.push(a + b);
+          else if (token.value === '-') stack.push(a - b);
+          else if (token.value === '*') stack.push(a * b);
+          else if (token.value === '/') {
+            if (b === 0) throw new Error('Division by zero');
+            stack.push(a / b);
+          }
+        }
+      }
+      return stack[0];
     }
   </script>
 </body>

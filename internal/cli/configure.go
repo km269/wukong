@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
 
 	"github.com/km269/wukong/internal/config"
 )
@@ -23,56 +22,108 @@ This command opens an interactive configuration wizard that helps you
 set up your LLM providers, enable/disable extensions, and customize
 agent behavior.
 
+If a config file already exists at the target path, its values are
+used as the starting point and pressing Enter on any prompt keeps
+the current value — re-running the wizard edits in place instead of
+rebuilding from scratch. Use --edit to force this incremental mode
+(also the default when an existing file is present).
+
 Examples:
   wukong configure
+  wukong configure --edit
   wukong configure --output ~/.config/wukong/config.yaml`,
 		RunE: runConfigure,
 	}
 
 	cmd.Flags().StringP("output", "o", "",
 		"Output config file path (default: ~/.config/wukong/config.yaml)")
+	cmd.Flags().Bool("edit", false,
+		"Edit the existing config incrementally (default when the file exists)")
 
 	return cmd
 }
 
 func runConfigure(cmd *cobra.Command, args []string) error {
 	outputPath, _ := cmd.Flags().GetString("output")
+	editMode, _ := cmd.Flags().GetBool("edit")
+
+	// Resolve the target path up front so baseConfig can check
+	// existence even when --output is used with --edit.
+	if outputPath == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("cannot resolve home dir: %w", err)
+		}
+		configDir := filepath.Join(homeDir, ".config", "wukong")
+		if err := os.MkdirAll(configDir, 0755); err != nil {
+			return fmt.Errorf("create config dir: %w", err)
+		}
+		outputPath = filepath.Join(configDir, "config.yaml")
+	}
 
 	fmt.Println("=== Wukong Configuration Wizard ===")
 	fmt.Println()
 
-	cfg := defaultConfig()
-
 	reader := bufio.NewReader(os.Stdin)
+
+	// Baseline: --edit or an existing file loads the on-disk config
+	// (unexpanded, so ${ENV} secrets round-trip untouched); otherwise
+	// start from the single source of truth for built-in defaults.
+	cfg, existing, err := baseConfig(outputPath, editMode)
+	if err != nil {
+		return err
+	}
+	if existing {
+		fmt.Println("Loaded existing config — Enter keeps the current value.")
+		fmt.Println()
+	} else {
+		cfg.DefaultProvider = ""
+		cfg.Providers = nil
+		cfg.Extensions = nil
+	}
 
 	// Step 1: Default provider
 	fmt.Println("Step 1: Default Model Provider")
-	fmt.Print("Enter provider name [lmstudio]: ")
-	providerName := readLine(reader, "lmstudio")
-	cfg.DefaultProvider = providerName
+	cur := cfg.DefaultProvider
+	if cur == "" {
+		cur = "lmstudio"
+	}
+	cfg.DefaultProvider = promptValue(reader, "Enter provider name", cur)
 
 	// Step 2: Provider configuration
 	fmt.Println("\nStep 2: Configure Provider")
 	fmt.Println("You can add multiple providers. Press Enter on name to finish.")
 
+	// Edit mode: walk existing providers so their fields are kept
+	// (Enter keeps each field unchanged).
+	for i := range cfg.Providers {
+		p := &cfg.Providers[i]
+		fmt.Printf("\nProvider %d: %s (type %s)\n", i+1, p.Name, orDefault(p.Type, "openai"))
+		if p.Type != "" {
+			p.Type = promptValue(reader, "  Type", p.Type)
+		} else {
+			p.Type = "openai"
+		}
+		p.BaseURL = promptValue(reader, "  Base URL", p.BaseURL)
+		p.APIKey = promptValue(reader, "  API Key (or ${ENV_VAR})", p.APIKey)
+		p.Model = promptValue(reader, "  Model", p.Model)
+	}
+
 	for {
-		fmt.Print("\nProvider name (or Enter to finish): ")
+		fmt.Print("\nAdd provider name (or Enter to finish): ")
 		name := readLine(reader, "")
 		if name == "" {
 			break
 		}
+		if cfg.FindProvider(name) != nil {
+			fmt.Printf("Provider %q already exists — skipped.\n", name)
+			continue
+		}
 
-		fmt.Print("Provider type [openai]: ")
-		pType := readLine(reader, "openai")
-
-		fmt.Print("Base URL: ")
-		baseURL := readLine(reader, "")
-
-		fmt.Print("API Key (or env var like ${OPENAI_API_KEY}): ")
-		apiKey := readLine(reader, "")
-
-		fmt.Print("Model name: ")
-		modelName := readLine(reader, "")
+		pType := promptValue(reader, "Provider type", "openai")
+		baseURL := promptValue(reader, "Base URL", "")
+		apiKey := promptValue(reader, "API Key (or ${ENV_VAR})", "")
+		modelName := promptValue(reader, "Model name", "")
 
 		cfg.Providers = append(cfg.Providers, config.ProviderConfig{
 			Name:    name,
@@ -101,61 +152,65 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 		{"apps", "Custom HTML app management"},
 	}
 
+	// Edit mode: preserve extensions not in the builtin list so the
+	// wizard never silently deletes externally managed entries.
+	kept := make([]config.ExtensionConfig, 0, len(cfg.Extensions))
+	for _, ext := range cfg.Extensions {
+		if ext.Type == "builtin" && isBuiltinExt(builtinExts, ext.Name) {
+			continue // handled by the loop below
+		}
+		kept = append(kept, ext)
+	}
+
 	for _, ext := range builtinExts {
-		fmt.Printf("Enable %s (%s)? [Y/n]: ", ext.name, ext.desc)
-		answer := readLine(reader, "y")
-		enabled := strings.ToLower(answer) != "n"
-		cfg.Extensions = append(cfg.Extensions, config.ExtensionConfig{
+		enabled := true
+		for _, e := range cfg.Extensions {
+			if e.Name == ext.name {
+				enabled = e.Enabled
+				break
+			}
+		}
+		fmt.Printf("Enable %s (%s)? [Y/n] (current %s): ",
+			ext.name, ext.desc, yn(enabled))
+		ans := readLine(reader, yn(enabled))
+		enabled = strings.ToLower(ans) != "n"
+		kept = append(kept, config.ExtensionConfig{
 			Name:    ext.name,
 			Type:    "builtin",
 			Enabled: enabled,
 		})
 	}
+	cfg.Extensions = kept
 
 	// Step 4: Agent settings
 	fmt.Println("\nStep 4: Agent Settings")
-	fmt.Print("Max LLM calls per run [50]: ")
-	maxCallsStr := readLine(reader, "50")
+	cur = strconv.Itoa(cfg.Agent.MaxLLMCalls)
+	if cur == "0" {
+		cur = "50"
+	}
+	maxCallsStr := promptValue(reader, "Max LLM calls per run", cur)
 	maxCalls, err := strconv.Atoi(maxCallsStr)
 	if err != nil || maxCalls <= 0 {
-		maxCalls = 50
+		maxCalls, _ = strconv.Atoi(cur)
 	}
 	cfg.Agent.MaxLLMCalls = maxCalls
 
-	fmt.Print("Enable parallel tool execution? [Y/n]: ")
-	parallel := readLine(reader, "y")
-	cfg.Agent.ParallelTools = strings.ToLower(parallel) != "n"
+	ans := promptValue(reader, "Enable parallel tool execution", yn(cfg.Agent.ParallelTools))
+	cfg.Agent.ParallelTools = strings.ToLower(ans) != "n"
 
-	fmt.Print("Enable streaming output? [Y/n]: ")
-	streaming := readLine(reader, "y")
-	cfg.Agent.Streaming = strings.ToLower(streaming) != "n"
+	ans = promptValue(reader, "Enable streaming output", yn(cfg.Agent.Streaming))
+	cfg.Agent.Streaming = strings.ToLower(ans) != "n"
 
 	// Step 5: Security
 	fmt.Println("\nStep 5: Security")
-	fmt.Print("Block dangerous commands (rm -rf / etc)? [Y/n]: ")
-	blockDangerous := readLine(reader, "y")
-	cfg.Security.BlockDangerousCommands = strings.ToLower(blockDangerous) != "n"
+	ans = promptValue(reader, "Block dangerous commands (rm -rf / etc)", yn(cfg.Security.BlockDangerousCommands))
+	cfg.Security.BlockDangerousCommands = strings.ToLower(ans) != "n"
 
-	fmt.Print("Require user approval for destructive operations? [y/N]: ")
-	requireApproval := readLine(reader, "n")
-	cfg.Security.RequireApproval = strings.ToLower(requireApproval) == "y"
+	ans = promptValue(reader, "Require approval for destructive operations", yn(cfg.Security.RequireApproval))
+	cfg.Security.RequireApproval = strings.ToLower(ans) == "y"
 
-	// Determine output path
-	if outputPath == "" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			outputPath = "config.yaml"
-		} else {
-			configDir := filepath.Join(homeDir, ".config", "wukong")
-			if err := os.MkdirAll(configDir, 0755); err != nil {
-				return fmt.Errorf("create config dir: %w", err)
-			}
-			outputPath = filepath.Join(configDir, "config.yaml")
-		}
-	}
-
-	// Write config
-	data, err := yaml.Marshal(cfg)
+	// Write config using the snake_case keys the loader reads back.
+	data, err := config.MarshalYAML(cfg)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
@@ -170,107 +225,64 @@ func runConfigure(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// defaultConfig returns a configuration with sensible defaults.
-func defaultConfig() *config.WukongConfig {
-	return &config.WukongConfig{
-		DefaultProvider: "lmstudio",
-		Session: config.SessionConfig{
-			Backend:        "sqlite",
-			DBPath:         "wukong.db",
-			EventLimit:     500,
-			TTL:            0, // unlimited
-			EnableSummary:  true,
-			SummaryTrigger: 50,
-		},
-		Memory: config.MemoryConfig{
-			Backend:     "sqlite",
-			DBPath:      "wukong.db",
-			MaxMemories: 100,
-			AutoExtract: true,
-		},
-		Todo: config.TodoConfig{
-			Backend: "sqlite",
-			DBPath:  "wukong.db",
-		},
-		Agent: config.AgentConfig{
-			MaxLLMCalls:           50,
-			MaxToolIterations:     30,
-			ParallelTools:         true,
-			Streaming:             true,
-			MaxRunDuration:        300 * 1000000000, // 300s in ns
-			Temperature:           0.7,
-			MaxTokens:             4096,
-			ToolRetryEnabled:      true,
-			ToolRetryMaxAttempts:  3,
-			ToolRetryInitialWait:  1 * 1000000000, // 1s in ns
-			ToolRetryBackoffFactor: 2.0,
-			EnablePostToolPrompt:  true,
-		},
-		Security: config.SecurityConfig{
-			MalwareScanEnabled:     true,
-			BlockDangerousCommands: true,
-			DefaultTimeout:         30 * 1000000000, // 30s in ns
-			MaxTimeout:             300 * 1000000000, // 300s in ns
-			BlockedCommands: []string{
-				"rm -rf /", "dd if=/dev/zero",
-				"mkfs.", "> /dev/sda", "fork bomb",
-			},
-		},
-		Revision: config.RevisionConfig{
-			Enabled:              true,
-			RevisionProvider:     "",
-			RevisionModel:        "",
-			MaxCommandOutput:     8000,
-			EnableSemanticSearch: false,
-			SearchStrategy:       "include_all",
-			MaxContextTokens:     64000,
-			TrimRatio:            0.3,
-		},
-		Browser: config.BrowserConfig{
-			Enabled:         true,
-			BrowserType:     "chromium",
-			Headless:        true,
-			CacheDir:        ".wukong_cache",
-			MaxDownloadSize: 104857600, // 100MB
-			Timeout:         60 * 1000000000, // 60s in ns
-		},
-		Recall: config.RecallConfig{
-			Enabled:              true,
-			Backend:              "sqlite",
-			DBPath:               "wukong.db",
-			MaxResults:           10,
-			MaxMessagesPerSession: 200,
-		},
-		Visualiser: config.VisualiserConfig{
-			Enabled:   true,
-			OutputDir: ".wukong_visuals",
-			MaxWidth:  1200,
-			MaxHeight: 800,
-		},
-		Tutorial: config.TutorialConfig{
-			Enabled:  true,
-			Language: "zh",
-		},
-		TopOfMind: config.TopOfMindConfig{
-			Enabled:         true,
-			InstructionFile: ".wukong_instructions.md",
-			MaxLength:       2000,
-		},
-		CodeMode: config.CodeModeConfig{
-			Enabled:     true,
-			Timeout:     10 * 1000000000, // 10s default
-			MaxMemoryMB: 128,
-		},
-		Apps: config.AppsConfig{
-			Enabled: true,
-			AppDir:  ".wukong_apps",
-		},
-		Summon: config.SummonConfig{
-			Enabled:       true,
-			SkillsDir:     ".wukong_skills",
-			MaxConcurrent: 5,
-		},
+// baseConfig returns the wizard starting point: the on-disk config
+// loaded unexpanded when it exists (or --edit is set), otherwise
+// built-in defaults. The bool reports whether an existing file was
+// loaded.
+func baseConfig(path string, edit bool) (*config.WukongConfig, bool, error) {
+	info, err := os.Stat(path)
+	exists := err == nil && !info.IsDir()
+
+	if edit && !exists {
+		// --edit without a file: fall back to defaults.
+		return config.Defaults(), false, nil
 	}
+	if !exists {
+		return config.Defaults(), false, nil
+	}
+
+	loader, err := config.NewLoader(path)
+	if err != nil {
+		return nil, false, fmt.Errorf("load existing config: %w", err)
+	}
+	cfg, err := loader.LoadUnresolved()
+	if err != nil {
+		return nil, false, fmt.Errorf("parse existing config: %w", err)
+	}
+	return cfg, true, nil
+}
+
+// promptValue prints "label [current]: " and returns the entered
+// value, keeping the current value when the user presses Enter.
+func promptValue(reader *bufio.Reader, label, current string) string {
+	fmt.Printf("%s [%s]: ", label, current)
+	return readLine(reader, current)
+}
+
+// orDefault returns def when v is empty.
+func orDefault(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
+}
+
+// yn renders a bool as the "y"/"n" prompt default.
+func yn(v bool) string {
+	if v {
+		return "y"
+	}
+	return "n"
+}
+
+// isBuiltinExt reports whether name is in the builtin list.
+func isBuiltinExt(exts []struct{ name, desc string }, name string) bool {
+	for _, e := range exts {
+		if e.name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // readLine reads a line from the reader, returning a default if empty.

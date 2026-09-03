@@ -4,6 +4,8 @@ package util
 import (
 	"log/slog"
 	"os"
+
+	"github.com/km269/wukong/pkg/logutil"
 )
 
 var (
@@ -11,6 +13,9 @@ var (
 	// It defaults to JSON format at INFO level for production-friendly
 	// observability. CLI mode may override to text format.
 	Logger *slog.Logger
+
+	// DebugEnabled indicates whether debug-level logging is enabled.
+	DebugEnabled bool
 )
 
 func init() {
@@ -22,16 +27,22 @@ func init() {
 
 // SetDebugMode switches the logger to debug level for verbose output.
 func SetDebugMode() {
+	DebugEnabled = true
 	Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))
+	slog.SetDefault(Logger)
+	logutil.SetLevel(slog.LevelDebug)
 }
 
 // SetQuietMode switches the logger to warn level for minimal output.
 func SetQuietMode() {
+	DebugEnabled = false
 	Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelWarn,
 	}))
+	slog.SetDefault(Logger)
+	logutil.SetLevel(slog.LevelWarn)
 }
 
 // SetLogLevel sets the global logger to the specified level.
@@ -51,4 +62,5 @@ func SetLogLevel(level string) {
 	Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: lvl,
 	}))
+	slog.SetDefault(Logger)
 }

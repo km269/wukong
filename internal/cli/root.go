@@ -38,8 +38,8 @@ Built with tRPC-Agent-Go, tRPC-MCP-Go and tRPC-A2A-Go.`,
 		},
 	}
 
-	cmd.PersistentFlags().BoolVar(
-		&debugEnabled, "debug", false,
+	cmd.PersistentFlags().BoolVarP(
+		&debugEnabled, "debug", "D", false,
 		"Enable debug-level logging",
 	)
 	cmd.PersistentFlags().BoolVar(
@@ -51,12 +51,14 @@ Built with tRPC-Agent-Go, tRPC-MCP-Go and tRPC-A2A-Go.`,
 	cmd.AddCommand(newConfigureCmd())
 	cmd.AddCommand(newVersionCmd())
 	cmd.AddCommand(newExtensionCmd())
+	cmd.AddCommand(newCapsCmd())
 	cmd.AddCommand(newCompletionCmd())
 	cmd.AddCommand(newEvalCmd())
 	cmd.AddCommand(newProjectCmd())
 	cmd.AddCommand(newProjectsCmd())
 	cmd.AddCommand(newRunCmd())
 	cmd.AddCommand(newConfigCmd())
+	cmd.AddCommand(newMigrateCmd())
 	cmd.AddCommand(newServerCmd())
 	cmd.AddCommand(newHealthCmd())
 	cmd.AddCommand(newMemoryCmd())
@@ -76,6 +78,7 @@ Built with tRPC-Agent-Go, tRPC-MCP-Go and tRPC-A2A-Go.`,
 	cmd.AddCommand(newBackupCmd())
 	cmd.AddCommand(newSystemCheckCmd())
 	cmd.AddCommand(newAppsCmd())
+	cmd.AddCommand(newSearchCmd())
 
 	return cmd
 }

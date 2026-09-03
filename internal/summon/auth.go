@@ -7,8 +7,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -444,4 +449,100 @@ func isEmptyCredentialSet(cs CredentialSet) bool {
 		cs.JWTSecret == "" &&
 		cs.OAuthClientID == "" &&
 		cs.OAuthAccessToken == ""
+}
+
+// OAuth2RefreshOptions configures an OAuth2 token refresh generator.
+// Used by NewOAuth2RefreshGenerator to produce a CredentialGenerator
+// that calls the remote token endpoint to obtain a new access token
+// using the client_credentials grant.
+type OAuth2RefreshOptions struct {
+	// TokenURL is the OAuth2 token endpoint.
+	TokenURL string
+	// ClientID is the OAuth2 client identifier.
+	ClientID string
+	// ClientSecret is the OAuth2 client secret.
+	ClientSecret string
+	// Scopes is the optional list of OAuth2 scopes to request.
+	Scopes []string
+}
+
+// NewOAuth2RefreshGenerator returns a CredentialGenerator that
+// refreshes an OAuth2 access token via the client_credentials grant.
+// The generator is bound to the provided options and safe to call
+// repeatedly from the rotator's background loop.
+//
+// On success the returned CredentialSet carries a fresh access token
+// with OAuthExpiresAt set to now + expires_in.
+func NewOAuth2RefreshGenerator(
+	opts OAuth2RefreshOptions,
+) CredentialGenerator {
+	return func(ctx context.Context, authType string) (CredentialSet, error) {
+		if authType != "oauth2" {
+			return CredentialSet{}, fmt.Errorf(
+				"oauth2 generator called with auth_type %q", authType)
+		}
+		if opts.TokenURL == "" || opts.ClientID == "" {
+			return CredentialSet{}, fmt.Errorf(
+				"oauth2 generator requires token_url and client_id")
+		}
+
+		// Build client_credentials request body.
+		// Scope strings are space-joined per RFC 6749 §3.3.
+		body := url.Values{
+			"grant_type":    {"client_credentials"},
+			"client_id":     {opts.ClientID},
+			"client_secret": {opts.ClientSecret},
+		}
+		if len(opts.Scopes) > 0 {
+			body.Set("scope", strings.Join(opts.Scopes, " "))
+		}
+
+		req, err := http.NewRequestWithContext(ctx,
+			http.MethodPost, opts.TokenURL,
+			strings.NewReader(body.Encode()))
+		if err != nil {
+			return CredentialSet{}, fmt.Errorf(
+				"oauth2: build request: %w", err)
+		}
+		req.Header.Set("Content-Type",
+			"application/x-www-form-urlencoded")
+
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return CredentialSet{}, fmt.Errorf(
+				"oauth2: token request: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			raw, _ := io.ReadAll(resp.Body)
+			return CredentialSet{}, fmt.Errorf(
+				"oauth2: token endpoint returned %d: %s",
+				resp.StatusCode, string(raw))
+		}
+
+		var tokenResp struct {
+			AccessToken string `json:"access_token"`
+			TokenType   string `json:"token_type"`
+			ExpiresIn   int    `json:"expires_in"`
+		}
+		if jErr := json.NewDecoder(resp.Body).Decode(&tokenResp); jErr != nil {
+			return CredentialSet{}, fmt.Errorf(
+				"oauth2: parse token response: %w", jErr)
+		}
+		if tokenResp.AccessToken == "" {
+			return CredentialSet{}, fmt.Errorf(
+				"oauth2: empty access_token in response")
+		}
+
+		return CredentialSet{
+			OAuthTokenURL:     opts.TokenURL,
+			OAuthClientID:     opts.ClientID,
+			OAuthClientSecret: opts.ClientSecret,
+			OAuthAccessToken:  tokenResp.AccessToken,
+			OAuthExpiresAt: time.Now().Add(
+				time.Duration(tokenResp.ExpiresIn) * time.Second),
+		}, nil
+	}
 }

@@ -9,13 +9,14 @@ import (
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/km269/wukong/internal/apps"
 	"github.com/km269/wukong/internal/apps/server"
+	"github.com/km269/wukong/internal/browser/antibot/prober"
 	"github.com/km269/wukong/internal/config"
-	"github.com/km269/wukong/internal/util"
 )
 
 // newAppsCmd creates the "wukong apps" command group.
@@ -43,11 +44,13 @@ Subcommands:
 	cmd.AddCommand(newAppsShowCmd())
 	cmd.AddCommand(newAppsCreateCmd())
 	cmd.AddCommand(newAppsCloneCmd())
+	cmd.AddCommand(newAppsProbeCmd())
 	cmd.AddCommand(newAppsPackCmd())
 	cmd.AddCommand(newAppsViewCmd())
 	cmd.AddCommand(newAppsDeleteCmd())
 	cmd.AddCommand(newAppsHistoryCmd())
 	cmd.AddCommand(newAppsExportCmd())
+	cmd.AddCommand(newAppsDownloadCmd())
 
 	return cmd
 }
@@ -233,6 +236,7 @@ func newAppsCreateCmd() *cobra.Command {
 		description string
 		template    string
 		htmlFile    string
+		force       bool
 	)
 
 	cmd := &cobra.Command{
@@ -246,7 +250,8 @@ Templates: blank, calculator, dashboard, form, notes
 Examples:
   wukong apps create --name my-app --desc "My app"
   wukong apps create --name calc --template calculator
-  wukong apps create --name page --html-file ./index.html`,
+  wukong apps create --name page --html-file ./index.html
+  wukong apps create --name my-app --force  # Overwrite existing app`,
 		RunE: runAppsCreate,
 	}
 
@@ -265,6 +270,9 @@ Examples:
 	cmd.Flags().StringVarP(
 		&htmlFile, "html-file", "f", "",
 		"Path to HTML file to import")
+	cmd.Flags().BoolVarP(
+		&force, "force", "F", false,
+		"Overwrite existing app if it exists")
 
 	return cmd
 }
@@ -275,6 +283,7 @@ func runAppsCreate(cmd *cobra.Command, args []string) error {
 	desc, _ := cmd.Flags().GetString("description")
 	tmpl, _ := cmd.Flags().GetString("template")
 	htmlFile, _ := cmd.Flags().GetString("html-file")
+	force, _ := cmd.Flags().GetBool("force")
 
 	if name == "" {
 		return fmt.Errorf("--name is required")
@@ -286,9 +295,14 @@ func runAppsCreate(cmd *cobra.Command, args []string) error {
 	}
 	defer cleanup()
 
-	// Check for duplicate
 	if _, ok := mgr.GetApp(name); ok {
-		return fmt.Errorf("app %q already exists", name)
+		if !force {
+			return fmt.Errorf("app %q already exists. Use --force to overwrite", name)
+		}
+		if err := mgr.DeleteApp(name); err != nil {
+			return fmt.Errorf("delete existing app: %w", err)
+		}
+		fmt.Printf("Deleted existing app %q\n", name)
 	}
 
 	var app apps.AppInfo
@@ -730,39 +744,50 @@ Examples:
 	return cmd
 }
 
-// Ensure util is used.
-var _ = util.Logger
-
 // ==========================================================================
 // apps clone
 // ==========================================================================
 
 func newAppsCloneCmd() *cobra.Command {
 	var (
-		configPath          string
-		maxPages            int
-		maxDepth            int
-		traversal           string
-		subdomains          bool
-		scroll              bool
-		timeout             int
-		renderTimeout       int
-		settle              int
-		workers             int
-		assetWorkers        int
-		force               bool
-		refresh             bool
-		incremental         bool
-		chromePath          string
-		assetSameDomain     bool
-		noSitemap           bool
-		noAntibot           bool
-		noAntibotAutoEsc    bool
-		cookieFile          string
-		chromeProfile       string
-		noHeadless          bool
-		noChromeProfile     bool
-		noStealth           bool
+		configPath       string
+		outputDir        string
+		maxPages         int
+		maxDepth         int
+		traversal        string
+		scopePrefix      string
+		scopeAnchor      string
+		subdomains       bool
+		exclude          []string
+		scroll           bool
+		timeout          int
+		renderTimeout    int
+		settle           int
+		workers          int
+		assetWorkers     int
+		force            bool
+		refresh          bool
+		incremental      bool
+		chromePath       string
+		assetSameDomain  bool
+		assetDomains     []string
+		noSitemap        bool
+		noRobots         bool
+		crawlDelay       int
+		rateWhitelist    []string
+		noIPRateLimit    bool
+		noAntibot        bool
+		noAntibotAutoEsc bool
+		cookieFile       string
+		chromeProfile    string
+		noHeadless       bool
+		noChromeProfile  bool
+		noStealth        bool
+		browserBackend   string
+		keepMedia        bool
+		skipExt          []string
+		allowDownloads   bool
+		archiveFallback  bool
 	)
 
 	cmd := &cobra.Command{
@@ -793,23 +818,38 @@ Examples:
 			fmt.Printf("Cloning %s ...\n", seedURL)
 
 			opts := apps.CloneOptions{
-				MaxPages:     maxPages,
-				MaxDepth:     maxDepth,
-				Traversal:    traversal,
-				Subdomains:   subdomains,
-				Scroll:       scroll,
-				Timeout:       timeout,
-				RenderTimeout: renderTimeout,
-				Settle:        settle,
-				Workers:      workers,
-				AssetWorkers: assetWorkers,
-				Force:        force,
-				Refresh:      refresh,
-				ChromePath:   chromePath,
-				CookieFile:      cookieFile,
-				ChromeProfile:   chromeProfile,
-				NoChromeProfile: noChromeProfile,
-				NoStealth:       noStealth,
+				OutputDir:          outputDir,
+				MaxPages:           maxPages,
+				MaxDepth:           maxDepth,
+				Traversal:          traversal,
+				ScopePrefix:        scopePrefix,
+				ScopeAnchor:        scopeAnchor,
+				Exclude:            exclude,
+				Subdomains:         subdomains,
+				Scroll:             scroll,
+				Timeout:            timeout,
+				RenderTimeout:      renderTimeout,
+				Settle:             settle,
+				Workers:            workers,
+				AssetWorkers:       assetWorkers,
+				Force:              force,
+				Refresh:            refresh,
+				ChromePath:         chromePath,
+				CookieFile:         cookieFile,
+				ChromeProfile:      chromeProfile,
+				NoChromeProfile:    noChromeProfile,
+				NoHeadless:         noHeadless,
+				NoStealth:          noStealth,
+				BrowserBackend:     browserBackend,
+				KeepMedia:          keepMedia,
+				SkipExt:            skipExt,
+				AllowDownloads:     allowDownloads,
+				AssetDomains:       assetDomains,
+				RateLimitWhitelist: rateWhitelist,
+			}
+			if noIPRateLimit {
+				v := false
+				opts.RateLimitIPSegment = &v
 			}
 			if incremental {
 				v := true
@@ -822,6 +862,18 @@ Examples:
 			if noAntibotAutoEsc {
 				v := false
 				opts.AntibotAutoEscalate = &v
+			}
+			if noRobots {
+				v := false
+				opts.RespectRobots = &v
+			}
+			if cmd.Flags().Changed("asset-same-domain") {
+				v := assetSameDomain
+				opts.AssetSameDomain = &v
+			}
+			if cmd.Flags().Changed("archive-fallback") {
+				v := archiveFallback
+				opts.ArchiveFallback = &v
 			}
 
 			// Respect flags default (non-flag bools are false by default, meaning
@@ -870,22 +922,31 @@ Examples:
 	}
 
 	cmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to config file")
+	cmd.Flags().StringVarP(&outputDir, "out", "o", "", "Output root; the mirror lands in <out>/<host>/")
 	cmd.Flags().IntVarP(&maxPages, "max-pages", "p", 0, "Maximum pages to clone (0 = unlimited)")
 	cmd.Flags().IntVarP(&maxDepth, "max-depth", "d", 0, "Maximum link depth (0 = unlimited)")
-	cmd.Flags().StringVar(&traversal, "traversal", "", "Traversal strategy: bfs (default) or dfs")
+	cmd.Flags().StringVar(&scopePrefix, "scope-prefix", "", "Only crawl paths starting with this prefix")
+	cmd.Flags().StringVar(&scopeAnchor, "scope-anchor", "", "Only crawl pages with a specific URL fragment/anchor (e.g. 'leaders' for #leaders)")
+	cmd.Flags().StringArrayVar(&exclude, "exclude", nil, "Path prefixes to skip (repeatable)")
 	cmd.Flags().BoolVar(&subdomains, "subdomains", false, "Include subdomains")
-	cmd.Flags().BoolVar(&scroll, "scroll", false, "Auto-scroll to trigger lazy loading")
+	cmd.Flags().BoolVar(&scroll, "scroll", false, "Auto-scroll each page to trigger lazy loading")
+	cmd.Flags().IntVarP(&workers, "workers", "w", 0, "Concurrent page renderers (default 4)")
+	cmd.Flags().BoolVar(&noRobots, "no-robots", true, "Ignore robots.txt (be nice)")
+	cmd.Flags().IntVar(&crawlDelay, "crawl-delay", 0, "Override robots.txt Crawl-delay in milliseconds")
+	cmd.Flags().StringArrayVar(&rateWhitelist, "rate-limit-whitelist", nil, "Hosts exempt from asset rate limiting (repeatable, e.g. --rate-limit-whitelist cdn.example.com --rate-limit-whitelist localhost:3000; config: apps.clone.rate_limit_whitelist)")
+	cmd.Flags().BoolVar(&noIPRateLimit, "no-ip-rate-limit", false, "Disable IP-segment penalty propagation for asset rate limiting (config: apps.clone.rate_limit_ip_segment)")
 	cmd.Flags().IntVar(&timeout, "timeout", 0, "HTTP request timeout in seconds (default 60)")
 	cmd.Flags().IntVar(&renderTimeout, "render-timeout", 0, "Page render hard timeout in seconds (default 30)")
 	cmd.Flags().IntVar(&settle, "settle", 0, "Network idle settle time in ms (default 1500)")
-	cmd.Flags().IntVarP(&workers, "workers", "w", 0, "Concurrent page renderers (default 4)")
 	cmd.Flags().IntVar(&assetWorkers, "asset-workers", 0, "Concurrent asset downloaders (default same as workers)")
-	cmd.Flags().BoolVar(&force, "force", false, "Delete existing clone and start fresh")
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "Delete any existing mirror for the host first")
 	cmd.Flags().BoolVar(&refresh, "refresh", false, "Re-render all pages")
 	cmd.Flags().BoolVar(&incremental, "incremental", false, "Use ETag/Last-Modified for incremental updates")
 	cmd.Flags().BoolVar(&assetSameDomain, "asset-same-domain", false, "Only download assets from same domain")
+	cmd.Flags().StringArrayVar(&assetDomains, "asset-domain", nil, "Additional domain to allow assets from (repeatable, e.g. --asset-domain cdn.example.com)")
 	cmd.Flags().BoolVar(&noSitemap, "no-sitemap", false, "Disable sitemap URL discovery")
-	cmd.Flags().StringVar(&chromePath, "chrome-path", "", "Path to Chrome/Chromium executable")
+	cmd.Flags().StringVar(&chromePath, "chrome", "", "Path to the Chrome/Chromium executable")
+	cmd.Flags().StringVar(&chromePath, "chrome-path", "", "Path to Chrome/Chromium executable (alias for --chrome)")
 	cmd.Flags().BoolVar(&noAntibot, "no-antibot", false, "Disable auto anti-bot detection and escalation")
 	cmd.Flags().BoolVar(&noAntibotAutoEsc, "no-antibot-auto", false, "Detect blocks but skip auto-escalation")
 	cmd.Flags().StringVar(&cookieFile, "cookies", "", "Netscape-format cookie file for authenticated cloning")
@@ -893,6 +954,11 @@ Examples:
 	cmd.Flags().BoolVar(&noHeadless, "no-headless", false, "Show visible Chrome window (for manual Turnstile solving)")
 	cmd.Flags().BoolVar(&noChromeProfile, "no-chrome-profile", false, "Disable Chrome profile persistence")
 	cmd.Flags().BoolVar(&noStealth, "no-stealth", false, "Disable stealth anti-detection (on by default)")
+	cmd.Flags().StringVar(&browserBackend, "browser-backend", "", "Browser backend: chromedp or rod (default from config)")
+	cmd.Flags().BoolVar(&keepMedia, "keep-media", false, "Download media files (video, audio, PDF, archives) that are normally skipped")
+	cmd.Flags().StringArrayVar(&skipExt, "skip-ext", nil, "Additional file extensions to skip (repeatable, e.g. --skip-ext .mp3 --skip-ext .pdf)")
+	cmd.Flags().BoolVar(&allowDownloads, "allow-downloads", false, "Allow the browser to auto-download files (default: disabled — cloner manages assets)")
+	cmd.Flags().BoolVar(&archiveFallback, "archive-fallback", false, "Fall back to the Wayback Machine (web.archive.org) for dead links")
 
 	return cmd
 }
@@ -920,4 +986,258 @@ func previewApp(ctx context.Context, serveDir string, port int, name string) err
 	return srv.Stop()
 }
 
+// ==========================================================================
+// apps probe
+// ==========================================================================
 
+func newAppsProbeCmd() *cobra.Command {
+	var (
+		timeout int
+	)
+
+	cmd := &cobra.Command{
+		Use:   "probe <url>",
+		Short: "Probe a website for anti-bot measures",
+		Long: `Probe a website to detect anti-bot measures including WAF,
+JavaScript challenges, rate limiting, and security headers.
+Returns a threat assessment with recommendations for successful cloning.
+
+Examples:
+  wukong apps probe https://example.com
+  wukong apps probe https://example.com --timeout 60`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			targetURL := args[0]
+
+			ctx, cancel := context.WithTimeout(context.Background(),
+				time.Duration(timeout)*time.Second)
+			defer cancel()
+
+			fmt.Printf("Probing %s ...\n", targetURL)
+			fmt.Println()
+
+			p := prober.NewProber()
+			profile := p.Probe(ctx, targetURL)
+
+			fmt.Println("=" + strings.Repeat("-", 60))
+			fmt.Printf("ANTIBOT PROFILE for %s\n", targetURL)
+			fmt.Println("=" + strings.Repeat("-", 60))
+
+			levelColors := map[prober.AntibotLevel]string{
+				prober.LevelNone:     "\033[92m",
+				prober.LevelLow:      "\033[94m",
+				prober.LevelMedium:   "\033[93m",
+				prober.LevelHigh:     "\033[91m",
+				prober.LevelCritical: "\033[41m",
+			}
+			levelNames := map[prober.AntibotLevel]string{
+				prober.LevelNone:     "NONE",
+				prober.LevelLow:      "LOW",
+				prober.LevelMedium:   "MEDIUM",
+				prober.LevelHigh:     "HIGH",
+				prober.LevelCritical: "CRITICAL",
+			}
+
+			color := levelColors[profile.Level]
+			name := levelNames[profile.Level]
+			fmt.Printf("\nRisk Level: %s%s\033[0m\n", color, name)
+			fmt.Printf("Reason: %s\n", profile.LevelReason)
+
+			if profile.WAF != "" {
+				fmt.Printf("\nDetected WAF: %s\n", profile.WAF)
+			}
+
+			if profile.HasJSChallenge {
+				fmt.Println("Has JS Challenge: Yes")
+			}
+
+			if profile.HasRateLimit {
+				fmt.Println("Has Rate Limit: Yes")
+			}
+
+			fmt.Println("\n--- Individual Probe Results ---")
+			for _, r := range profile.ProbeResults {
+				status := "OK"
+				if r.Detected {
+					status = fmt.Sprintf("DETECTED (%.1f)", r.Confidence)
+				}
+				fmt.Printf("\n[%s] %s\n", r.Dimension, status)
+				if r.Message != "" {
+					fmt.Printf("     Message: %s\n", r.Message)
+				}
+				if r.Error != nil {
+					fmt.Printf("     Error: %v\n", r.Error)
+				}
+				fmt.Printf("     Duration: %v\n", r.Duration)
+			}
+
+			fmt.Println("\n--- Recommendations ---")
+			for i, rec := range profile.Recommendations {
+				fmt.Printf("%d. %s\n", i+1, rec)
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().IntVar(&timeout, "timeout", 60, "Total timeout in seconds")
+
+	return cmd
+}
+
+// ==========================================================================
+// apps download
+// ==========================================================================
+
+func newAppsDownloadCmd() *cobra.Command {
+	var (
+		configPath string
+		outputDir  string
+		maxPages   int
+		maxDepth   int
+		workers    int
+		headless   bool
+		stealth    bool
+		antibot    bool
+		resume     bool
+		force      bool
+		refresh    bool
+		fileExts   []string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "download <url> [extensions...]",
+		Short: "Download files from a website",
+		Long: `Download specific file types from a website by crawling its pages.
+Supports document formats like PDF, Word, Excel, PowerPoint, and more.
+
+Default file extensions: .txt, .csv, .doc, .docx, .xls, .xlsx, .ppt, .pptx, .pdf
+
+Examples:
+  wukong apps download https://example.com
+  wukong apps download https://example.com .pdf .docx
+  wukong apps download https://example.com --file-extensions .pdf,.docx
+  wukong apps download https://example.com --file-extensions .pdf --file-extensions .docx
+  wukong apps download https://example.com --max-pages 100 --max-depth 3
+  wukong apps download https://example.com --output ./downloads`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			seedURL := strings.ReplaceAll(args[0], "`", "")
+			seedURL = strings.TrimSpace(strings.Trim(seedURL, "\"'"))
+			if seedURL == "" {
+				return fmt.Errorf("URL is required")
+			}
+
+			if len(args) > 1 {
+				for _, ext := range args[1:] {
+					ext = strings.ReplaceAll(ext, "`", "")
+					ext = strings.TrimSpace(strings.Trim(ext, "\"'"))
+					if ext != "" {
+						fileExts = append(fileExts, ext)
+					}
+				}
+			}
+			cfgPath, _ := cmd.Flags().GetString("config")
+
+			mgr, cleanup, err := createAppsManager(cfgPath)
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			fmt.Printf("Downloading from: %s\n", seedURL)
+
+			opts := apps.DownloadOptions{
+				OutputDir: outputDir,
+				MaxPages:  maxPages,
+				MaxDepth:  maxDepth,
+				Workers:   workers,
+				Headless:  headless,
+				Stealth:   stealth,
+				Antibot:   antibot,
+				Resume:    resume,
+				Force:     force,
+				Refresh:   refresh,
+			}
+
+			if len(fileExts) > 0 {
+				extMap := make(map[string]bool)
+				for _, ext := range fileExts {
+					ext = strings.TrimSpace(ext)
+					ext = strings.Trim(ext, "`\"'")
+					if ext == "" {
+						continue
+					}
+					parts := strings.Split(ext, ",")
+					for _, part := range parts {
+						part = strings.TrimSpace(part)
+						if part == "" {
+							continue
+						}
+						if !strings.HasPrefix(part, ".") {
+							part = "." + part
+						}
+						extMap[strings.ToLower(part)] = true
+					}
+				}
+				opts.FileExts = extMap
+			}
+
+			result, err := mgr.DownloadFiles(cmd.Context(), seedURL, opts)
+			if err != nil {
+				return fmt.Errorf("download: %w", err)
+			}
+
+			fmt.Printf("\nDownload complete!\n")
+			fmt.Printf("  Files downloaded: %d\n", result.FilesDownloaded)
+			fmt.Printf("  Files skipped:    %d\n", result.FilesSkipped)
+			fmt.Printf("  Files failed:     %d\n", result.FilesFailed)
+			fmt.Printf("  Total size:       %s\n", formatSize(result.TotalSize))
+			fmt.Printf("  Duration:         %s\n", result.Duration)
+			fmt.Printf("  Output directory: %s\n", result.OutputDir)
+
+			if result.AntibotStats != "" {
+				fmt.Printf("\n  Anti-bot: %s\n", result.AntibotStats)
+			}
+
+			if result.FilesDownloaded > 0 {
+				fmt.Printf("\nDownloaded files:\n")
+				for _, f := range result.Files {
+					fmt.Printf("  - %s (%s)\n", f.FileName, formatSize(f.Size))
+				}
+			}
+
+			if len(result.Errors) > 0 {
+				fmt.Printf("\nErrors (%d):\n", len(result.Errors))
+				showCount := 10
+				if len(result.Errors) < showCount {
+					showCount = len(result.Errors)
+				}
+				for _, e := range result.Errors[:showCount] {
+					fmt.Printf("  - %s\n", e)
+				}
+				if len(result.Errors) > showCount {
+					fmt.Printf("  ... and %d more errors\n", len(result.Errors)-showCount)
+				}
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to config file")
+	cmd.Flags().StringVarP(&outputDir, "output", "o", "", "Output directory for downloaded files")
+	cmd.Flags().IntVarP(&maxPages, "max-pages", "p", 50, "Maximum number of pages to crawl")
+	cmd.Flags().IntVarP(&maxDepth, "max-depth", "d", 0, "Maximum link depth to follow (0 = unlimited)")
+	cmd.Flags().IntVarP(&workers, "workers", "w", 4, "Number of concurrent download workers")
+	cmd.Flags().BoolVar(&headless, "headless", true, "Run browser in headless mode")
+	cmd.Flags().BoolVar(&stealth, "stealth", true, "Enable stealth anti-detection mode")
+	cmd.Flags().BoolVar(&antibot, "antibot", true, "Enable anti-bot detection and bypass")
+	cmd.Flags().BoolVar(&resume, "resume", true, "Resume from previous download state")
+	cmd.Flags().BoolVar(&force, "force", false, "Force restart (delete existing downloads)")
+	cmd.Flags().BoolVar(&refresh, "refresh", false, "Refresh already downloaded files")
+	cmd.Flags().StringArrayVar(&fileExts, "file-extensions", nil,
+		"File extensions to download (repeatable or comma-separated). Default: .txt .csv .doc .docx .xls .xlsx .ppt .pptx .pdf")
+
+	return cmd
+}

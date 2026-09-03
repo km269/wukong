@@ -1,0 +1,1313 @@
+// Code split out of session.go (P2-8) - same package, zero behavior change.
+package cli
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"github.com/km269/wukong/internal/agent"
+	"github.com/km269/wukong/internal/apps"
+	"github.com/km269/wukong/internal/ard"
+	artifacts "github.com/km269/wukong/internal/artifact"
+	"github.com/km269/wukong/internal/capability"
+	"github.com/km269/wukong/internal/codemode"
+	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/cortex"
+	"github.com/km269/wukong/internal/evolution"
+	"github.com/km269/wukong/internal/extension"
+	"github.com/km269/wukong/internal/extension/builtin"
+	"github.com/km269/wukong/internal/gateway"
+	"github.com/km269/wukong/internal/gateway/feishu"
+	"github.com/km269/wukong/internal/knowledge"
+	"github.com/km269/wukong/internal/memory"
+	"github.com/km269/wukong/internal/observability"
+	"github.com/km269/wukong/internal/project"
+	"github.com/km269/wukong/internal/provider"
+	"github.com/km269/wukong/internal/recall"
+	"github.com/km269/wukong/internal/scripthook"
+	"github.com/km269/wukong/internal/security"
+	"github.com/km269/wukong/internal/server"
+	wksession "github.com/km269/wukong/internal/session"
+	"github.com/km269/wukong/internal/skill"
+	"github.com/km269/wukong/internal/summon"
+	"github.com/km269/wukong/internal/telemetry"
+	"github.com/km269/wukong/internal/todo"
+	"github.com/km269/wukong/internal/topofmind"
+	"github.com/km269/wukong/internal/util"
+	"github.com/km269/wukong/pkg/sandbox"
+	"github.com/liliang-cn/cortexdb/v2/pkg/graphflow"
+	"github.com/liliang-cn/cortexdb/v2/pkg/memoryflow"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+	tRPCMemory "trpc.group/trpc-go/trpc-agent-go/memory"
+	"trpc.group/trpc-go/trpc-agent-go/model"
+	"trpc.group/trpc-go/trpc-agent-go/tool"
+)
+
+// bootstrapSession initializes all components needed for a session.
+func bootstrapSession(
+	configPath, userID, sessionID, providerName, modelName string,
+	temperature float64, maxTokens int, noStream bool,
+) (*config.WukongConfig, *agent.CoreLoop, *BootstrapState, error) {
+	// sessionID is used by the caller (runSession) for TUI initialization
+	// and is forwarded here for consistency but not consumed internally.
+	_ = sessionID
+
+	// Load config
+	loader, err := config.NewLoader(configPath)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("load config: %w", err)
+	}
+	wukongCfg, err := loader.LoadAndValidate()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("config validation: %w", err)
+	}
+
+	// Surface non-fatal configuration warnings (these do not block
+	// startup but indicate suboptimal or risky configuration). Fatal
+	// issues were already rejected by LoadAndValidate above.
+	for _, w := range wukongCfg.Warnings() {
+		util.Logger.Warn("config: " + w)
+	}
+
+	// Apply log level from config. CLI --debug/--quiet flags take
+	// precedence over config value and are already applied in
+	// PersistentPreRunE. Only apply config value if neither flag
+	// was set.
+	if wukongCfg.LogLevel != "" && !debugEnabled && !quietEnabled {
+		util.SetLogLevel(wukongCfg.LogLevel)
+	}
+
+	// Validate and warn about common config issues
+	validateConfig(wukongCfg)
+
+	// Initialize telemetry (OpenTelemetry distributed tracing).
+	// This must be done early so all subsequent operations can
+	// be traced. Shutdown is deferred until the agent loop closes.
+	telMgr := telemetry.NewManager(wukongCfg.Telemetry)
+	initCtx, initCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer initCancel()
+	telShutdown, err := telMgr.Initialize(initCtx)
+	if err != nil {
+		util.Logger.Warn("telemetry init failed, continuing without tracing",
+			"error", err.Error())
+	}
+	// Note: telShutdown will be called when the CoreLoop's closeFn runs.
+	// The loop's closeFn is captured below after the loop is created.
+
+	// Register all built-in extensions
+	builtin.RegisterBuiltins(wukongCfg)
+
+	// Apply command-line overrides to config
+	applyOverrides(wukongCfg, providerName, modelName,
+		temperature, maxTokens, noStream)
+
+	// Create model factory
+	factory := provider.NewFactory(wukongCfg)
+
+	// Create multi-pool database manager for all SQLite-backed subsystems.
+	// By default, all modules (session, memory, todo, recall, cortex,
+	// evolution) share a single wukong.db via the "shared" pool.
+	//
+	// Subsystems with their own db_path config override will receive
+	// an independent DatabasePool, enabling data isolation when needed
+	// (e.g., a dedicated memory database for large-scale recall).
+	dbPool := util.NewMultiPool(
+		config.ResolvePath(wukongCfg.Session.DBPath),
+	)
+
+	// Create session service
+	sessionSvc, err := wksession.NewSessionService(
+		&wukongCfg.Session, dbPool.Shared(),
+	)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("create session: %w", err)
+	}
+
+	// Create the model-visible event log. This records the messages
+	// the model ACTUALLY sees after context enrichment (wakeup/
+	// recall/persistent), enforcing the "model-visible means logged"
+	// invariant. It shares the session SQLite pool so it lives in
+	// the same database file as the framework session events.
+	var modelEventLog *wksession.ModelEventLog
+	if wukongCfg.Session.EnableModelEventLog {
+		sharedDB, dbErr := dbPool.Shared().GetDB()
+		if dbErr != nil {
+			util.Logger.Warn("model event log: open shared db failed, "+
+				"continuing without model-visible logging",
+				"error", dbErr.Error())
+		} else {
+			mel, melErr := wksession.NewModelEventLog(sharedDB)
+			if melErr != nil {
+				util.Logger.Warn("model event log: init failed, "+
+					"continuing without model-visible logging",
+					"error", melErr.Error())
+			} else {
+				modelEventLog = mel
+			}
+		}
+	}
+
+	// Create memory manager with auto-extract support.
+	// If an extractor_provider or extractor_model is configured in
+	// the memory block, use that instead of the default provider.
+	// Falls back to default model if the extractor model fails.
+	var extractorModel model.Model
+	if wukongCfg.Memory.AutoExtract {
+		extractorModel, err = createExtractorModel(
+			factory, &wukongCfg.Memory, wukongCfg,
+		)
+		if err != nil {
+			util.Logger.Warn("auto memory extraction: "+
+				"failed to create extractor model, "+
+				"falling back to default model",
+				"error", err.Error())
+			// Fallback to default model for extraction
+			extractorModel, err = factory.CreateDefaultModel()
+			if err != nil {
+				util.Logger.Warn("auto memory extraction: "+
+					"fallback model also failed, "+
+					"auto-extract disabled",
+					"error", err.Error())
+				extractorModel = nil
+			} else {
+				util.Logger.Info("auto memory extraction: " +
+					"using default model as extractor fallback")
+			}
+		}
+	}
+	memoryMgr, err := memory.NewMemoryManager(
+		&wukongCfg.Memory, extractorModel, dbPool.Shared(),
+	)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("create memory: %w", err)
+	}
+
+	// Smart cleanup: evict low-importance memories when near capacity.
+	if wukongCfg.Memory.MaxMemories > 0 {
+		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cleanCancel()
+		cleaned, _ := memoryMgr.SmartCleanup(
+			cleanCtx,
+			tRPCMemory.UserKey{
+				AppName: "wukong-app",
+				UserID:  userID,
+			},
+			30*24*time.Hour,
+		)
+		if cleaned > 0 {
+			util.Logger.Info("memory: startup smart cleanup",
+				"cleaned", cleaned)
+		}
+	}
+
+	// Create security guard
+	guard := security.NewGuard(&wukongCfg.Security)
+	// Build a single guard callback used by both ACP and MCP servers.
+	// Centralising here keeps the non-interactive rejection policy
+	// consistent across both surfaces and avoids duplicating the
+	// command/permission/approval logic at each call site.
+	guardCheck := func(toolName string, args map[string]any, argsJSON []byte) error {
+		if err := guard.CheckToolPermission(toolName, nil); err != nil {
+			return err
+		}
+		// Validate command arguments for shell-like tools.
+		switch toolName {
+		case "developer_command_execute", "bash", "shell", "command_execute":
+			if cmdStr, _ := args["command"].(string); cmdStr != "" {
+				if err := guard.ValidateCommand(cmdStr); err != nil {
+					return err
+				}
+			}
+		}
+		// ACP/MCP are non-interactive: reject tools that require
+		// human approval, since there is no client to confirm.
+		if guard.NeedsApproval(toolName, argsJSON) {
+			return fmt.Errorf("tool %q requires human approval; "+
+				"non-interactive endpoint cannot confirm", toolName)
+		}
+		return nil
+	}
+
+	// Create extension manager and initialize
+	extMgr := extension.NewManager(wukongCfg)
+	extInitCtx, extInitCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer extInitCancel()
+	if err := extMgr.Initialize(extInitCtx); err != nil {
+		return nil, nil, nil, fmt.Errorf("init extensions: %w", err)
+	}
+
+	// Inject memory service into the memory toolset
+	if memoryMgr != nil {
+		extMgr.SetMemoryService(
+			memoryMgr.Service(), "wukong-app", userID,
+		)
+	}
+
+	// If ARD is enabled, initialize the ARD ToolSet and wire
+	// auto-discovery for MCP servers and A2A remote agents.
+	// Also optionally start Wukong's own ARD registry server so
+	// other ARD-compatible agents can discover Wukong on the network.
+	var ardRegistryServer *ard.RegistryServer
+	if wukongCfg.ARD.Enabled {
+		ardTS, ardErr := ard.NewToolSet(
+			wukongCfg.ARD.RegistryURL,
+			wukongCfg.ARD.CatalogPath,
+		)
+		if ardErr != nil {
+			util.Logger.Warn("ard: failed to create toolset",
+				"error", ardErr.Error())
+		} else {
+			// Wire ARD to extension manager for MCP auto-registration.
+			extMgr.SetARDToolSet(ardTS)
+
+			// Auto-register A2A remote agents to ARD catalog.
+			for _, remote := range wukongCfg.Summon.A2ARemotes {
+				ard.RegisterA2AAgent(ardTS, remote.Name,
+					remote.Description, remote.ServerURL)
+			}
+		}
+
+		// Start Wukong's own ARD registry server for inbound discovery.
+		if wukongCfg.ARD.PublishEnabled && wukongCfg.ARD.PublishPort > 0 {
+			anpOpts := ard.ANPPublishOptions{
+				Enabled: wukongCfg.ANP.Enabled &&
+					wukongCfg.ANP.DiscoveryEnabled,
+				BaseURL: fmt.Sprintf("http://localhost:%d",
+					wukongCfg.ARD.PublishPort),
+			}
+			ardSrv, pubErr := ard.PublishAndServe(
+				context.Background(),
+				wukongCfg.ARD.PublishPort,
+				wukongCfg.ARD.CatalogPath,
+				&anpOpts,
+			)
+			if pubErr != nil {
+				util.Logger.Warn("ard: failed to start registry server",
+					"error", pubErr.Error())
+			} else {
+				ardRegistryServer = ardSrv
+			}
+		}
+	}
+
+	// Register Extension Manager tool set
+	extToolSet := extension.NewManagerToolSet(extMgr, wukongCfg)
+
+	// Initialize ACP MCP Bridge — exposes Wukong extensions as
+	// an MCP Server for ACP agents to discover and call tools.
+	var acpMCPBridge *extension.ACPMCPBridge
+	acpMCPBridge, acpMCPErr := extension.NewACPMCPBridge(
+		extMgr, &wukongCfg.ACPMCP,
+	)
+	if acpMCPErr != nil {
+		util.Logger.Warn("acp mcp bridge creation failed",
+			"error", acpMCPErr.Error())
+	} else if acpMCPBridge != nil {
+		if err := acpMCPBridge.Start(); err != nil {
+			util.Logger.Warn("acp mcp bridge start failed",
+				"error", err.Error())
+			acpMCPBridge = nil
+		} else {
+			// Set MCP address on factory for ACP providers.
+			factory.SetACPMCPAddr(acpMCPBridge.ACPMCPAddr())
+		}
+	}
+
+	// Initialize standalone MCP Server — exposes Wukong extensions
+	// as a standards-compliant MCP JSON-RPC 2.0 endpoint for external
+	// MCP clients (e.g. Claude Desktop, Cursor, etc.).
+	var mcpServer *extension.MCPServer
+	if wukongCfg.MCPServer.Enabled {
+		addr := wukongCfg.MCPServer.Address
+		if addr == "" {
+			addr = ":9091"
+		}
+		mcpServer = extension.NewMCPServerWithSecurity(extMgr, addr, wukongCfg.MCPServer.Security, guardCheck)
+		if err := mcpServer.Start(); err != nil {
+			util.Logger.Warn("mcp server start failed",
+				"error", err.Error())
+			mcpServer = nil
+		} else {
+			util.Logger.Info("mcp server started",
+				slog.String("address", addr))
+		}
+	}
+
+	// Create recall store — supports both native SQLite FTS5 and
+	// CortexDB (vector + FTS5 hybrid) backends.
+	var recallStore *recall.Store
+	var cortexStore *cortex.CortexStore
+	if wukongCfg.Cortex.Enabled {
+		// CortexDB-backed store with vector semantic search.
+		var embedder *cortex.Embedder
+		if wukongCfg.Cortex.EmbeddingBaseURL != "" &&
+			wukongCfg.Cortex.EmbeddingAPIKey != "" {
+			embedder = cortex.NewEmbedder(&wukongCfg.Cortex)
+			util.Logger.Info("cortex: embedding enabled",
+				"model", wukongCfg.Cortex.EmbeddingModel,
+			)
+		}
+		// Get the shared *sql.DB from the pool to avoid opening
+		// a separate connection to the same database file.
+		// This prevents "transaction has already been committed"
+		// errors from concurrent session/memory/cortex writes.
+		sharedDB, dbErr := dbPool.Shared().GetDB()
+		if dbErr != nil {
+			util.Logger.Warn("cortex: get shared db failed",
+				slog.String("error", dbErr.Error()))
+		}
+		cortexStore, err = cortex.NewStore(
+			&wukongCfg.Cortex, embedder, sharedDB,
+		)
+		if err != nil {
+			util.Logger.Warn("cortex store init failed, "+
+				"falling back to recall",
+				slog.String("error", err.Error()))
+			cortexStore = nil
+		} else {
+			util.Logger.Info("cortex: store initialized",
+				"db_path", wukongCfg.Cortex.DBPath,
+			)
+			// Create a recall.Store adapter sharing the same DB
+			// so the agent loop can call StoreMessage() as before.
+			recallStore, err = cortexStore.RecallStore()
+			if err != nil {
+				util.Logger.Warn("cortex: recall adapter failed",
+					slog.String("error", err.Error()))
+				recallStore = nil
+			}
+		}
+	} else if wukongCfg.Recall.Enabled {
+		// Native SQLite FTS5 recall store (default).
+		recallStore, err = recall.NewStore(
+			&wukongCfg.Recall, dbPool.Shared(),
+		)
+		if err != nil {
+			util.Logger.Warn("recall store init failed",
+				slog.String("error", err.Error()))
+			recallStore = nil
+		}
+	}
+
+	// Inject CortexStore into the web toolset for internal index search.
+	if cortexStore != nil {
+		extMgr.SetCortexStore(cortexStore, userID)
+	}
+
+	// Create MemoryFlow service for conversation transcript,
+	// wake-up context, and fact promotion. When CortexStore is
+	// also enabled, share the same CortexDB instance to avoid
+	// opening conflicting connections to the same database file.
+	var memoryFlowSvc *cortex.MemoryFlowService
+	if wukongCfg.MemoryFlow.Enabled {
+		var planner memoryflow.QueryPlanner
+		var extractor memoryflow.SessionExtractor
+
+		// Resolve planner/extractor models: explicit config first,
+		// then fall back to global lightweight_model.
+		plannerModel := wukongCfg.MemoryFlow.PlannerModel
+		if plannerModel == "" {
+			plannerModel = wukongCfg.EffectiveLightweightModel()
+		}
+		extractorModel := wukongCfg.MemoryFlow.ExtractorModel
+		if extractorModel == "" {
+			extractorModel = wukongCfg.EffectiveLightweightModel()
+		}
+
+		if plannerModel != "" {
+			planner = cortex.NewLLMQueryPlanner(
+				factory, plannerModel,
+			)
+		}
+		if extractorModel != "" {
+			extractor = cortex.NewLLMSessionExtractor(
+				factory, extractorModel,
+			)
+		}
+
+		// Share the CortexDB instance when CortexStore is active.
+		if cortexStore != nil && cortexStore.DB() != nil {
+			mfs, err := cortex.NewMemoryFlowWithDB(
+				&wukongCfg.MemoryFlow, cortexStore.DB(),
+				planner, extractor)
+			if err != nil {
+				util.Logger.Warn("memoryflow init failed "+
+					"(shared db)",
+					slog.String("error", err.Error()))
+			} else {
+				memoryFlowSvc = mfs
+				util.Logger.Info("memoryflow: service initialized "+
+					"(shared cortexdb)",
+					"db_path", wukongCfg.MemoryFlow.DBPath,
+				)
+			}
+		} else {
+			mfs, err := cortex.NewMemoryFlow(
+				&wukongCfg.MemoryFlow, planner, extractor)
+			if err != nil {
+				util.Logger.Warn("memoryflow init failed",
+					slog.String("error", err.Error()))
+			} else {
+				memoryFlowSvc = mfs
+				util.Logger.Info("memoryflow: service initialized",
+					"db_path", wukongCfg.MemoryFlow.DBPath,
+				)
+				// When MemoryFlow created its own CortexDB,
+				// share it back to CortexStore if it was
+				// lexical-only (no embedder).
+				if cortexStore != nil && cortexStore.DB() == nil {
+					cortexStore.SetDB(memoryFlowSvc.DB())
+					util.Logger.Info("cortex: shared cortexdb " +
+						"from memoryflow")
+				}
+			}
+		}
+	}
+
+	// Create recall manager for tools.
+	// When cortex is enabled, recall tools use vector-enhanced search.
+	var recallMgr *recall.RecallManager
+	var cortexRecallMgr *cortex.RecallManager
+	if cortexStore != nil && recallStore != nil {
+		// Use CortexDB vector search for recall tools.
+		cortexRecallMgr = cortex.NewRecallManager(cortexStore)
+		// Wire tRPC memory reader so recall_search results
+		// include persistent memories alongside conversation
+		// history.
+		cortexRecallMgr.SetMemoryReader(
+			func(ctx context.Context, query string) ([]string, error) {
+				userKey := tRPCMemory.UserKey{
+					AppName: "wukong-app",
+					UserID:  userID,
+				}
+				entries, err := memoryMgr.Service().SearchMemories(
+					ctx, userKey, query)
+				if err != nil {
+					return nil, err
+				}
+				texts := make([]string, 0, len(entries))
+				for _, e := range entries {
+					if e.Memory != nil && e.Memory.Memory != "" {
+						texts = append(texts, e.Memory.Memory)
+					}
+				}
+				return texts, nil
+			},
+		)
+		util.Logger.Info("recall_search: cross-searching " +
+			"tRPC persistent memories")
+	} else if recallStore != nil {
+		recallMgr = recall.NewRecallManager(recallStore)
+	}
+
+	// Create GraphFlow service for knowledge graph construction.
+	var kgToolMgr *cortex.KGToolManager
+	var graphFlowSvc *cortex.GraphFlowService
+	if wukongCfg.GraphFlow.Enabled {
+		extractorModel := wukongCfg.GraphFlow.ExtractorModel
+		if extractorModel == "" {
+			extractorModel = wukongCfg.EffectiveLightweightModel()
+		}
+		var jsonGen graphflow.JSONGenerator
+		if extractorModel != "" {
+			jsonGen = cortex.NewLLMJSONGenerator(
+				factory, extractorModel,
+			)
+		}
+		gfs, err := cortex.NewGraphFlow(
+			&wukongCfg.GraphFlow, jsonGen)
+		if err != nil {
+			util.Logger.Warn("graphflow init failed",
+				slog.String("error", err.Error()))
+		} else {
+			kgToolMgr = cortex.NewKGToolManager(gfs)
+			graphFlowSvc = gfs
+			util.Logger.Info("graphflow: service initialized",
+				"db_path", wukongCfg.GraphFlow.DBPath,
+			)
+			if wukongCfg.GraphFlow.AutoExtract {
+				util.Logger.Info("graphflow: auto-extract enabled — " +
+					"entities will be extracted after each turn")
+			}
+		}
+	}
+
+	// Create ImportFlow service for structured data import.
+	var importToolMgr *cortex.ImportToolManager
+	if wukongCfg.ImportFlow.Enabled {
+		ifs, err := cortex.NewImportFlow(&wukongCfg.ImportFlow)
+		if err != nil {
+			util.Logger.Warn("importflow init failed",
+				slog.String("error", err.Error()))
+		} else {
+			// Use lightweight model for LLM-enhanced DDL mapping,
+			// same as GraphFlow extractor model resolution.
+			importModel := wukongCfg.GraphFlow.ExtractorModel
+			if importModel == "" {
+				importModel = wukongCfg.EffectiveLightweightModel()
+			}
+			var jsonGen graphflow.JSONGenerator
+			if importModel != "" {
+				jsonGen = cortex.NewLLMJSONGenerator(
+					factory, importModel,
+				)
+			}
+			importToolMgr = cortex.NewImportToolManager(ifs, jsonGen)
+			util.Logger.Info("importflow: service initialized",
+				"db_path", wukongCfg.ImportFlow.DBPath,
+				"llm_model", importModel,
+			)
+		}
+	}
+
+	// Create Top of Mind manager
+	tomMgr := topofmind.NewManager(&wukongCfg.TopOfMind)
+	tomToolSet := builtin.NewTopOfMindToolSet(tomMgr)
+
+	// Create Code Mode executor
+	codeExecutor := codemode.NewExecutor(&wukongCfg.CodeMode)
+	codeToolSet := builtin.NewCodeModeToolSet(codeExecutor)
+
+	// Create Apps manager
+	appsMgr, err := apps.NewManager(&wukongCfg.Apps)
+	if err != nil {
+		util.Logger.Warn("apps manager init failed",
+			slog.String("error", err.Error()))
+	}
+	var appsToolSet *builtin.AppsToolSet
+	if appsMgr != nil {
+		appsToolSet = builtin.NewAppsToolSet(appsMgr)
+	}
+
+	// Create AgentToolSet — wraps specialized sub-agents (code-reviewer,
+	// summarizer, code-generator) as tools callable by the main agent.
+	// Configurable via agent.agent_tools_enabled and agent.agent_tools_stream.
+	agentToolSet := builtin.NewAgentToolSet(factory, &wukongCfg.Agent)
+
+	// Collect Summon delegate tools with concurrency control.
+	// Each delegate tool is wrapped to acquire a slot from the summon
+	// manager's semaphore before execution, enforcing MaxConcurrent.
+	var summonTools []tool.Tool
+	// credRotator holds the A2A credential rotator when any OAuth2
+	// remote agent is configured. Wired into BootstrapState below so
+	// shutdownBootstrap can stop the background loop cleanly.
+	var credRotator *summon.CredentialRotator
+
+	// Initialize Skill system using trpc-agent-go's FSRepository.
+	// Skills are SKILL.md files that define specialized agent workflows.
+	// Independent of Summon — skill agents are also usable without
+	// sub-agent delegation enabled.
+	skillMgr := skill.NewManager(wukongCfg.Skill)
+	if err := skillMgr.Initialize(context.Background()); err != nil {
+		util.Logger.Warn("skill system init failed",
+			"error", err.Error())
+	}
+
+	// Initialize the Skill Evolution engine.
+	// When enabled, skill execution traces are captured and analyzed
+	// by an LLM to detect issues and automatically patch SKILL.md files.
+	var evoEngine *evolution.EvolutionEngine
+	if wukongCfg.Evolution.Enabled {
+		evoEngine, err = evolution.NewEngine(evolution.EngineConfig{
+			Config:  wukongCfg,
+			Factory: factory,
+			DBPool:  dbPool.Shared(),
+		})
+		if err != nil {
+			util.Logger.Warn("evolution engine init failed",
+				"error", err.Error())
+		} else {
+			// Wire evolution hook into skill manager so traces
+			// are captured when skill agents execute.
+			// Adapter converts skill.SkillExecutionTrace to
+			// evolution.ExecutionTrace.
+			skillMgr.SetEvolutionHook(
+				&skillEvoAdapter{engine: evoEngine},
+			)
+			// Set the skill manager as refresher so the engine
+			// can trigger hot-reload after patches are applied.
+			evoEngine.SetRefresher(skillMgr)
+		}
+	}
+
+	// Summon: sub-agent delegation. The entire subsystem (local
+	// delegates, skill-as-delegate registration, A2A remote agents)
+	// is skipped when summon.enabled is false.
+	if wukongCfg.Summon.Enabled {
+		summonMdl, sErr := factory.CreateDefaultModel()
+		if sErr != nil {
+			util.Logger.Warn("failed to create summon model, "+
+				"sub-agent delegation disabled",
+				"error", sErr.Error())
+		}
+		summonMgr := summon.NewSummonManager(&wukongCfg.Summon, summonMdl)
+		if lErr := summonMgr.LoadDelegates(context.Background()); lErr != nil {
+			util.Logger.Warn("summon delegates load failed",
+				slog.String("error", lErr.Error()))
+		}
+
+		// Register Skill agents as Summon delegates so the main
+		// agent can delegate to specialized skill agents.
+		if skillMgr.SkillCount() > 0 && summonMdl != nil {
+			for _, s := range skillMgr.ListSummaries() {
+				skillAgent, aErr := skillMgr.CreateSkillAgent(
+					context.Background(), s.Name, summonMdl, nil,
+				)
+				if aErr != nil {
+					util.Logger.Warn("skill agent creation failed",
+						"skill", s.Name,
+						"error", aErr.Error())
+					continue
+				}
+				skillTool := summon.NewDelegateTool(
+					skillAgent, "skill_"+s.Name, s.Description,
+				)
+				summonTools = append(summonTools,
+					summonMgr.WrapTool(skillTool, s.Name),
+				)
+			}
+		}
+
+		// Register local Summon delegates as function tools.
+		for _, d := range summonMgr.ListDelegates() {
+			summonTools = append(summonTools,
+				summonMgr.WrapTool(d.Tool(), d.Name()),
+			)
+		}
+
+		// Register A2A remote agents as summon delegates.
+		// OAuth2-authenticated remotes are also registered with a
+		// CredentialRotator so their access tokens are refreshed
+		// automatically before expiry (client_credentials grant).
+		var oauthRemotes []config.A2ARemoteConfig
+		for _, remote := range wukongCfg.Summon.A2ARemotes {
+			if remote.AuthType == "oauth2" &&
+				remote.OAuthTokenURL != "" &&
+				remote.OAuthClientID != "" {
+				oauthRemotes = append(oauthRemotes, remote)
+			}
+		}
+		if len(oauthRemotes) > 0 {
+			// Default rotation interval: 1 hour. The rotator checks
+			// each credential's NextRotation; refreshes when due.
+			credRotator = summon.NewCredentialRotator(time.Hour)
+			for _, remote := range oauthRemotes {
+				gen := summon.NewOAuth2RefreshGenerator(
+					summon.OAuth2RefreshOptions{
+						TokenURL:     remote.OAuthTokenURL,
+						ClientID:     remote.OAuthClientID,
+						ClientSecret: remote.OAuthClientSecret,
+					})
+				initial := summon.CredentialSet{
+					OAuthTokenURL:     remote.OAuthTokenURL,
+					OAuthClientID:     remote.OAuthClientID,
+					OAuthClientSecret: remote.OAuthClientSecret,
+					// Access token left empty; the first rotation
+					// tick will populate it. The rotator's pending
+					// generator call in Register() also primes it.
+				}
+				if rErr := credRotator.Register(
+					context.Background(),
+					remote.Name, "oauth2", initial, gen,
+				); rErr != nil {
+					util.Logger.Warn("A2A OAuth2 rotator register failed",
+						"agent", remote.Name,
+						"error", rErr.Error())
+				}
+			}
+			credRotator.Start(context.Background(), nil)
+			util.Logger.Info("A2A OAuth2 credential rotator started",
+				"registered", credRotator.CredentialCount())
+		}
+
+		for _, remote := range wukongCfg.Summon.A2ARemotes {
+			a2aAgent := a2aRemoteToConfig(remote)
+			if a2aAgent == nil {
+				util.Logger.Warn("A2A remote agent init failed",
+					"agent", remote.Name)
+				continue
+			}
+			remoteTool := summon.RemoteDelegateTool(
+				"a2a_"+remote.Name,
+				"Remote A2A agent: "+remote.ServerURL,
+				a2aAgent.Agent(),
+			)
+			summonTools = append(summonTools,
+				summonMgr.WrapTool(remoteTool, remote.Name),
+			)
+			util.Logger.Info("A2A remote agent registered as tool",
+				"agent", remote.Name,
+				"server_url", remote.ServerURL)
+		}
+	}
+
+	// Create todo manager
+	todoStore, err := todo.NewStore(
+		wukongCfg.Todo.DBPath, dbPool.Shared(),
+	)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("create todo store: %w", err)
+	}
+	todoMgr := todo.NewTodoManager(todoStore)
+
+	// Create Knowledge Manager for RAG (Retrieval-Augmented Generation).
+	// When enabled, documents are loaded, embedded, and a search tool is
+	// registered to the agent. Returns nil (no error) when disabled.
+	knowledgeMgr, err := knowledge.NewManager(
+		&wukongCfg.Knowledge, wukongCfg,
+	)
+	if err != nil {
+		return nil, nil, nil,
+			fmt.Errorf("create knowledge manager: %w", err)
+	}
+
+	// Collect all tool sets and function tools
+	toolSets := extMgr.ToolSets()
+	functionTools := todoMgr.Tools()
+
+	// Add Extension Manager tools
+	if extToolSet != nil {
+		toolSets = append(toolSets, extToolSet)
+	}
+
+	// Add Recall tools
+	if cortexRecallMgr != nil {
+		functionTools = append(
+			functionTools, cortexRecallMgr.Tools()...)
+	} else if recallMgr != nil {
+		functionTools = append(functionTools, recallMgr.Tools()...)
+	}
+
+	// Add Knowledge Graph tools
+	if kgToolMgr != nil {
+		functionTools = append(
+			functionTools, kgToolMgr.Tools()...)
+	}
+
+	// Add ImportFlow tools
+	if importToolMgr != nil {
+		functionTools = append(
+			functionTools, importToolMgr.Tools()...)
+	}
+
+	// Add Top of Mind tools
+	if tomToolSet != nil {
+		toolSets = append(toolSets, tomToolSet)
+	}
+
+	// Add Code Mode tools
+	if codeToolSet != nil {
+		toolSets = append(toolSets, codeToolSet)
+	}
+
+	// Add Apps tools
+	if appsToolSet != nil {
+		toolSets = append(toolSets, appsToolSet)
+	}
+
+	// Add Agent tools (code-reviewer, summarizer)
+	if agentToolSet != nil && len(agentToolSet.Tools(context.TODO())) > 0 {
+		toolSets = append(toolSets, agentToolSet)
+	}
+
+	// CortexDB tools are already registered as functionTools above
+	// (KG query, KG analyze, import DDL/CSV). Do NOT add a duplicate
+	// CortexToolSet — it causes massive tool list duplication that
+	// wastes hundreds of tokens per LLM call.
+
+	// Add Summon delegate tools
+	if len(summonTools) > 0 {
+		functionTools = append(functionTools, summonTools...)
+	}
+
+	// Capability bus (roadmap P0-1 Phase A, read-only): register
+	// every extension-sourced tool under a stable bus address so
+	// the caps CLI, Guard, protocol endpoints and the future flow
+	// DSL share one registry. CoreLoop keeps the hand-aggregation
+	// above unchanged; AsTools() equivalence is covered by tests.
+	capsReg := capability.NewRegistry()
+	regCtx := context.Background()
+	if _, err := extMgr.RegisterCapabilities(capsReg, regCtx); err != nil {
+		util.Logger.Warn("capability registry: manager registration failed",
+			"error", err.Error())
+	}
+	registerCapsToolset := func(prefix string, ts tool.ToolSet) {
+		if ts == nil {
+			return
+		}
+		if _, err := extension.RegisterToolSet(
+			capsReg, prefix, capability.SourceBuiltin, ts, regCtx,
+		); err != nil {
+			util.Logger.Warn("capability registry: registration failed",
+				"prefix", prefix, "error", err.Error())
+		}
+	}
+	registerCapsToolset(extension.AddrExtensionMgr, extToolSet)
+	registerCapsToolset(extension.AddrTopOfMind, tomToolSet)
+	registerCapsToolset(extension.AddrCodeMode, codeToolSet)
+	registerCapsToolset(extension.AddrApps, appsToolSet)
+	registerCapsToolset(extension.AddrAgentTools, agentToolSet)
+
+	// P1-4: user JS hooks (.wukong/hooks/*.js, opt-in). beforeStep /
+	// beforeTool functions join the waterfall HookRegistry; script
+	// tools register as "script.*" capabilities.
+	var scriptHooksReg *agent.HookRegistry
+	if wukongCfg.Agent.ScriptHooksEnabled {
+		shs, shErr := scripthook.Load(
+			scripthook.ResolveDir(wukongCfg.Agent.ScriptHooksDir),
+			wukongCfg.Agent.ScriptHooksTimeout,
+		)
+		if shErr != nil {
+			util.Logger.Warn("scripthook: load failed, hooks disabled",
+				"error", shErr.Error())
+		} else {
+			scriptHooksReg = agent.NewHookRegistry()
+			for _, h := range shs.PreStepHooks() {
+				scriptHooksReg.RegisterPreStep(h)
+			}
+			for _, h := range shs.PreToolHooks() {
+				scriptHooksReg.RegisterPreToolExecute(h)
+			}
+			shs.SyncScriptTools(capsReg)
+			util.Logger.Info("scripthook: enabled",
+				"scripts", shs.Len())
+		}
+	}
+
+	util.Logger.Info("capability registry ready",
+		"capabilities", capsReg.Len())
+
+	// Add Knowledge search tool (RAG)
+	if knowledgeMgr != nil && knowledgeMgr.IsEnabled() {
+		searchTool := knowledgeMgr.SearchTool()
+		if searchTool != nil {
+			functionTools = append(functionTools, searchTool)
+		}
+	}
+
+	// Wire up code_discover_tools: inject the complete tool list
+	// into the executor so JS code can discover and invoke tools.
+	var discovered []codemode.DiscoveredTool
+	for _, ts := range toolSets {
+		for _, t := range ts.Tools(context.Background()) {
+			decl := t.Declaration()
+			if decl == nil {
+				continue
+			}
+			discovered = append(discovered, codemode.DiscoveredTool{
+				Name:        decl.Name,
+				Description: decl.Description,
+				Source:      "toolset",
+			})
+		}
+	}
+	for _, t := range functionTools {
+		decl := t.Declaration()
+		if decl == nil {
+			continue
+		}
+		discovered = append(discovered, codemode.DiscoveredTool{
+			Name:        decl.Name,
+			Description: decl.Description,
+			Source:      "function",
+		})
+	}
+	codeExecutor.SetToolsForDiscovery(discovered)
+
+	// Create revision model for context summarization
+	revisionModel, err := factory.CreateRevisionModel()
+	if err != nil {
+		util.Logger.Warn("revision model init failed",
+			slog.String("error", err.Error()))
+	}
+
+	// Format Top of Mind instructions for injection into system prompt
+	topOfMindInstructions := tomMgr.FormatForPrompt()
+
+	// Create artifact service for file versioning (visualiser outputs, etc.)
+	// Supports inmemory (default) and cos (Tencent Cloud Object Storage).
+	artifactSvc, err := artifacts.NewService(&wukongCfg.Artifact)
+	if err != nil {
+		return nil, nil, nil,
+			fmt.Errorf("create artifact service: %w", err)
+	}
+
+	// Start Langfuse LLM tracing if enabled.
+	// Langfuse provides a dedicated UI for inspecting agent runs,
+	// tool calls, model requests, token usage, and errors.
+	langfuseCleanup, err := observability.StartLangfuse(
+		context.Background(), &wukongCfg.Observability)
+	if err != nil {
+		util.Logger.Warn("langfuse start failed, continuing without tracing",
+			"error", err.Error())
+		langfuseCleanup = func(_ context.Context) error { return nil }
+	}
+
+	// Merge Langfuse cleanup into telemetry shutdown chain.
+	combinedShutdown := func(ctx context.Context) error {
+		var errs []error
+		if telShutdown != nil {
+			if err := telShutdown(ctx); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if langfuseCleanup != nil {
+			if err := langfuseCleanup(ctx); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if len(errs) > 0 {
+			return fmt.Errorf("shutdown errors: %w", errors.Join(errs...))
+		}
+		return nil
+	}
+
+	// Create agent loop
+	loop, err := agent.NewCoreLoop(agent.CoreLoopConfig{
+		Config:                wukongCfg,
+		Factory:               factory,
+		SessionService:        sessionSvc,
+		MemoryService:         memoryMgr.Service(),
+		ArtifactService:       artifactSvc,
+		ToolSets:              toolSets,
+		FunctionTools:         functionTools,
+		Capabilities:          capsReg,
+		Hooks:                 scriptHooksReg,
+		SecurityGuard:         guard,
+		RecallStore:           recallStore,
+		CortexStore:           cortexStore,
+		RevisionModel:         revisionModel,
+		MemoryFlowService:     memoryFlowSvc,
+		GraphFlowService:      graphFlowSvc,
+		TopOfMindInstructions: topOfMindInstructions,
+		TelemetryShutdown:     combinedShutdown,
+		MemoryClose:           memoryMgr.Close,
+		EvolutionClose:        evoEngineClose(evoEngine),
+		DBPoolClose:           dbPool.Close,
+		ModelEventLog:         modelEventLog,
+	})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("create agent loop: %w", err)
+	}
+
+	// Initialize A2A server if enabled in config.
+	// Uses tRPC-Agent-Go's server/a2a wrapper which provides
+	// automatic protocol conversion, streaming, and session integration.
+	// The main agent and runner are shared with the A2A endpoint
+	// so remote clients get the full agent capabilities.
+	// Create project manager for working directory tracking.
+	projectMgr, prjErr := project.NewManager(wukongCfg)
+	if prjErr != nil {
+		util.Logger.Warn("project manager creation failed, "+
+			"project tracking disabled",
+			"error", prjErr.Error())
+	}
+
+	state := &BootstrapState{
+		KnowledgeMgr:      knowledgeMgr,
+		ProjectMgr:        projectMgr,
+		SessionSvc:        sessionSvc,
+		ARDRegistry:       ardRegistryServer,
+		ACPMCPBridge:      acpMCPBridge,
+		MCPServer:         mcpServer,
+		CredentialRotator: credRotator,
+		ExtMgr:            extMgr,
+		Caps:              capsReg,
+		// Wire a real DB ping so the health DBChecker is no longer a
+		// no-op. dbPool is the shared SQLite pool created above.
+		DBPing: func(ctx context.Context) error {
+			db, err := dbPool.Shared().GetDB()
+			if err != nil {
+				return err
+			}
+			return db.PingContext(ctx)
+		},
+	}
+	if wukongCfg.A2AServer.Enabled {
+		hostAddr := wukongCfg.A2AServer.Address
+		if hostAddr == "" {
+			hostAddr = ":9090"
+		}
+
+		a2aAgent := loop.GetAgent()
+		a2aRunner := loop.GetRunner()
+		a2aSessionSvc := loop.GetSessionService()
+
+		a2aServerCfg := &summon.A2AServerConfig{
+			Agent:          a2aAgent,
+			Runner:         a2aRunner,
+			SessionService: a2aSessionSvc,
+			Name:           wukongCfg.A2AServer.AgentName,
+			Description:    wukongCfg.A2AServer.AgentDescription,
+			Host:           hostAddr,
+			Streaming:      true,
+		}
+
+		a2aSrv, err := summon.NewA2AServer(a2aServerCfg)
+		if err != nil {
+			util.Logger.Warn("A2A server creation failed, "+
+				"continuing without A2A server",
+				"error", err.Error())
+		} else {
+			a2aSrv.Start(hostAddr)
+			state.A2AServer = a2aSrv
+		}
+	}
+
+	// Initialize AG-UI SSE server if enabled.
+	if wukongCfg.AGUI.Enabled {
+		aguiCfg := &server.AGUIConfig{
+			Runner: loop.GetRunner(),
+			Path:   wukongCfg.AGUI.Path,
+		}
+		aguiSrv, err := server.NewAGUIServer(aguiCfg)
+		if err != nil {
+			util.Logger.Warn("AG-UI server creation failed",
+				"error", err.Error())
+		} else {
+			addr := wukongCfg.AGUI.Address
+			if addr == "" {
+				addr = ":8080"
+			}
+			go func() {
+				if err := aguiSrv.Start(addr); err != nil {
+					util.Logger.Warn("AG-UI server failed",
+						"error", err.Error())
+				}
+			}()
+			state.AGUIServer = aguiSrv
+		}
+	}
+
+	// Initialize ACP Server if enabled.
+	// Exposes the agent via Agent Client Protocol endpoints
+	// for ACP-compatible client applications.
+	if wukongCfg.ACPServer.Enabled {
+		// Wire the asynchronous Approval protocol: a broker in HTTP
+		// external-resolver mode lets the agent loop's BeforeTool
+		// gate block on human decisions, which ACP clients then
+		// resolve via /approvals/resolve. When ACP is disabled the
+		// guard has no broker and falls back to the legacy
+		// synchronous-deny path (safety never regresses).
+		broker := security.NewApprovalBroker(nil, 0)
+		guard.SetApprovalBroker(broker)
+		acpCfg := &server.ACPServerConfig{
+			Runner:          loop.GetRunner(),
+			Agent:           loop.GetAgent(),
+			GuardCheck:      server.ToolGuardCheck(guardCheck),
+			ApprovalSink:    &approvalSinkAdapter{broker: broker},
+			Path:            wukongCfg.ACPServer.Path,
+			EnableStreaming: wukongCfg.ACPServer.EnableStreaming,
+		}
+		acpSrv, acpErr := server.NewACPServer(acpCfg)
+		if acpErr != nil {
+			util.Logger.Warn("ACP server creation failed",
+				"error", acpErr.Error())
+		} else {
+			acpAddr := wukongCfg.ACPServer.Address
+			if acpAddr == "" {
+				acpAddr = ":9091"
+			}
+			go func() {
+				if err := acpSrv.Start(acpAddr); err != nil {
+					util.Logger.Warn("ACP server failed",
+						"error", err.Error())
+				}
+			}()
+			state.ACPServer = acpSrv
+		}
+	}
+
+	// Initialize ANP protocol stack if enabled.
+	// Creates DID identity, meta-protocol engine, E2EE messenger,
+	// and starts the ANP HTTP server for capability negotiation.
+	if wukongCfg.ANP.Enabled {
+		anpPort := wukongCfg.ANP.Port
+		if anpPort <= 0 {
+			anpPort = 9092
+		}
+
+		// Determine agent name and base URL for DID identity.
+		anpAgentName := wukongCfg.A2AServer.AgentName
+		if anpAgentName == "" {
+			anpAgentName = "wukong"
+		}
+		anpBaseURL := fmt.Sprintf("http://localhost:%d", anpPort)
+
+		// Resolve DID domain from config or use localhost as fallback.
+		didDomain := wukongCfg.ANP.DIDDomain
+		if didDomain == "" {
+			hostname, _ := os.Hostname()
+			didDomain = hostname
+		}
+		if didDomain == "" {
+			didDomain = "localhost"
+		}
+
+		// Step 1: Create DID Manager for cryptographic identity.
+		didMgr, didErr := ard.NewDIDManager(&ard.DIDManagerConfig{
+			Domain:    didDomain,
+			Path:      wukongCfg.ANP.DIDPath,
+			AgentName: anpAgentName,
+			BaseURL:   anpBaseURL,
+		})
+		if didErr != nil {
+			util.Logger.Warn("ANP: DID manager creation failed",
+				"error", didErr.Error())
+		}
+
+		// Step 2: Build meta-protocol engine for capability
+		// negotiation.
+		if didMgr != nil && wukongCfg.ANP.MetaProtocolEnabled {
+			metaCfg := summon.BuildMetaProtocolConfig(
+				didMgr.DID(),
+				anpBaseURL,
+				wukongCfg.A2AServer.Enabled,
+				parsePort(wukongCfg.A2AServer.Address),
+				wukongCfg.ACPServer.Enabled,
+				parsePort(wukongCfg.ACPServer.Address),
+				wukongCfg.AGUI.Enabled,
+				parsePort(wukongCfg.AGUI.Address),
+				"didwba_sc",
+			)
+			metaEngine := summon.NewMetaProtocol(metaCfg)
+			state.ANPMeta = metaEngine
+
+			util.Logger.Info("ANP: meta-protocol engine initialized",
+				"did", didMgr.DID(),
+				"port", anpPort)
+		}
+
+		// Step 3: Create E2EE messenger for encrypted
+		// agent-to-agent messaging.
+		if didMgr != nil && wukongCfg.ANP.E2EEEnabled {
+			e2eeMgr := summon.NewE2EEMessenger(
+				&summon.E2EEMessengerConfig{
+					DIDManager: didMgr,
+				},
+			)
+			state.ANPMessenger = e2eeMgr
+
+			util.Logger.Info("ANP: E2EE messenger initialized",
+				"did", didMgr.DID(),
+				"active_sessions",
+				e2eeMgr.ActiveSessions())
+		}
+
+		// Step 4: Start ANP HTTP server for meta-protocol
+		// and capability discovery endpoints.
+		if wukongCfg.ANP.MetaProtocolEnabled {
+			anpMux := http.NewServeMux()
+
+			// Register meta-protocol handler (JSON-RPC 2.0)
+			if state.ANPMeta != nil {
+				metaHandler := summon.NewMetaProtocolHandler(
+					state.ANPMeta,
+				)
+				anpMux.Handle(
+					"/anp/meta-protocol",
+					metaHandler,
+				)
+				anpMux.HandleFunc(
+					"/anp/capabilities",
+					func(w http.ResponseWriter,
+						r *http.Request) {
+						metaHandler.ServeHTTP(w, r)
+					},
+				)
+				util.Logger.Info(
+					"ANP: meta-protocol endpoints registered",
+					"endpoints",
+					"/anp/meta-protocol, /anp/capabilities")
+			}
+
+			anpAddr := fmt.Sprintf(":%d", anpPort)
+			anpSrv := &http.Server{
+				Addr:         anpAddr,
+				Handler:      anpMux,
+				ReadTimeout:  10 * time.Second,
+				WriteTimeout: 30 * time.Second,
+				IdleTimeout:  60 * time.Second,
+			}
+			state.ANPServer = anpSrv
+
+			go func() {
+				util.Logger.Info("ANP: server starting",
+					"address", anpAddr)
+				if err := anpSrv.ListenAndServe(); err != nil &&
+					err != http.ErrServerClosed {
+					util.Logger.Warn("ANP: server error",
+						"error", err.Error())
+				}
+			}()
+		}
+	}
+
+	// Report sandbox capability at startup so users know what
+	// filesystem write protection is active.
+	probe := sandbox.Probe()
+	if probe.Sandboxed {
+		util.Logger.Info("sandbox: filesystem write protection active",
+			"backend", probe.Backend,
+			"platform", probe.Platform,
+		)
+	} else {
+		util.Logger.Warn("sandbox: filesystem write protection unavailable",
+			"reason", sandbox.ReasonUnavailable(),
+			"warning", probe.Warning,
+		)
+	}
+
+	// Initialize Gateway server for messaging channels.
+	// Each channel owns its own inbound transport (e.g. Feishu's
+	// WebSocket long-connection); the gateway drives the shared
+	// processing pipeline. There is no HTTP listener.
+	if wukongCfg.Gateway.Enabled {
+		gwStore := gateway.NewGatewaySessionStore(dbPool.Shared())
+		state.GatewayServer = gateway.NewGatewayServer(
+			&wukongCfg.Gateway, loop, gwStore,
+		)
+
+		// Register Feishu channel if enabled.
+		if wukongCfg.Gateway.Feishu.Enabled {
+			fc := feishu.NewFeishuChannel(&wukongCfg.Gateway.Feishu)
+			// Fail-fast: refuse to register a misconfigured channel
+			// rather than silently accepting messages it can never
+			// reply to. This surfaces missing env vars (e.g.
+			// FEISHU_APP_SECRET) at startup instead of at runtime.
+			if err := fc.Validate(); err != nil {
+				util.Logger.Error("gateway: feishu channel NOT registered",
+					slog.String("reason", err.Error()))
+			} else if err := state.GatewayServer.RegisterChannel(fc); err != nil {
+				util.Logger.Warn("gateway: register feishu failed",
+					slog.String("error", err.Error()))
+			} else {
+				util.Logger.Info("gateway: feishu channel registered")
+			}
+		}
+
+		// Start the gateway in the background. Start blocks until the
+		// context is cancelled; Stop() (invoked from the shutdown
+		// chain) cancels the gateway's internal run context, which
+		// propagates to each channel's Start and tears them down.
+		go func() {
+			util.Logger.Info("gateway: starting channels",
+				slog.String("channels",
+					strings.Join(state.GatewayServer.Channels(), ",")))
+			if err := state.GatewayServer.Start(context.Background()); err != nil &&
+				err != context.Canceled {
+				util.Logger.Warn("gateway: server error",
+					slog.String("error", err.Error()))
+			}
+		}()
+	}
+
+	return wukongCfg, loop, state, nil
+}
+
+// a2aRemoteToConfig converts a config A2ARemoteConfig to an A2AAgent.
+// Uses the new A2AAgent implementation based on tRPC-Agent-Go's a2aagent.

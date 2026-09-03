@@ -77,7 +77,7 @@ func (ts *VisualiserToolSet) Name() string {
 func (ts *VisualiserToolSet) Init(ctx context.Context) error {
 	outputDir := ts.cfg.Visualiser.OutputDir
 	if outputDir == "" {
-		outputDir = ".wukong_visuals"
+		outputDir = ".wukong/visuals"
 	}
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return fmt.Errorf("create visuals dir: %w", err)
@@ -126,7 +126,7 @@ func (ts *VisualiserToolSet) generateChart(
 ) (ChartRsp, error) {
 	outputDir := ts.cfg.Visualiser.OutputDir
 	if outputDir == "" {
-		outputDir = ".wukong_visuals"
+		outputDir = ".wukong/visuals"
 	}
 
 	width := req.Width
@@ -183,7 +183,7 @@ func (ts *VisualiserToolSet) generateDiagram(
 ) (DiagramRsp, error) {
 	outputDir := ts.cfg.Visualiser.OutputDir
 	if outputDir == "" {
-		outputDir = ".wukong_visuals"
+		outputDir = ".wukong/visuals"
 	}
 
 	// Generate a Mermaid-compatible diagram description
@@ -249,7 +249,7 @@ func (ts *VisualiserToolSet) generateTable(
 ) (TableRsp, error) {
 	outputDir := ts.cfg.Visualiser.OutputDir
 	if outputDir == "" {
-		outputDir = ".wukong_visuals"
+		outputDir = ".wukong/visuals"
 	}
 
 	html := generateTableHTML(req.Title, req.Headers, req.Rows)

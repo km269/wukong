@@ -137,8 +137,10 @@ func (b *WorkflowBuilder) buildSingleAgent() (agent.Agent, error) {
 			llmagent.WithEnableContextCompaction(true),
 		)
 	}
-	// Preload memory for cross-session awareness
-	opts = append(opts, llmagent.WithPreloadMemory(10))
+	// Note: framework's built-in memory preload is disabled.
+	// Memory injection is handled by CoreLoop.Run()'s own logic
+	// (MemoryFlow WakeUp + tRPC Memory ReadMemories), which provides
+	// more control over deduplication, error handling, and logging.
 
 	return llmagent.New("wukong-single", opts...), nil
 }
@@ -422,7 +424,7 @@ func (b *WorkflowBuilder) buildGraphAgent(
 	// Build a default graph using StateGraph builder
 	schema := graph.NewStateSchema().
 		AddField("last_response", graph.StateField{
-			Type:    reflect.TypeOf(""),
+			Type: reflect.TypeOf(""),
 			Reducer: graph.StateReducer(func(existing, update any) any {
 				return update
 			}),
@@ -589,8 +591,6 @@ func containsKeyword(s, keyword string) bool {
 	}
 	return false
 }
-
-
 
 // buildTeamAgent creates a Team-based agent (coordinator, swarm, or
 // Claude Code mode). Uses the TeamBuilder for construction.

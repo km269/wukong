@@ -4,6 +4,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"html"
 	"net"
 	"net/http"
 	"os"
@@ -15,13 +16,13 @@ import (
 
 // Server provides a local HTTP server for previewing apps.
 type Server struct {
-	mu       sync.RWMutex
-	httpSrv  *http.Server
-	running  bool
-	port     int
-	rootDir  string
-	addr     string
-	appName  string
+	mu      sync.RWMutex
+	httpSrv *http.Server
+	running bool
+	port    int
+	rootDir string
+	addr    string
+	appName string
 }
 
 // Config holds server configuration.
@@ -68,21 +69,19 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("server already running")
 	}
 
-	// 确定端口
-	port := s.port
-	if port == 0 {
-		// 自动选择端口
-		ln, err := net.Listen("tcp", ":0")
-		if err != nil {
-			s.mu.Unlock()
-			return fmt.Errorf("listen: %w", err)
-		}
-		port = ln.Addr().(*net.TCPAddr).Port
-		ln.Close()
+	// 先建立监听器：监听器就绪后 running 才会置位，
+	// 因此 StartAndWait 观察到 running 时服务器必然已可接受连接。
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", s.port))
+	if err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("listen: %w", err)
 	}
+
+	port := ln.Addr().(*net.TCPAddr).Port
 
 	// 创建 HTTP 服务器
 	s.addr = fmt.Sprintf("http://localhost:%d", port)
+	s.port = port // 写回实际端口（自动选择时端口不为 0）
 	mux := http.NewServeMux()
 
 	// 注册处理程序
@@ -90,7 +89,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.httpSrv = &http.Server{
 		Addr:         fmt.Sprintf(":%d", port),
-		Handler:     mux,
+		Handler:      mux,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
@@ -104,8 +103,8 @@ func (s *Server) Start(ctx context.Context) error {
 		s.httpSrv.Shutdown(context.Background())
 	}()
 
-	if err := s.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("listen and serve: %w", err)
+	if err := s.httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		return fmt.Errorf("serve: %w", err)
 	}
 
 	return nil
@@ -119,7 +118,8 @@ func (s *Server) StartAndWait(ctx context.Context) (string, error) {
 		errCh <- s.Start(ctx)
 	}()
 
-	// 等待服务器启动
+	// 等待服务器启动。监听器在 running 置位前已建立，
+	// 因此 running 为真即代表服务器就绪。
 	for i := 0; i < 50; i++ {
 		s.mu.RLock()
 		running := s.running
@@ -222,7 +222,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	// 检查文件是否存在
 	info, err := os.Stat(filePath)
-	if os.IsNotExist(err) {
+	if err != nil {
 		http.Error(w, "Not Found", http.StatusNotFound)
 		return
 	}
@@ -258,9 +258,10 @@ func (s *Server) serveDirectoryList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	escPath := html.EscapeString(path)
 	fmt.Fprintf(w, "<!DOCTYPE html>\n<html>\n<head>\n")
 	fmt.Fprintf(w, "<meta charset=\"utf-8\">\n")
-	fmt.Fprintf(w, "<title>Index of %s</title>\n", path)
+	fmt.Fprintf(w, "<title>Index of %s</title>\n", escPath)
 	fmt.Fprintf(w, "<style>\n")
 	fmt.Fprintf(w, "body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; ")
 	fmt.Fprintf(w, "max-width: 800px; margin: 40px auto; padding: 0 20px; }\n")
@@ -272,7 +273,7 @@ func (s *Server) serveDirectoryList(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, ".folder { color: #666; }\n")
 	fmt.Fprintf(w, "</style>\n")
 	fmt.Fprintf(w, "</head>\n<body>\n")
-	fmt.Fprintf(w, "<h1>Index of %s</h1>\n", path)
+	fmt.Fprintf(w, "<h1>Index of %s</h1>\n", escPath)
 	fmt.Fprintf(w, "<ul>\n")
 
 	// 父目录链接
@@ -281,16 +282,18 @@ func (s *Server) serveDirectoryList(w http.ResponseWriter, r *http.Request) {
 		if parentPath == "." {
 			parentPath = "/"
 		}
-		fmt.Fprintf(w, "<li><a href=\"%s\">📁 ..</a></li>\n", parentPath)
+		fmt.Fprintf(w, "<li><a href=\"%s\">📁 ..</a></li>\n", html.EscapeString(parentPath))
 	}
 
 	// 子目录和文件
 	for _, entry := range entries {
 		entryPath := filepath.Join(path, entry.Name())
+		escName := html.EscapeString(entry.Name())
+		escEntryPath := html.EscapeString(entryPath)
 		if entry.IsDir() {
-			fmt.Fprintf(w, "<li><a href=\"%s/\">📁 %s/</a></li>\n", entryPath, entry.Name())
+			fmt.Fprintf(w, "<li><a href=\"%s/\">📁 %s/</a></li>\n", escEntryPath, escName)
 		} else {
-			fmt.Fprintf(w, "<li><a href=\"%s\">📄 %s</a></li>\n", entryPath, entry.Name())
+			fmt.Fprintf(w, "<li><a href=\"%s\">📄 %s</a></li>\n", escEntryPath, escName)
 		}
 	}
 

@@ -11,7 +11,7 @@ import (
 // CatalogManager manages ARD catalogs with file persistence.
 type CatalogManager struct {
 	catalog *AICatalog
-	path   string
+	path    string
 }
 
 // NewCatalogManager creates a new catalog manager.
@@ -19,7 +19,7 @@ func NewCatalogManager(path string) (*CatalogManager, error) {
 	cm := &CatalogManager{
 		path: path,
 	}
-	
+
 	// Try to load existing catalog
 	if path != "" {
 		if err := cm.Load(); err != nil {
@@ -29,7 +29,7 @@ func NewCatalogManager(path string) (*CatalogManager, error) {
 	} else {
 		cm.catalog = NewAICatalog("Wukong", "did:web:wukong.local")
 	}
-	
+
 	return cm, nil
 }
 
@@ -38,17 +38,17 @@ func (cm *CatalogManager) Load() error {
 	if cm.path == "" {
 		return fmt.Errorf("no catalog path configured")
 	}
-	
+
 	data, err := os.ReadFile(cm.path)
 	if err != nil {
 		return fmt.Errorf("read catalog: %w", err)
 	}
-	
+
 	catalog := &AICatalog{}
 	if err := json.Unmarshal(data, catalog); err != nil {
 		return fmt.Errorf("parse catalog: %w", err)
 	}
-	
+
 	cm.catalog = catalog
 	return nil
 }
@@ -58,22 +58,22 @@ func (cm *CatalogManager) Save() error {
 	if cm.path == "" {
 		return fmt.Errorf("no catalog path configured")
 	}
-	
+
 	// Ensure directory exists
 	dir := filepath.Dir(cm.path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create directory: %w", err)
 	}
-	
+
 	data, err := json.MarshalIndent(cm.catalog, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal catalog: %w", err)
 	}
-	
+
 	if err := os.WriteFile(cm.path, data, 0644); err != nil {
 		return fmt.Errorf("write catalog: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -91,20 +91,20 @@ func (cm *CatalogManager) SetHost(displayName, identifier string) {
 // AddServer adds an MCP server to the catalog.
 func (cm *CatalogManager) AddServer(name, description, url string, tools []string, tags []string) error {
 	identifier := WukongLocal.Build("server:" + sanitizeName(name))
-	
+
 	entry := CatalogEntry{
-		Identifier:   identifier.String(),
-		DisplayName:  name,
-		Type:         MediaTypeMCPServerCard,
-		URL:          url,
-		Description:  description,
-		Capabilities: tools,
-		Tags:         tags,
+		Identifier:            identifier.String(),
+		DisplayName:           name,
+		Type:                  MediaTypeMCPServerCard,
+		URL:                   url,
+		Description:           description,
+		Capabilities:          tools,
+		Tags:                  tags,
 		RepresentativeQueries: BuildRepresentativeQueries(tags, tools),
-		Version:      "1.0.0",
-		UpdatedAt:    Now(),
+		Version:               "1.0.0",
+		UpdatedAt:             Now(),
 	}
-	
+
 	cm.catalog.AddEntry(entry)
 	return nil
 }
@@ -112,20 +112,20 @@ func (cm *CatalogManager) AddServer(name, description, url string, tools []strin
 // AddAgent adds an A2A agent to the catalog.
 func (cm *CatalogManager) AddAgent(name, description, url string, capabilities []string, tags []string) error {
 	identifier := WukongLocal.Build("agent:" + sanitizeName(name))
-	
+
 	entry := CatalogEntry{
-		Identifier:   identifier.String(),
-		DisplayName:  name,
-		Type:         MediaTypeA2AAgentCard,
-		URL:          url,
-		Description:  description,
-		Capabilities: capabilities,
-		Tags:         tags,
+		Identifier:            identifier.String(),
+		DisplayName:           name,
+		Type:                  MediaTypeA2AAgentCard,
+		URL:                   url,
+		Description:           description,
+		Capabilities:          capabilities,
+		Tags:                  tags,
 		RepresentativeQueries: BuildRepresentativeQueries(tags, capabilities),
-		Version:      "1.0.0",
-		UpdatedAt:    Now(),
+		Version:               "1.0.0",
+		UpdatedAt:             Now(),
 	}
-	
+
 	cm.catalog.AddEntry(entry)
 	return nil
 }
@@ -133,27 +133,27 @@ func (cm *CatalogManager) AddAgent(name, description, url string, capabilities [
 // AddBundle adds a bundled collection to the catalog.
 func (cm *CatalogManager) AddBundle(name, description string, entries []CatalogEntry, tags []string) error {
 	identifier := WukongLocal.Build("bundle:" + sanitizeName(name))
-	
+
 	bundle := AICatalog{
 		SpecVersion: SpecVersion,
 		Entries:     entries,
 	}
-	
+
 	bundleData, err := json.Marshal(bundle)
 	if err != nil {
 		return fmt.Errorf("marshal bundle: %w", err)
 	}
-	
+
 	entry := CatalogEntry{
-		Identifier:   identifier.String(),
-		DisplayName:  name,
-		Type:         MediaTypeAICatalog,
-		Description:  description,
-		Data:         bundleData,
-		Tags:         append(tags, "bundle"),
-		UpdatedAt:    Now(),
+		Identifier:  identifier.String(),
+		DisplayName: name,
+		Type:        MediaTypeAICatalog,
+		Description: description,
+		Data:        bundleData,
+		Tags:        append(tags, "bundle"),
+		UpdatedAt:   Now(),
 	}
-	
+
 	cm.catalog.AddEntry(entry)
 	return nil
 }
@@ -232,7 +232,7 @@ func WukongBuiltInEntries() []CatalogEntry {
 			URL:          "http://localhost:3400/mcp",
 			Description:  "Headless browser automation via Chrome DevTools Protocol.",
 			Tags:         []string{"browser", "automation", "chromedp"},
-			Capabilities: []string{"browser_navigate", "browser_screenshot", "browser_click"},
+			Capabilities: []string{"computer_controller_browser_navigate", "computer_controller_browser_screenshot", "computer_controller_browser_click"},
 			RepresentativeQueries: []string{
 				"take a screenshot of a webpage",
 				"automate browser interactions",

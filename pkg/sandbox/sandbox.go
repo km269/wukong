@@ -46,17 +46,43 @@ type Cmd struct {
 	// When set, cancellation/timeout of ctx will kill the child process.
 	ctx context.Context
 
-	cmd     *exec.Cmd
-	cleanup []func()
+	cmd       *exec.Cmd
+	cleanup   []func()
+	postStart []func(*exec.Cmd) error
 }
 
-// Policy defines filesystem restrictions for a sandboxed command.
+// Policy defines filesystem and process-level restrictions for a
+// sandboxed command.
 type Policy struct {
 	// WritableDirs lists paths the command is allowed to modify.
 	//   nil     → only Dir (or cwd) is writable
 	//   empty   → nothing is writable
 	//   [paths] → only the listed paths are writable
 	WritableDirs []string
+
+	// Limits restricts process-level resource usage (CPU, memory,
+	// file size, process count). Zero values mean unlimited. On
+	// Windows these are enforced via Job Object; on Linux via
+	// setrlimit in the self-exec helper. MaxFileBytes is Linux-only
+	// (RLIMIT_FSIZE) — Windows has no equivalent and ignores it.
+	Limits ResourceLimits
+
+	// KillOnParentExit binds the command to a Job Object (Windows)
+	// or a process group (Linux) so that when the parent (wukong)
+	// terminates, the command and its children are killed.
+	// Windows enforcement is kernel-level (JOB_OBJECT_LIMIT_KILL_
+	// ON_JOB_CLOSE); Linux uses process-group tracking with ctx
+	// cancellation as the best-effort lifecycle hook (true kernel-
+	// level kill-on-parent-exit needs cgroups, out of scope here).
+	KillOnParentExit bool
+}
+
+// ResourceLimits are per-process resource caps. Zero = unlimited.
+type ResourceLimits struct {
+	MaxCPUSeconds  uint64 // Windows: JOB_OBJECT_LIMIT_PROCESS_TIME; Linux: RLIMIT_CPU
+	MaxMemoryBytes uint64 // Windows: JOB_OBJECT_LIMIT_PROCESS_MEMORY; Linux: RLIMIT_AS
+	MaxFileBytes   uint64 // Linux: RLIMIT_FSIZE (Windows: ignored — no equivalent)
+	MaxProcesses   uint64 // Windows: JOB_OBJECT_LIMIT_ACTIVE_PROCESS; Linux: RLIMIT_NPROC
 }
 
 // Command returns a Cmd to execute the named program with the given
@@ -90,8 +116,11 @@ func (c *Cmd) Run() error {
 }
 
 // Start starts the command but does not wait for it to complete.
-// If build successeds but cmd.Start fails, registered cleanup
+// If build succeeds but cmd.Start fails, registered cleanup
 // functions are still executed to release sandbox resources.
+// Post-start hooks (e.g., assigning the child process to a Job
+// Object) run after a successful Start; a hook failure kills the
+// started process, waits for it, and runs cleanup.
 func (c *Cmd) Start() error {
 	cmd, err := c.build()
 	if err != nil {
@@ -102,6 +131,16 @@ func (c *Cmd) Start() error {
 	if err := cmd.Start(); err != nil {
 		c.runCleanup()
 		return err
+	}
+	for _, fn := range c.postStart {
+		if err := fn(cmd); err != nil {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			_ = cmd.Wait()
+			c.runCleanup()
+			return err
+		}
 	}
 	return nil
 }
@@ -177,28 +216,46 @@ func (c *Cmd) build() (*exec.Cmd, error) {
 	cmd.Stdout = c.Stdout
 	cmd.Stderr = c.Stderr
 
-	sb := &sandboxCtx{writable: writable}
+	sb := &sandboxCtx{
+		writable:         writable,
+		limits:           c.Policy.Limits,
+		killOnParentExit: c.Policy.KillOnParentExit,
+	}
 	if err := applySandbox(cmd, sb); err != nil {
 		return nil, &exec.Error{Name: c.Path, Err: err}
 	}
 	for _, fn := range sb.cleanup {
 		c.addCleanup(fn)
 	}
+	for _, fn := range sb.postStart {
+		c.addPostStart(fn)
+	}
 
 	return cmd, nil
 }
 
 type sandboxCtx struct {
-	writable []string
-	cleanup  []func()
+	writable         []string
+	limits           ResourceLimits
+	killOnParentExit bool
+	cleanup          []func()
+	postStart        []func(*exec.Cmd) error
 }
 
 func (s *sandboxCtx) addCleanup(fn func()) {
 	s.cleanup = append(s.cleanup, fn)
 }
 
+func (s *sandboxCtx) addPostStart(fn func(*exec.Cmd) error) {
+	s.postStart = append(s.postStart, fn)
+}
+
 func (c *Cmd) addCleanup(fn func()) {
 	c.cleanup = append(c.cleanup, fn)
+}
+
+func (c *Cmd) addPostStart(fn func(*exec.Cmd) error) {
+	c.postStart = append(c.postStart, fn)
 }
 
 func (c *Cmd) runCleanup() {
