@@ -159,7 +159,7 @@ CLI 可直接调用：`yao run <process>`。
    - `internal/cli/session.go`（1785 行）→ **session.go**（237：命令定义 + TUI 入口 + BootstrapState）+ **bootstrap.go**（1313：bootstrapSession 启动引擎）+ **bootstrap_helpers.go**（299：overrides/校验/adapter 辅助）。
    - `internal/cli/tui/model.go`（1935 行）→ **model.go**（1047：Elm 核心 + Update/View + StartTUI）+ **tui_render.go**（317：Markdown 流式渲染/审计面板）+ **tui_commands.go**（698：斜杠命令 + 会话/项目/设置模态）。
    - 深层重构（bootstrapSession 内部再拆阶段函数）留待按需进行——本轮以零风险文件重组达成可导航性目标。
-9. **i18n 起步** — README / docs 英文版，降低外部贡献门槛。
+9. **i18n 起步** — ✅ **v1 已落地（2026-09-03）**：新增 `README_EN.md` 完整英文版（含语言切换互链 `English | 简体中文`），作为外部贡献者的英文前门——能力矩阵、快速开始、技术栈、子系统亮点全量翻译，并同步了本轮演进的新能力（Flow DSL、`wukong migrate`、AG-UI 内置控制台、版本化迁移存储）与升级后的框架版本（tRPC-Agent-Go v1.11.2）。中文 README 保持第一语言身份不变，仅加语言切换行并同步 Flow DSL 能力行与框架版本号。docs/ 全量英文翻译为长期工作，未在本项范围内；英文 README 的文档索引已明确标注各文档当前语言。
 10. **发布卫生** — ✅ **核心已落地（2026-09-03）**：
     - **版本链修复**：实盘发现 Makefile/Taskfile 的 ldflags 注入目标写成了不存在的 `internal/cli.Version`（静默失效），而 `util.Version` 硬编码 0.3.3 掩盖了一切。现已统一：`version.go` 默认空 + `debug.ReadBuildInfo` 回退链（`go install` 自动携带模块版本与 VCS 元数据，裸构建降级 `dev` + vcs revision/time，goreleaser 注入 tag 版本），Makefile/Taskfile 注入目标修正为 `internal/util.*`——版本从此完全由 git 驱动。
     - **`_probe/` 已删除**（无跟踪文件）。

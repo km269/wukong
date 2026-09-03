@@ -2,6 +2,8 @@
 
 > 本地优先、框架组装、可深度扩展的开源 AI Agent 平台
 >
+> [English](README_EN.md) | [简体中文](README.md)
+>
 > Go 1.26 | 30+ 内部包 | 5 公共包 | 34 配置结构体
 > CLI: 32 顶层命令 + 60+ 子命令 | 依赖: 29 direct + 105 indirect
 
@@ -124,6 +126,7 @@ ARD 协议实现 Agent 的双向发现（联邦搜索 + RegistryServer 发布）
 | **LLM 后端** | 8 种: OpenAI / Anthropic / Google / DeepSeek / Ollama / LMStudio / vLLM / ACP（OpenAI 兼容云服务经 `type: openai` 接入：SiliconFlow / OpenRouter / Groq / Moonshot / 智谱等） |
 | **CoreLoop** | 四阶段执行: Prepare → Execute → Finalize → Return |
 | **Recipe 系统** | YAML 定义子 Agent + 热重载 + 版本进化 |
+| **Flow DSL** | 用户可写 YAML 编排流（agent/capability 节点 + 条件边） |
 | **HITL** | 人机协同，决策点原生暂停 |
 
 ### 记忆与知识
@@ -262,9 +265,9 @@ wukong server --session-id my-server --config wukong.yaml --no-stream
 
 | 类别 | 选择 | 版本 | 用途 |
 |------|------|------|------|
-| Agent 框架 | tRPC-Agent-Go | v1.10.0 | Agent 编排、工具调用、会话管理 |
+| Agent 框架 | tRPC-Agent-Go | v1.11.2 | Agent 编排、工具调用、会话管理 |
 | MCP 协议 | tRPC-MCP-Go | v0.0.16 | Model Context Protocol |
-| A2A 协议 | tRPC-A2A-Go (间接依赖) | v0.2.5 | Agent-to-Agent 通信，经由直接依赖间接引入 |
+| A2A 协议 | tRPC-A2A-Go (间接依赖) | v0.2.6-pre | Agent-to-Agent 通信，经由直接依赖间接引入 |
 | 记忆引擎 | CortexDB | v2.25.0 | HNSW 向量 + FTS5 全文 + RDF 图谱 |
 | 知识格式 | OKF | v0.1 | 开放知识格式 |
 | CLI 框架 | Cobra + Viper | v1.9.1 / v1.20.1 | 命令行 + 配置管理 |
