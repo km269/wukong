@@ -288,35 +288,34 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 		)
 	}
 
-	// Configure Tool Search plugin for automatic tool filtering.
-	// When enabled, the toolsearch plugin compresses the candidate
-	// tool list (TopK) before each model call to reduce token cost.
-	// This is registered at runner level so it applies to all agents.
+	// Configure Tool Search plugin (trpc-agent-go v1.11 deferred-tools
+	// model). When enabled, tools are hidden behind a tool_search
+	// function plus a system-prompt catalog and loaded on demand —
+	// the framework's replacement for the old LLM TopK compression.
+	// Registered at runner level so it applies to all agents.
 	if cfg.Config.Agent.ToolSearchEnabled {
-		mdl, err := cfg.Factory.CreateDefaultModel()
-		if err == nil {
-			maxTools := cfg.Config.Agent.ToolSearchMaxTools
-			if maxTools <= 0 {
-				maxTools = 20
-			}
-			ts, tsErr := toolsearch.New(mdl,
-				toolsearch.WithMaxTools(maxTools),
-				toolsearch.WithFailOpen(),
-			)
-			if tsErr != nil {
-				util.Logger.Warn(
-					"toolsearch creation failed, continuing without auto tool filtering",
-					slog.String("error", tsErr.Error()),
-				)
-			} else {
-				runnerOpts = append(runnerOpts,
-					runner.WithPlugins(ts),
-				)
-				util.Logger.Info("toolsearch plugin enabled",
-					slog.Int("max_tools", maxTools),
-				)
-			}
+		// Deferred population: every capability-bus tool plus the
+		// hand-aggregated tools (function tools are preset so todo /
+		// recall stay always-visible to the model).
+		deferred := append(
+			effectiveToolSetsTools(cfg),
+			cfg.FunctionTools...,
+		)
+		maxTools := cfg.Config.Agent.ToolSearchMaxTools
+		if maxTools <= 0 {
+			maxTools = 20
 		}
+		ts := toolsearch.New(
+			cfg.FunctionTools,
+			toolsearch.WithMaxResults(maxTools),
+			toolsearch.WithDeferredTools(deferred),
+			toolsearch.WithEmbeddingFailOpen(),
+		)
+		runnerOpts = append(runnerOpts, runner.WithPlugins(ts))
+		util.Logger.Info("toolsearch plugin enabled",
+			slog.Int("max_results", maxTools),
+			slog.Int("deferred_tools", len(deferred)),
+		)
 	}
 
 	// Configure Prompt Injection guardrail.
@@ -1854,6 +1853,18 @@ func buildAgentCallbacks(cfg *config.WukongConfig) *agent.Callbacks {
 		},
 	)
 	return callbacks
+}
+
+// effectiveToolSetsTools flattens the tools of the effective
+// toolsets — used as the deferred population for the toolsearch
+// plugin.
+func effectiveToolSetsTools(cfg CoreLoopConfig) []tool.Tool {
+	var out []tool.Tool
+	ctx := context.Background()
+	for _, ts := range effectiveToolSets(cfg) {
+		out = append(out, ts.Tools(ctx)...)
+	}
+	return out
 }
 
 // recipeNamespace is the capability-bus namespace for recipe
