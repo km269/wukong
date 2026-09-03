@@ -396,6 +396,51 @@ func extractMessageContent(msg model.Message) string {
 // effectiveToolSetsTools flattens the tools of the effective
 // toolsets — used as the deferred population for the toolsearch
 // plugin.
+// buildToolsearchCandidates splits the tool universe into the two
+// populations the v1.11 toolsearch plugin expects, and which must be
+// disjoint:
+//
+//   - preset: function tools (todo / recall / KG / import / summon) —
+//     always visible to the model;
+//   - deferred: everything the effective toolsets expose (capability
+//     bus, recipes, flows) — discoverable via tool_search on demand.
+//
+// Both outputs are deduplicated by declaration name (a name present
+// in preset is also excluded from deferred, and deferred-internal
+// duplicates from overlapping toolsets are collapsed), because the
+// plugin drops a deferred registration with an ERROR log whenever the
+// name is already preset.
+func buildToolsearchCandidates(
+	cfg CoreLoopConfig,
+) (preset, deferred []tool.Tool) {
+	seen := make(map[string]bool)
+	for _, t := range cfg.FunctionTools {
+		if t == nil {
+			continue
+		}
+		d := t.Declaration()
+		if d == nil || d.Name == "" || seen[d.Name] {
+			continue
+		}
+		seen[d.Name] = true
+		preset = append(preset, t)
+	}
+	for _, t := range effectiveToolSetsTools(cfg) {
+		if t == nil {
+			continue
+		}
+		d := t.Declaration()
+		if d == nil || d.Name == "" || seen[d.Name] {
+			continue
+		}
+		seen[d.Name] = true
+		deferred = append(deferred, t)
+	}
+	return preset, deferred
+}
+
+// effectiveToolSetsTools flattens the tools of the effective
+// toolsets (capability bus / recipes / flows).
 func effectiveToolSetsTools(cfg CoreLoopConfig) []tool.Tool {
 	var out []tool.Tool
 	ctx := context.Background()

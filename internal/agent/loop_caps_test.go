@@ -53,10 +53,13 @@ func TestEffectiveToolSetsEmptyRegistry(t *testing.T) {
 
 // fakeLoopToolSet is a minimal tool.ToolSet for aggregation tests.
 type fakeLoopToolSet struct {
-	name string
+	name  string
+	tools []tool.Tool
 }
 
-func (f *fakeLoopToolSet) Tools(context.Context) []tool.Tool { return nil }
+func (f *fakeLoopToolSet) Tools(context.Context) []tool.Tool {
+	return f.tools
+}
 
 func (f *fakeLoopToolSet) Close() error { return nil }
 
@@ -219,4 +222,68 @@ func (f *fakeCallableTool) Declaration() *tool.Declaration {
 
 func (f *fakeCallableTool) Call(context.Context, []byte) (any, error) {
 	return "ok", nil
+}
+
+func TestBuildToolsearchCandidates(t *testing.T) {
+	declTool := func(name string) tool.Tool {
+		return &fakeCallableTool{
+			decl: &tool.Declaration{Name: name},
+		}
+	}
+	overlap := &fakeLoopToolSet{name: "overlap", tools: []tool.Tool{
+		declTool("todo_create"), // name collision with a preset tool
+		declTool("kg_query"),    // toolset-internal duplicate below
+		declTool("kg_query"),
+	}}
+	unique := &fakeLoopToolSet{name: "unique",
+		tools: []tool.Tool{declTool("web_search")}}
+
+	cfg := CoreLoopConfig{
+		FunctionTools: []tool.Tool{
+			declTool("todo_create"),
+			declTool("recall_search"),
+			declTool("recall_search"), // function-internal duplicate
+		},
+		// Capabilities nil → legacy toolset path, so the fake
+		// toolsets are visible to the flattening.
+		ToolSets: []tool.ToolSet{overlap, unique},
+	}
+
+	preset, deferred := buildToolsearchCandidates(cfg)
+
+	presetNames := map[string]bool{}
+	for _, p := range preset {
+		n := p.Declaration().Name
+		if presetNames[n] {
+			t.Errorf("preset contains duplicate %q", n)
+		}
+		presetNames[n] = true
+	}
+	if !presetNames["todo_create"] || !presetNames["recall_search"] {
+		t.Errorf("preset = %v, want todo_create + recall_search", presetNames)
+	}
+	if len(preset) != 2 {
+		t.Errorf("preset len = %d, want 2 (deduped)", len(preset))
+	}
+
+	deferredNames := map[string]bool{}
+	for _, d := range deferred {
+		n := d.Declaration().Name
+		if presetNames[n] {
+			t.Errorf("tool %q appears in both preset and deferred", n)
+		}
+		if deferredNames[n] {
+			t.Errorf("deferred contains duplicate %q", n)
+		}
+		deferredNames[n] = true
+	}
+	if !deferredNames["kg_query"] || !deferredNames["web_search"] {
+		t.Errorf("deferred = %v, want kg_query + web_search", deferredNames)
+	}
+	if deferredNames["todo_create"] {
+		t.Error("preset tool leaked into deferred population")
+	}
+	if len(deferred) != 2 {
+		t.Errorf("deferred len = %d, want 2", len(deferred))
+	}
 }

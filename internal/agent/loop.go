@@ -284,19 +284,19 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 	// the framework's replacement for the old LLM TopK compression.
 	// Registered at runner level so it applies to all agents.
 	if cfg.Config.Agent.ToolSearchEnabled {
-		// Deferred population: every capability-bus tool plus the
-		// hand-aggregated tools (function tools are preset so todo /
-		// recall stay always-visible to the model).
-		deferred := append(
-			effectiveToolSetsTools(cfg),
-			cfg.FunctionTools...,
-		)
+		// Function tools (todo / recall / KG / import / summon) stay
+		// preset — always visible to the model. Everything else
+		// (capability-bus toolsets, recipes, flows) is deferred behind
+		// tool_search. The two populations must be disjoint; a tool in
+		// both makes the plugin drop its deferred registration with an
+		// ERROR per call site.
+		preset, deferred := buildToolsearchCandidates(cfg)
 		maxTools := cfg.Config.Agent.ToolSearchMaxTools
 		if maxTools <= 0 {
 			maxTools = 20
 		}
 		ts := toolsearch.New(
-			cfg.FunctionTools,
+			preset,
 			toolsearch.WithMaxResults(maxTools),
 			toolsearch.WithDeferredTools(deferred),
 			toolsearch.WithEmbeddingFailOpen(),
@@ -304,6 +304,7 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 		runnerOpts = append(runnerOpts, runner.WithPlugins(ts))
 		util.Logger.Info("toolsearch plugin enabled",
 			slog.Int("max_results", maxTools),
+			slog.Int("preset_tools", len(preset)),
 			slog.Int("deferred_tools", len(deferred)),
 		)
 	}
