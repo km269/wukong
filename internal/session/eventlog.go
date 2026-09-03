@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/km269/wukong/internal/migration"
 	"github.com/km269/wukong/internal/util"
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
@@ -83,24 +84,10 @@ func NewModelEventLog(db *sql.DB) (*ModelEventLog, error) {
 	if db == nil {
 		return nil, errors.New("model event log: nil db")
 	}
-	const schema = `
-CREATE TABLE IF NOT EXISTS wukong_model_events (
-	id         INTEGER PRIMARY KEY AUTOINCREMENT,
-	session_id TEXT    NOT NULL,
-	user_id    TEXT    NOT NULL,
-	seq        INTEGER NOT NULL,
-	event_type TEXT    NOT NULL,
-	source     TEXT    NOT NULL DEFAULT '',
-	payload    TEXT    NOT NULL DEFAULT '',
-	created_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_model_events_session
-	ON wukong_model_events(session_id, seq);
-CREATE INDEX IF NOT EXISTS idx_model_events_type
-	ON wukong_model_events(event_type);
-`
-	if _, err := db.Exec(schema); err != nil {
-		return nil, fmt.Errorf("create model_events table: %w", err)
+	if err := migration.Apply(
+		context.Background(), db, Migrations(),
+	); err != nil {
+		return nil, fmt.Errorf("apply model_events migrations: %w", err)
 	}
 	return &ModelEventLog{
 		db:       db,

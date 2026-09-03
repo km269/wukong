@@ -331,6 +331,7 @@ base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
 | `max_tool_iterations` | int | 30 | 单次 Run 最大工具迭代次数 |
 | `max_run_duration` | duration | `900s` | 单次 Run 墙钟时间上限 |
 | `tool_call_timeout` | duration | `120s` | 单次工具调用截止时间，防止慢工具耗尽 Run 预算。0 = 不限 |
+| `command_validation_mode` | string | `hybrid` | Guard 命令校验判定模式: `hybrid`（scope 声明权威 + 名称启发式回退）/ `descriptor`（仅声明，未声明工具不校验）/ `heuristic`（仅名称启发式）。scope 声明来自内置扩展（builtin/scopes.go）与 `extensions[].tool_scopes` |
 | `parallel_tools` | bool | true | 是否并行执行独立工具调用 |
 | `streaming` | bool | true | 是否启用 TUI 实时 token 流式输出 |
 
@@ -385,6 +386,8 @@ base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
 | `system_prompt_dir` | string | `~/.config/wukong/prompts/` | 系统提示词目录 |
 | `recipe_dir` | string | `.wukong/recipes/` | Recipe YAML 定义目录 |
 | `recipe_enabled` | bool | true | 是否启用 Recipe 系统 |
+| `flow_enabled` | bool | false | 是否启用声明式 Flow DSL（P0-2）：`.wukong/flows/*.yaml` 编译为 `flow-<name>` 工具与 `flow.<name>` 能力 |
+| `flow_dir` | string | `.wukong/flows/` | Flow YAML 定义目录 |
 | `inline_recipes` | []map[string]any | - | config.yaml 内联 Recipe 定义 |
 
 ---
@@ -873,6 +876,7 @@ Extensions 为 MCP 外部服务器数组。每个扩展实现 tRPC-agent-go 的 
 | `timeout` | duration | 超时时间 |
 | `deeplink` | string | 深度链接模板 |
 | `permissions` | []ToolPermission | 工具权限 |
+| `tool_scopes` | map[string][]string | 按工具声明权限域（如 `run_cmd: ["shell"]`），写入能力注册表描述符，供 Guard 命令校验接缝消费 |
 | `mcp_broker` | bool | 是否作为 MCP Broker（聚合为 4 个工具） |
 | `mcp_tool_filter` | []string | MCP 工具白名单 |
 | `mcp_tool_exclude` | []string | MCP 工具排除列表 |

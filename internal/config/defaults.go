@@ -63,6 +63,14 @@ func (l *Loader) setAgentDefaults() {
 	// Planner
 	l.v.SetDefault("agent.planner", "")
 
+	// Command validation: hybrid = scope declarations authoritative
+	// with legacy heuristic fallback (see types_agent.go).
+	l.v.SetDefault("agent.command_validation_mode", "hybrid")
+
+	// Declarative flow DSL (P0-2), opt-in like recipes.
+	l.v.SetDefault("agent.flow_enabled", false)
+	l.v.SetDefault("agent.flow_dir", "")
+
 	// Tool search
 	l.v.SetDefault("agent.tool_search_enabled", false)
 	l.v.SetDefault("agent.tool_search_max_tools", 20)

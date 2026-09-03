@@ -42,22 +42,29 @@ type ProviderConfig struct {
 
 // ExtensionConfig defines an MCP extension (built-in or external).
 type ExtensionConfig struct {
-	Name                        string            `mapstructure:"name"`
-	Type                        string            `mapstructure:"type"`
-	Transport                   string            `mapstructure:"transport"`
-	Command                     string            `mapstructure:"command"`
-	Args                        []string          `mapstructure:"args"`
-	URL                         string            `mapstructure:"url"`
-	Env                         map[string]string `mapstructure:"env"`
-	Enabled                     bool              `mapstructure:"enabled"`
-	Timeout                     time.Duration     `mapstructure:"timeout"`
-	Deeplink                    string            `mapstructure:"deeplink"`
-	Permissions                 []ToolPermission  `mapstructure:"permissions"`
-	MCPBroker                   bool              `mapstructure:"mcp_broker"`
-	MCPToolFilter               []string          `mapstructure:"mcp_tool_filter"`
-	MCPToolExclude              []string          `mapstructure:"mcp_tool_exclude"`
-	MCPSessionReconnect         bool              `mapstructure:"mcp_session_reconnect"`
-	MCPSessionReconnectAttempts int               `mapstructure:"mcp_session_reconnect_attempts"`
+	Name        string            `mapstructure:"name"`
+	Type        string            `mapstructure:"type"`
+	Transport   string            `mapstructure:"transport"`
+	Command     string            `mapstructure:"command"`
+	Args        []string          `mapstructure:"args"`
+	URL         string            `mapstructure:"url"`
+	Env         map[string]string `mapstructure:"env"`
+	Enabled     bool              `mapstructure:"enabled"`
+	Timeout     time.Duration     `mapstructure:"timeout"`
+	Deeplink    string            `mapstructure:"deeplink"`
+	Permissions []ToolPermission  `mapstructure:"permissions"`
+	// ToolScopes declares permission domains per tool for external
+	// MCP tools, consulted by the capability registry descriptors
+	// and the Guard command-validation seam. Example:
+	//   tool_scopes: { run_cmd: ["shell"] }
+	// Declared tools are exempt from the legacy name heuristic under
+	// agent.command_validation_mode: hybrid/descriptor.
+	ToolScopes                  map[string][]string `mapstructure:"tool_scopes"`
+	MCPBroker                   bool                `mapstructure:"mcp_broker"`
+	MCPToolFilter               []string            `mapstructure:"mcp_tool_filter"`
+	MCPToolExclude              []string            `mapstructure:"mcp_tool_exclude"`
+	MCPSessionReconnect         bool                `mapstructure:"mcp_session_reconnect"`
+	MCPSessionReconnectAttempts int                 `mapstructure:"mcp_session_reconnect_attempts"`
 }
 
 // ToolPermission defines allow/deny for a specific tool within an extension.

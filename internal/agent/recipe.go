@@ -188,6 +188,11 @@ type RecipeToolSet struct {
 	agentCfg *config.AgentConfig
 	// allToolsFn provides base tools for reload operations.
 	allToolsFn func() []tool.Tool
+	// onReload is invoked after a successful Reload with the fresh
+	// tool slice (capability-registry sync, Phase C). Called with
+	// the toolset lock held: the callback must not call back into
+	// the toolset.
+	onReload func(tools []tool.Tool)
 }
 
 // NewRecipeToolSet scans the configured recipe directory for .yaml
@@ -258,6 +263,16 @@ func NewRecipeToolSet(
 	return ts
 }
 
+// SetReloadCallback registers fn to run after every successful
+// Reload with the fresh tool slice. Used by CoreLoop to keep the
+// capability registry's recipe.* namespace in sync during hot
+// reload (roadmap P0-1 Phase C).
+func (ts *RecipeToolSet) SetReloadCallback(fn func(tools []tool.Tool)) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.onReload = fn
+}
+
 // Reload rebuilds all recipe tools from disk. Returns false if the
 // reload fails. Thread-safe.
 func (ts *RecipeToolSet) Reload() bool {
@@ -290,6 +305,10 @@ func (ts *RecipeToolSet) Reload() bool {
 
 	util.Logger.Info("recipe: reload completed",
 		slog.Int("tools", len(tools)))
+
+	if ts.onReload != nil {
+		ts.onReload(tools)
+	}
 	return true
 }
 

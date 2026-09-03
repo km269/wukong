@@ -18,6 +18,7 @@ import (
 	"github.com/km269/wukong/internal/apps"
 	"github.com/km269/wukong/internal/ard"
 	artifacts "github.com/km269/wukong/internal/artifact"
+	"github.com/km269/wukong/internal/capability"
 	"github.com/km269/wukong/internal/cli/tui"
 	"github.com/km269/wukong/internal/codemode"
 	"github.com/km269/wukong/internal/config"
@@ -236,9 +237,15 @@ type BootstrapState struct {
 	ANPMessenger      *summon.E2EEMessenger
 	CredentialRotator *summon.CredentialRotator
 	ExtMgr            *extension.Manager
-	KnowledgeMgr      *knowledge.Manager
-	ProjectMgr        *project.Manager
-	GatewayServer     *gateway.GatewayServer
+
+	// Caps is the unified capability registry (roadmap P0-1 Phase
+	// A): every extension-sourced tool registered under a stable
+	// bus address. Read-only in this phase — consumed by the caps
+	// CLI and tests; CoreLoop keeps its own tool aggregation.
+	Caps          *capability.Registry
+	KnowledgeMgr  *knowledge.Manager
+	ProjectMgr    *project.Manager
+	GatewayServer *gateway.GatewayServer
 
 	// SessionSvc is the session store service used by the agent loop;
 	// shared with the TUI's multi-session tab (C1). Nil when no
@@ -1028,6 +1035,36 @@ func bootstrapSession(
 		functionTools = append(functionTools, summonTools...)
 	}
 
+	// Capability bus (roadmap P0-1 Phase A, read-only): register
+	// every extension-sourced tool under a stable bus address so
+	// the caps CLI, Guard, protocol endpoints and the future flow
+	// DSL share one registry. CoreLoop keeps the hand-aggregation
+	// above unchanged; AsTools() equivalence is covered by tests.
+	capsReg := capability.NewRegistry()
+	regCtx := context.Background()
+	if _, err := extMgr.RegisterCapabilities(capsReg, regCtx); err != nil {
+		util.Logger.Warn("capability registry: manager registration failed",
+			"error", err.Error())
+	}
+	registerCapsToolset := func(prefix string, ts tool.ToolSet) {
+		if ts == nil {
+			return
+		}
+		if _, err := extension.RegisterToolSet(
+			capsReg, prefix, capability.SourceBuiltin, ts, regCtx,
+		); err != nil {
+			util.Logger.Warn("capability registry: registration failed",
+				"prefix", prefix, "error", err.Error())
+		}
+	}
+	registerCapsToolset(extension.AddrExtensionMgr, extToolSet)
+	registerCapsToolset(extension.AddrTopOfMind, tomToolSet)
+	registerCapsToolset(extension.AddrCodeMode, codeToolSet)
+	registerCapsToolset(extension.AddrApps, appsToolSet)
+	registerCapsToolset(extension.AddrAgentTools, agentToolSet)
+	util.Logger.Info("capability registry ready",
+		"capabilities", capsReg.Len())
+
 	// Add Knowledge search tool (RAG)
 	if knowledgeMgr != nil && knowledgeMgr.IsEnabled() {
 		searchTool := knowledgeMgr.SearchTool()
@@ -1122,6 +1159,7 @@ func bootstrapSession(
 		ArtifactService:       artifactSvc,
 		ToolSets:              toolSets,
 		FunctionTools:         functionTools,
+		Capabilities:          capsReg,
 		SecurityGuard:         guard,
 		RecallStore:           recallStore,
 		CortexStore:           cortexStore,
@@ -1161,6 +1199,7 @@ func bootstrapSession(
 		MCPServer:         mcpServer,
 		CredentialRotator: credRotator,
 		ExtMgr:            extMgr,
+		Caps:              capsReg,
 		// Wire a real DB ping so the health DBChecker is no longer a
 		// no-op. dbPool is the shared SQLite pool created above.
 		DBPing: func(ctx context.Context) error {

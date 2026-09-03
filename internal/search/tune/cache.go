@@ -1,6 +1,7 @@
 package tune
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/km269/wukong/internal/migration"
 )
 
 // ----------------------------------------------------------------------------
@@ -88,19 +91,9 @@ func NewSQLiteCheckpointStoreWithDB(
 	return store, nil
 }
 
+// initSchema applies the versioned tuning migrations (P0-3).
 func (s *SQLiteCheckpointStore) initSchema() error {
-	_, err := s.db.Exec(`
-		CREATE TABLE IF NOT EXISTS tune_runs (
-			run_id       TEXT PRIMARY KEY,
-			status       TEXT NOT NULL,
-			run_json     TEXT NOT NULL,
-			created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);
-		CREATE INDEX IF NOT EXISTS idx_tune_status
-			ON tune_runs(status);
-	`)
-	return err
+	return migration.Apply(context.Background(), s.db, Migrations())
 }
 
 // SaveRun persists the current run state.

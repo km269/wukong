@@ -14,6 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/migration"
 	"github.com/km269/wukong/internal/search"
 	"github.com/km269/wukong/internal/util"
 )
@@ -600,75 +601,20 @@ func (s *Store) Close() error {
 	return nil
 }
 
+// initSchema applies the versioned recall migrations (P0-3). The
+// FTS5 set is optional: builds without FTS5 skip it and full-text
+// search falls back to LIKE, matching the legacy behavior.
 func (s *Store) initSchema() error {
-	_, err := s.db.Exec(`
-		CREATE TABLE IF NOT EXISTS chat_recall (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			session_id TEXT NOT NULL,
-			user_id TEXT NOT NULL,
-			role TEXT NOT NULL,
-			content TEXT NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		);
-		CREATE INDEX IF NOT EXISTS idx_recall_session
-			ON chat_recall(session_id);
-		CREATE INDEX IF NOT EXISTS idx_recall_user
-			ON chat_recall(user_id);
-		CREATE INDEX IF NOT EXISTS idx_recall_created
-			ON chat_recall(created_at);
-	`)
-	if err != nil {
+	ctx := context.Background()
+	if err := migration.Apply(ctx, s.db, migrations); err != nil {
 		return err
 	}
-
-	// Create FTS5 virtual table for full-text search with BM25 ranking.
-	// The content table is the external content table, so FTS5 is kept
-	// in sync automatically via triggers. We include content as the
-	// only indexed column since that's what we search against.
-	_, err = s.db.Exec(`
-		CREATE VIRTUAL TABLE IF NOT EXISTS chat_recall_fts
-			USING fts5(
-				content,
-				content='chat_recall',
-				content_rowid='id',
-				tokenize='unicode61'
-			)
-	`)
-	if err != nil {
+	if err := migration.Apply(ctx, s.db, ftsMigrations); err != nil {
 		// FTS5 may not be available in all SQLite builds.
 		// This is non-fatal; search will fall back to LIKE.
-		return nil
+		util.Logger.Warn("recall: FTS5 migrations unavailable, " +
+			"full-text search will fall back to LIKE")
 	}
-
-	// Create triggers to keep FTS5 index in sync with chat_recall.
-	// These are IF NOT EXISTS so they don't fail on re-runs.
-	_, _ = s.db.Exec(`
-		CREATE TRIGGER IF NOT EXISTS recall_fts_insert
-		AFTER INSERT ON chat_recall
-		BEGIN
-			INSERT INTO chat_recall_fts(rowid, content)
-			VALUES (new.id, new.content);
-		END
-	`)
-	_, _ = s.db.Exec(`
-		CREATE TRIGGER IF NOT EXISTS recall_fts_delete
-		AFTER DELETE ON chat_recall
-		BEGIN
-			INSERT INTO chat_recall_fts(chat_recall_fts, rowid, content)
-			VALUES ('delete', old.id, old.content);
-		END
-	`)
-	_, _ = s.db.Exec(`
-		CREATE TRIGGER IF NOT EXISTS recall_fts_update
-		AFTER UPDATE ON chat_recall
-		BEGIN
-			INSERT INTO chat_recall_fts(chat_recall_fts, rowid, content)
-			VALUES ('delete', old.id, old.content);
-			INSERT INTO chat_recall_fts(rowid, content)
-			VALUES (new.id, new.content);
-		END
-	`)
-
 	return nil
 }
 

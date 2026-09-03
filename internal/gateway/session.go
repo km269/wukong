@@ -1,10 +1,12 @@
 package gateway
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"sync"
 
+	"github.com/km269/wukong/internal/migration"
 	"github.com/km269/wukong/internal/util"
 )
 
@@ -123,25 +125,14 @@ func (s *GatewaySessionStore) Close() error {
 	return nil
 }
 
-// ensureTable creates the gateway_sessions table if it doesn't exist.
+// ensureTable applies the versioned gateway migrations (P0-3).
 func (s *GatewaySessionStore) ensureTable() {
 	if s.db == nil {
 		return
 	}
-	_, err := s.db.Exec(`
-		CREATE TABLE IF NOT EXISTS gateway_sessions (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			platform TEXT NOT NULL,
-			platform_user TEXT NOT NULL,
-			conversation_id TEXT NOT NULL DEFAULT '',
-			wukong_user TEXT NOT NULL,
-			wukong_session TEXT NOT NULL,
-			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-			UNIQUE(platform, platform_user, conversation_id)
-		)
-	`)
-	if err != nil {
+	if err := migration.Apply(
+		context.Background(), s.db, Migrations(),
+	); err != nil {
 		util.Logger.Warn("gateway: failed to create sessions table",
 			"error", err.Error())
 	}

@@ -2,7 +2,7 @@
 
 > 本目录包含 Wukong AI Agent 平台的所有技术文档。
 >
-> 最后更新：2026-08-30 | 当前版本：v0.3.3
+> 最后更新：2026-09-03 | 当前版本：v0.3.3
 >
 > **版本约定**：各文档尾注的"版本"统一跟随项目版本（权威源为
 > [internal/util/version.go](../internal/util/version.go) 与
@@ -36,6 +36,7 @@
 | [记忆系统架构](MEMORY_ARCHITECTURE.md) | 双引擎三层记忆详解 | MemoryFlow、CortexDB、GraphFlow、SmartCleanup |
 | [OKF 知识格式](OKF_GUIDE.md) | OKF v0.1 规范与集成 | Bundle、Concept、Skill、Knowledge、Evolution |
 | [配置体系重构记录](REFACTOR_NOTES.md) | v0.3.3 配置重构变更明细与操作基线 | envexpand、defaults.go、偏差标注、口径速查 |
+| [Yao 对比与优化路线图](YAO_COMPARISON_AND_ROADMAP.md) | 与 YaoApp/yao 的深度对比分析、优化路线图与能力总线设计草案 | Yao、能力总线、DSL、路线图 |
 
 ### 其他
 
@@ -57,6 +58,7 @@
 | 网站克隆怎么用？原理是什么？ | [网站克隆技术指南](CLONE_GUIDE.md) |
 | 反爬是怎么处理的？ | [反反爬技术详解](ANTIBOT_GUIDE.md) |
 | 记忆系统是怎么工作的？ | [记忆系统架构](MEMORY_ARCHITECTURE.md) |
+| 和 Yao 等同类项目相比异同在哪？优化方向是什么？ | [Yao 对比与优化路线图](YAO_COMPARISON_AND_ROADMAP.md) |
 
 ---
 
@@ -104,11 +106,12 @@
 | 公共包 | 5 个 |
 | 配置结构体 | 54 个（分布在 11 个 `types_*.go` 文件） |
 | WukongConfig 配置段 | 35 个配置段 + 2 个列表段 + 5 个顶层标量（共 42 个 mapstructure 字段） |
-| CLI 顶层命令 | 30 个（root.go 注册；另有 53 个子命令） |
-| CLI 命令定义 | 84 条（`Use:` 字段） |
+| CLI 顶层命令 | 32 个（root.go 注册；另有 56 个子命令） |
+| CLI 命令定义 | 88 条（`Use:` 字段） |
 | 编排模式 | 10 种 |
 | LLM Provider | 8 种（openai/anthropic/google/deepseek/ollama/lmstudio/vllm/acp） |
 | 内置扩展 | 12 个（`web` 扩展内含 5 个搜索后端工具） |
+| 能力注册表 | 统一地址 `<ns>.<name>[.<tool>]`（tools.* / mcp.* / recipe.* / flow.* 等），`wukong caps list/run` 查看，为工具聚合单一来源 |
 | 直接依赖 | 36 个（go.mod require 块） |
 | 测试文件 | 约 130 个 |
 | 反爬升级体系 | 5 级 |

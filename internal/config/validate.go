@@ -125,6 +125,18 @@ func (c *WukongConfig) Validate() error {
 		)
 	}
 
+	// Validate command validation mode.
+	switch c.Agent.CommandValidationMode {
+	case "", "hybrid", "descriptor", "heuristic":
+		// Valid. Empty defaults to hybrid.
+	default:
+		return fmt.Errorf(
+			"agent.command_validation_mode %q is invalid; "+
+				"use hybrid, descriptor, or heuristic",
+			c.Agent.CommandValidationMode,
+		)
+	}
+
 	// Validate workflow mode.
 	switch WorkflowMode(c.Workflow.Mode) {
 	case WorkflowModeSingle, WorkflowModeChain, WorkflowModeParallel,

@@ -163,7 +163,7 @@ cmd.PersistentFlags().BoolVar(&quietEnabled, "quiet", false, "Suppress all log o
 
 ## 3. CLI 命令树全景
 
-`newRootCmd()` 注册了 **30 个顶层子命令**，按功能分为 7 大类。
+`newRootCmd()` 注册了 **32 个顶层子命令**，按功能分为 7 大类。
 
 ### 3.1 完整命令树
 
@@ -181,6 +181,7 @@ wukong
 ├── config
 │   ├── validate               #   12 项配置校验
 │   └── show                   #   显示合并后有效配置（YAML）
+├── migrate                    # 应用全部待执行 schema 迁移（P0-3）
 ├── version                    # 版本信息（Version + GitCommit + BuildDate）
 ├── init [dir]                 # 项目初始化（.wukong/ 结构 + config.yaml）
 ├── completion [shell]         # Shell 自动补全（bash/zsh/fish/powershell）
@@ -195,6 +196,9 @@ wukong
 │   ├── enable/disable <name>  #   启用/禁用
 │   ├── show <name>            #   详情
 │   └── remove <name>          #   移除
+├── caps                       # 能力注册表（P0-1）
+│   ├── list [namespace]       #   列出已注册能力（--json / 前缀过滤）
+│   └── run <address>          #   按地址直接调用能力（--args JSON）
 ├── memory                     # 记忆管理
 ├── provider                   # Provider 管理
 ├── skill                      # 技能管理（list/show）
@@ -224,7 +228,7 @@ wukong
 | **配置管理** | `config`, `configure`, `init` | config.go, configure.go, init.go | 校验/向导/初始化 |
 | **系统诊断** | `health`, `env`, `version`, `stats`, `docs`, `completion`, `system-check`, `backup` | health.go, env.go, version.go, utils.go, bench.go | 健康/环境/版本/统计 |
 | **项目管理** | `project`, `projects`, `bench` | project.go, bench.go | 项目追踪与基准 |
-| **扩展管理** | `extension` | extension.go | MCP 扩展生命周期 |
+| **扩展管理** | `extension`, `caps` | extension.go, caps.go | MCP 扩展生命周期 · 能力注册表查看 |
 | **资源管理** | `memory`, `provider`, `skill`, `recipe`, `knowledge`, `ard`, `evolution`, `cortex`, `todo`, `apps`, `eval` | *_mgmt.go, eval.go | 各子系统 CRUD |
 | **搜索调优** | `search tune` | search_tune.go | 搜索参数自迭代 |
 
@@ -1108,4 +1112,4 @@ EvolutionTracker 作为 Runner 级别插件，通过事件监听异步捕获执�
 
 ---
 
-> **版本**: v0.3.3 | **最后更新**: 2026-08-30 | **CLI 源文件**: 29 + TUI 3 = 32 | **顶层命令**: 30
+> **版本**: v0.3.3 | **最后更新**: 2026-09-03 | **CLI 源文件**: 31 + TUI 3 = 34 | **顶层命令**: 32 | **命令定义**: 88

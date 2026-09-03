@@ -3,7 +3,7 @@
 > 本地优先、框架组装、可深度扩展的开源 AI Agent 平台
 >
 > Go 1.26 | 30+ 内部包 | 5 公共包 | 34 配置结构体
-> CLI: 30 顶层命令 + 60+ 子命令 | 依赖: 29 direct + 105 indirect
+> CLI: 32 顶层命令 + 60+ 子命令 | 依赖: 29 direct + 105 indirect
 
 **Wukong（悟空）** 是一个基于 Go 语言构建的新一代 AI Agent 平台，名字取自中国神话中的齐天大圣孙悟空，寓意智能、灵活与强大。它不只是一个 AI 聊天机器人，而是一个**本地优先、记忆驱动、多模式编排**的完整 AI Agent 开发框架。
 
@@ -459,6 +459,7 @@ GatewayServer (transport-agnostic)
 | [反反爬技术详解](docs/ANTIBOT_GUIDE.md) | 5 级反爬升级体系 · WAF 签名库 · 探测技术 |
 | [记忆系统架构](docs/MEMORY_ARCHITECTURE.md) | 三层记忆 · CortexDB 技术 · 智能清理算法 |
 | [OKF 知识格式](docs/OKF_GUIDE.md) | OKF v0.1 规范 · Bundle 结构 · 6 大集成 |
+| [Yao 对比与优化路线图](docs/YAO_COMPARISON_AND_ROADMAP.md) | 与 YaoApp/yao 对比分析 · 优化方向 · 能力总线设计草案 |
 
 ---
 

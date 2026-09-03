@@ -13,6 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/migration"
 	"github.com/km269/wukong/internal/util"
 
 	"trpc.group/trpc-go/trpc-agent-go/tool"
@@ -145,18 +146,9 @@ func (s *Store) Delete(id string) error {
 	return err
 }
 
+// initSchema applies the versioned todo migrations (P0-3).
 func initSchema(db *sql.DB) error {
-	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS tasks (
-			id TEXT PRIMARY KEY,
-			title TEXT NOT NULL,
-			description TEXT DEFAULT '',
-			status TEXT DEFAULT 'pending',
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-		)
-	`)
-	return err
+	return migration.Apply(context.Background(), db, Migrations())
 }
 
 // Tool Types for Function Tools

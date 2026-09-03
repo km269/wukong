@@ -26,3 +26,6 @@ wukong.db-wal
 # Local config with secrets (never commit API keys)
 config.yaml
 config.local.yaml
+
+# ZCode agent workspace metadata
+.zcode/

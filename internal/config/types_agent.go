@@ -47,6 +47,25 @@ type AgentConfig struct {
 	RecipeDir                            string           `mapstructure:"recipe_dir"`
 	RecipeEnabled                        bool             `mapstructure:"recipe_enabled"`
 	InlineRecipes                        []map[string]any `mapstructure:"inline_recipes"`
+	// FlowEnabled turns on the declarative flow DSL (P0-2): YAML
+	// flow definitions under flow_dir become callable tools and
+	// "flow.*" capabilities.
+	FlowEnabled bool `mapstructure:"flow_enabled"`
+	// FlowDir is the directory scanned for flow YAML files. Empty
+	// falls back to .wukong/flows relative to the working directory.
+	FlowDir string `mapstructure:"flow_dir"`
+	// CommandValidationMode selects how the Guard decides which tool
+	// calls need command-string validation (Guard.ValidateCommand):
+	//
+	//   - "hybrid" (default): capability scope declarations are
+	//     authoritative; tools without declarations fall back to the
+	//     legacy tool-name heuristic (isCommandTool).
+	//   - "descriptor": declarations only. Tools without a "shell"
+	//     scope declaration never validate — for setups that declare
+	//     scopes for every command-executing extension.
+	//   - "heuristic": legacy name matching only, declarations are
+	//     ignored.
+	CommandValidationMode string `mapstructure:"command_validation_mode"`
 }
 
 // ============================================================================

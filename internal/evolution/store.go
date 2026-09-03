@@ -2,10 +2,12 @@
 package evolution
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
 
+	"github.com/km269/wukong/internal/migration"
 	"github.com/km269/wukong/internal/util"
 )
 
@@ -25,47 +27,14 @@ func NewVersionStore(dbPool *util.DatabasePool) (*VersionStore, error) {
 	return vs, nil
 }
 
-// initSchema creates the evolution tables if they don't exist.
+// initSchema applies the versioned evolution migrations (P0-3).
 func (vs *VersionStore) initSchema() error {
 	db, err := vs.dbPool.GetDB()
 	if err != nil {
 		return fmt.Errorf("get db: %w", err)
 	}
 
-	schema := `
-	CREATE TABLE IF NOT EXISTS evolution_history (
-		id            INTEGER PRIMARY KEY AUTOINCREMENT,
-		skill_name    TEXT NOT NULL,
-		session_id    TEXT NOT NULL DEFAULT '',
-		trace_json    TEXT NOT NULL DEFAULT '{}',
-		has_issue     INTEGER NOT NULL DEFAULT 0,
-		patch_applied INTEGER NOT NULL DEFAULT 0,
-		patch_reason  TEXT NOT NULL DEFAULT '',
-		patch_confidence REAL NOT NULL DEFAULT 0.0,
-		version_before INTEGER NOT NULL DEFAULT 0,
-		version_after  INTEGER NOT NULL DEFAULT 0,
-		created_at    TEXT NOT NULL DEFAULT (datetime('now'))
-	);
-
-	CREATE INDEX IF NOT EXISTS idx_evolution_history_skill
-		ON evolution_history(skill_name, created_at);
-
-	CREATE TABLE IF NOT EXISTS evolution_versions (
-		id             INTEGER PRIMARY KEY AUTOINCREMENT,
-		skill_name     TEXT NOT NULL,
-		version_number INTEGER NOT NULL,
-		backup_path    TEXT NOT NULL DEFAULT '',
-		file_hash      TEXT NOT NULL DEFAULT '',
-		patch_reason   TEXT NOT NULL DEFAULT '',
-		created_at     TEXT NOT NULL DEFAULT (datetime('now'))
-	);
-
-	CREATE INDEX IF NOT EXISTS idx_evolution_versions_skill
-		ON evolution_versions(skill_name, version_number);
-	`
-
-	_, err = db.Exec(schema)
-	if err != nil {
+	if err := migration.Apply(context.Background(), db, migrations); err != nil {
 		return fmt.Errorf("create evolution tables: %w", err)
 	}
 	return nil

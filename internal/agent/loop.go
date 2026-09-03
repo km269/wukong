@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/km269/wukong/internal/capability"
 	"github.com/km269/wukong/internal/config"
 	"github.com/km269/wukong/internal/cortex"
 	"github.com/km269/wukong/internal/provider"
@@ -90,8 +91,14 @@ type CoreLoopConfig struct {
 	ArtifactService artifact.Service
 	ToolSets        []tool.ToolSet
 	FunctionTools   []tool.Tool
-	SecurityGuard   *security.Guard
-	RecallStore     *recall.Store
+	// Capabilities is the unified capability registry (roadmap P0-1
+	// Phase B). When non-nil it becomes the single aggregation
+	// source for extension-sourced tools, replacing the
+	// hand-assembled ToolSets (RecipeToolSets are preserved — see
+	// effectiveToolSets). Nil keeps the legacy behaviour untouched.
+	Capabilities  *capability.Registry
+	SecurityGuard *security.Guard
+	RecallStore   *recall.Store
 	// CortexStore is an optional CortexDB-backed store for
 	// HNSW vector indexing alongside FTS5 recall storage.
 	CortexStore   *cortex.CortexStore
@@ -166,6 +173,38 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 		cfg.ToolSets = append(cfg.ToolSets, recipeToolSet)
 		util.Logger.Info("recipe: integrated sub-agents",
 			"count", len(recipeToolSet.tools))
+
+		// Phase C: register recipes as "recipe.*" capabilities and
+		// keep the namespace in sync across hot reloads. With the
+		// registry wired, the toolset itself is dropped from the
+		// aggregation (see effectiveToolSets) so recipes appear in
+		// the manifest exactly once.
+		if cfg.Capabilities != nil {
+			reg, timeout := cfg.Capabilities, cfg.Config.Agent.ToolCallTimeout
+			SyncRecipeCapabilities(reg, recipeToolSet.tools, timeout)
+			recipeToolSet.SetReloadCallback(func(tools []tool.Tool) {
+				SyncRecipeCapabilities(reg, tools, timeout)
+			})
+		}
+	}
+
+	// P0-2: declarative flow DSL — YAML flows (agent + capability
+	// nodes, conditional edges) become callable tools and "flow.*"
+	// capabilities, hot-reloaded like recipes.
+	flowToolSet := NewFlowToolSet(
+		cfg.Factory, &cfg.Config.Agent, cfg.Capabilities)
+	if flowToolSet != nil && len(flowToolSet.tools) > 0 {
+		allTools = append(allTools, flowToolSet.tools...)
+		cfg.ToolSets = append(cfg.ToolSets, flowToolSet)
+		util.Logger.Info("flow: integrated declarative flows",
+			"count", len(flowToolSet.tools))
+		if cfg.Capabilities != nil {
+			reg := cfg.Capabilities
+			SyncFlowCapabilities(reg, flowToolSet.tools)
+			flowToolSet.SetReloadCallback(func(tools []tool.Tool) {
+				SyncFlowCapabilities(reg, tools)
+			})
+		}
 	}
 
 	// Add tRPC-native todo_write tool for structured task tracking.
@@ -203,7 +242,7 @@ func NewCoreLoop(cfg CoreLoopConfig) (*CoreLoop, error) {
 	if workflowMode != "" && workflowMode != "single" {
 		// Use WorkflowBuilder for multi-mode orchestration
 		builder, err := NewWorkflowBuilder(
-			cfg.Factory, cfg.Config, allTools, cfg.ToolSets,
+			cfg.Factory, cfg.Config, allTools, effectiveToolSets(cfg),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("create workflow builder: %w", err)
@@ -1529,9 +1568,10 @@ func createSingleAgent(
 			llmagent.WithTools(allTools),
 		)
 	}
-	if len(cfg.ToolSets) > 0 {
+	if len(cfg.ToolSets) > 0 || cfg.Capabilities != nil {
+		toolSets := effectiveToolSets(cfg)
 		agentOpts = append(agentOpts,
-			llmagent.WithToolSets(cfg.ToolSets),
+			llmagent.WithToolSets(toolSets),
 		)
 		// Diagnostic: log all tool names from ToolSets to verify
 		// that memory tools are actually visible to the agent.
@@ -1539,7 +1579,7 @@ func createSingleAgent(
 			context.Background(), 5*time.Second,
 		)
 		var tsToolNames []string
-		for _, ts := range cfg.ToolSets {
+		for _, ts := range toolSets {
 			for _, t := range ts.Tools(discCtx) {
 				if d := t.Declaration(); d != nil {
 					tsToolNames = append(tsToolNames, d.Name)
@@ -1547,7 +1587,7 @@ func createSingleAgent(
 			}
 		}
 		util.Logger.Info("agent: ToolSet tools loaded",
-			"toolset_count", len(cfg.ToolSets),
+			"toolset_count", len(toolSets),
 			"tool_names", tsToolNames,
 		)
 		discCancel()
@@ -1626,7 +1666,10 @@ func createSingleAgent(
 			llmagent.WithAgentCallbacks(agentCallbacks),
 		)
 	}
-	toolCallbacks := buildToolCallbacks(cfg.SecurityGuard, cfg.Hooks)
+	toolCallbacks := buildToolCallbacks(
+		cfg.SecurityGuard, cfg.Hooks, cfg.Capabilities,
+		cfg.Config.Agent.CommandValidationMode,
+	)
 	if toolCallbacks != nil {
 		agentOpts = append(agentOpts,
 			llmagent.WithToolCallbacks(toolCallbacks),
@@ -1813,6 +1856,74 @@ func buildAgentCallbacks(cfg *config.WukongConfig) *agent.Callbacks {
 	return callbacks
 }
 
+// recipeNamespace is the capability-bus namespace for recipe
+// sub-agents (roadmap §6.3): "recipe.<name>", where <name> is the
+// LLM tool name minus its "recipe-" prefix.
+const recipeNamespace = "recipe"
+
+// SyncRecipeCapabilities re-syncs the "recipe.*" namespace of the
+// registry with the given recipe tool slice: stale entries are
+// unregistered, then every tool is re-registered (timeout-wrapped
+// like the allTools path so per-call deadlines survive the move
+// from hand-aggregation to the registry). Used at startup and by
+// the hot-reload callback (Phase C). Callers pass the fresh tool
+// slice explicitly — during reload the toolset lock is held by
+// Reload, so this must not read ts.tools.
+func SyncRecipeCapabilities(
+	reg *capability.Registry, tools []tool.Tool, timeout time.Duration,
+) {
+	reg.UnregisterNamespace(recipeNamespace)
+	registered := 0
+	for _, t := range tools {
+		if t == nil {
+			continue
+		}
+		decl := t.Declaration()
+		if decl == nil || decl.Name == "" {
+			continue
+		}
+		addr := recipeNamespace + "." +
+			strings.TrimPrefix(decl.Name, "recipe-")
+		var wrapped tool.Tool = t
+		if timeout > 0 {
+			if ct, ok := t.(tool.CallableTool); ok {
+				wrapped = newTimeoutTool(ct, timeout)
+			}
+		}
+		c, err := capability.FromToolMeta(
+			addr, capability.SourceRecipe, wrapped, capability.ToolMeta{},
+		)
+		if err != nil {
+			util.Logger.Warn("capability: recipe adapter failed",
+				"address", addr, "error", err.Error())
+			continue
+		}
+		if err := reg.Register(c); err != nil {
+			util.Logger.Warn("capability: recipe registration skipped",
+				"address", addr, "error", err.Error())
+			continue
+		}
+		registered++
+	}
+	util.Logger.Info("capability: recipe namespace synced",
+		"capabilities", registered)
+}
+
+// effectiveToolSets resolves the toolsets the agent framework
+// consumes (roadmap P0-1). When the capability registry is wired it
+// is the single aggregation source: extension tools, the
+// session-assembled toolsets, and recipes (synced into the
+// "recipe.*" namespace by SyncRecipeCapabilities) all appear in its
+// snapshot, so the hand-assembled toolsets are dropped to avoid
+// double registration. A nil Capabilities keeps the legacy
+// behaviour byte-for-byte.
+func effectiveToolSets(cfg CoreLoopConfig) []tool.ToolSet {
+	if cfg.Capabilities == nil {
+		return cfg.ToolSets
+	}
+	return []tool.ToolSet{capability.RegistryToolSet(cfg.Capabilities)}
+}
+
 // buildToolCallbacks creates tool-level callbacks for security and
 // observability. The security guard checks are performed here
 // as a framework-level concern rather than in business logic.
@@ -1822,6 +1933,7 @@ func buildAgentCallbacks(cfg *config.WukongConfig) *agent.Callbacks {
 // the first to reject blocks the call.
 func buildToolCallbacks(
 	guard *security.Guard, hooks *HookRegistry,
+	caps *capability.Registry, validationMode string,
 ) *tool.Callbacks {
 	callbacks := tool.NewCallbacks()
 
@@ -1874,8 +1986,13 @@ func buildToolCallbacks(
 					// approved → fall through to command/file checks.
 				}
 
-				// For command-execution tools, validate the command
-				if isCommandTool(args.ToolName) && len(args.Arguments) > 0 {
+				// For command-execution tools, validate the command.
+				// Scope declarations are authoritative; undeclared
+				// tools follow the configured fallback mode (see
+				// commandToolNeedsValidation).
+				if commandToolNeedsValidation(
+					caps, validationMode, args.ToolName,
+				) && len(args.Arguments) > 0 {
 					cmd := extractCommandFromArgs(args.Arguments)
 					if cmd != "" {
 						if err := guard.ValidateCommand(cmd); err != nil {
@@ -1963,6 +2080,72 @@ func isCommandTool(toolName string) bool {
 		}
 	}
 	return false
+}
+
+// scopeShell is the permission scope that marks a capability as a
+// command-execution surface (declared in builtin/scopes.go).
+const scopeShell = "shell"
+
+// Command validation modes (agent.command_validation_mode, Phase C).
+const (
+	// CommandValidationHybrid: scope declarations are authoritative;
+	// tools without declarations fall back to the legacy name
+	// heuristic. The default — no security regression for setups
+	// that do not declare scopes.
+	CommandValidationHybrid = "hybrid"
+	// CommandValidationDescriptor: declarations only. Tools without
+	// a "shell" scope never validate — for fully declared setups.
+	CommandValidationDescriptor = "descriptor"
+	// CommandValidationHeuristic: legacy name matching only.
+	CommandValidationHeuristic = "heuristic"
+)
+
+// commandToolNeedsValidation reports whether a tool call's command
+// string must pass Guard.ValidateCommand (roadmap P0-1). The mode
+// comes from agent.command_validation_mode ("" = hybrid):
+//
+//   - hybrid: capability scope declarations are authoritative
+//     (declared non-shell tools are exempt from the heuristic);
+//     undeclared tools fall back to the legacy isCommandTool
+//     heuristic so external MCP tools keep coverage.
+//   - descriptor: declarations only; undeclared tools never
+//     validate. For setups that declare scopes for every
+//     command-executing extension (external tools declare via
+//     extensions[].tool_scopes).
+//   - heuristic: legacy name matching only; declarations ignored.
+func commandToolNeedsValidation(
+	caps *capability.Registry, mode, toolName string,
+) bool {
+	switch mode {
+	case CommandValidationHeuristic:
+		return isCommandTool(toolName)
+	case CommandValidationDescriptor:
+		if caps != nil {
+			if c, ok := caps.ResolveByName(toolName); ok {
+				for _, s := range c.Descriptor().Scopes {
+					if s == scopeShell {
+						return true
+					}
+				}
+			}
+		}
+		return false
+	default: // hybrid
+		if caps != nil {
+			if c, ok := caps.ResolveByName(toolName); ok {
+				scopes := c.Descriptor().Scopes
+				if len(scopes) > 0 {
+					for _, s := range scopes {
+						if s == scopeShell {
+							return true
+						}
+					}
+					return false
+				}
+			}
+		}
+		return isCommandTool(toolName)
+	}
 }
 
 // extractCommandFromArgs extracts a command string from tool arguments JSON.
