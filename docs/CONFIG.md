@@ -283,7 +283,8 @@ base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
 | `openai` | `ProviderOpenAI` | OpenAI 兼容 API（含硅基流动/OpenRouter/Groq/Moonshot/智谱等） | `https://api.openai.com/v1` |
 | `anthropic` | `ProviderAnthropic` | Anthropic Claude | `https://api.anthropic.com/v1` |
 | `google` | `ProviderGoogle` | Google Gemini（OpenAI 兼容端点） | `https://generativelanguage.googleapis.com/v1beta/openai` |
-| `deepseek` | `ProviderDeepSeek` | DeepSeek | `https://api.deepseek.com/v1` |
+| `gemini` | `ProviderGemini` | `google` 的别名（路由与默认值完全一致） | `https://generativelanguage.googleapis.com/v1beta/openai` |
+| `deepseek` | `ProviderDeepSeek` | DeepSeek（启用框架 VariantDeepSeek reasoning content 特化） | `https://api.deepseek.com/v1` |
 | `ollama` | `ProviderOllama` | 本地 Ollama | `http://localhost:11434/v1` |
 | `lmstudio` | `ProviderLMStudio` | LM Studio | `http://localhost:1234/v1` |
 | `vllm` | `ProviderVLLM` | vLLM 本地推理（无需 api_key） | `http://localhost:8000/v1` |
@@ -303,6 +304,8 @@ base_url: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
 | `agent_url` | string | ACP Agent URL（仅 `acp` 类型使用） |
 | `mcp_port` | string | ACP MCP 端口（仅 `acp` 类型） |
 | `context_window` | int | 模型实际上下文窗口大小（如 32768、128000）。未设置时 `EffectiveContextWindow()` 按 type 取保守默认（`config.go:563-589`） |
+| `extra_headers` | map[string]string | 透传到每个 LLM 请求的 HTTP 头（provider 特有协议逃生舱，如 `anthropic-version`；见 [Provider 能力矩阵](PROVIDERS.md)） |
+| `extra_fields` | map | 合并进 chat-completion 请求体根级的 JSON 字段（如 Gemini safety settings） |
 
 ### ContextWindow 保守默认值
 

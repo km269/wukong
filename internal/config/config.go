@@ -640,7 +640,7 @@ func defaultContextWindowByType(t ProviderType) int {
 	case ProviderAnthropic:
 		// claude-sonnet-4: 200K. Conservative default: 100K.
 		return 100000
-	case ProviderGoogle:
+	case ProviderGoogle, ProviderGemini:
 		// gemini-2.0-flash: 1M. Conservative default: 32K.
 		return 32000
 	case ProviderDeepSeek:

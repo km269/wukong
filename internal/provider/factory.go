@@ -61,7 +61,7 @@ func (f *Factory) CreateModel(name string) (model.Model, error) {
 	f.fillDefaultBaseURL(p)
 
 	switch p.Type {
-	case "openai", "anthropic", "google", "deepseek",
+	case "openai", "anthropic", "google", "gemini", "deepseek",
 		"ollama", "lmstudio", "vllm":
 		return f.createOpenAI(p), nil
 	case "acp":
@@ -96,7 +96,7 @@ func (f *Factory) CreateModelWithName(
 	f.fillDefaultBaseURL(p)
 
 	switch p.Type {
-	case "openai", "anthropic", "google", "deepseek",
+	case "openai", "anthropic", "google", "gemini", "deepseek",
 		"ollama", "lmstudio", "vllm":
 		opts := []openai.Option{
 			openai.WithBaseURL(p.BaseURL),
@@ -136,6 +136,8 @@ func (f *Factory) fillDefaultBaseURL(p *config.ProviderConfig) {
 		p.BaseURL = AnthropicBaseURL
 	case "google":
 		p.BaseURL = GoogleBaseURL
+	case "gemini":
+		p.BaseURL = GoogleBaseURL
 	case "deepseek":
 		p.BaseURL = DeepSeekBaseURL
 	case "ollama":
@@ -169,10 +171,22 @@ func (f *Factory) createACP(
 }
 
 // createOpenAI creates an OpenAI-compatible model instance.
+// deepseek gets the framework's DeepSeek variant (reasoning-content
+// handling); extra_headers / extra_fields act as the escape hatch
+// for provider-specific protocol details (see docs/PROVIDERS.md).
 func (f *Factory) createOpenAI(p *config.ProviderConfig) model.Model {
 	opts := []openai.Option{
 		openai.WithBaseURL(p.BaseURL),
 		openai.WithAPIKey(p.APIKey),
+	}
+	if p.Type == "deepseek" {
+		opts = append(opts, openai.WithVariant(openai.VariantDeepSeek))
+	}
+	if len(p.ExtraHeaders) > 0 {
+		opts = append(opts, openai.WithHeaders(p.ExtraHeaders))
+	}
+	if len(p.ExtraFields) > 0 {
+		opts = append(opts, openai.WithExtraFields(p.ExtraFields))
 	}
 	// Pass the configured context window so the framework can perform
 	// accurate token-budget trimming. Without this, the framework falls

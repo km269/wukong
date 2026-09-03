@@ -20,6 +20,7 @@
 |------|------|--------|
 | [系统架构](ARCHITECTURE.md) | 系统架构与各子系统技术实现细节 | CoreLoop、记忆系统、Evolution、ANP、ARD、Gateway |
 | [配置手册](CONFIG.md) | 35 个配置段全字段说明 | providers、agent、security、cortex、apps |
+| [Provider 能力矩阵](PROVIDERS.md) | 全部 LLM Provider 的协议/能力/逃生舱一览 | providers、gemini、deepseek、extra_headers |
 | [CLI & TUI 架构](CLI_TUI.md) | 命令树与终端 UI 架构 | Cobra、Bubble Tea、启动序列、流式传输 |
 | [API 参考](API_REFERENCE.md) | 内部接口签名与用法 | CoreLoop API、Provider Factory、Guard |
 | [开发者指南](DEVELOPER_GUIDE.md) | 环境搭建与开发任务 | Go 1.26、项目结构、测试、调试 |

@@ -148,9 +148,9 @@ CLI 可直接调用：`yao run <process>`。
 ### P1 · 扩展性与生态（2–3 个版本）
 
 4. **JS 脚本 hook** — ✅ **已落地（2026-09-03）**：新增 `internal/scripthook` 包。`.wukong/hooks/*.js`（`agent.script_hooks_enabled` 开启，超时 `script_hooks_timeout` 默认 5s）可定义 **`beforeStep`**（改写 `ctx.message.content` / `{reject, reason}` 关闭回合，接入 PreStepHook 瀑布）与 **`beforeTool`**（按 `{tool_name, args}` 拦截工具调用），并经全局 **`tool({name, description, parameters}, handler)`** 注册脚本工具——LLM 名为声明名、能力地址 `script.<name>`（SourceScript），`wukong caps run script.x` 可直接调用。沙箱与 codemode 同源：goja 每次调用全新 runtime + `Interrupt` 超时 + panic 恢复，纯 ECMAScript 无 IO API。**有意偏差**：hook 失败（异常/超时）**fail-open**（记日志跳过）——脚本属用户自身信任域的增强件，不应击穿 agent 可用性；脚本工具失败照常报错给 LLM。v1 未含：hook 热重载（改脚本需重启）、`require`/跨脚本共享。
-5. **Provider 原生化** — 为 anthropic（tool blocks / thinking / prompt cache）与 google 增加原生协议路径，打破 `createOpenAI` 单管道；仿 Yao 建立 provider 能力矩阵文档。
+5. **Provider 原生化** — ⚠️ **按上游现实调整为"能力矩阵 + 逃生舱"（2026-09-03）**：实盘确认 trpc-agent-go（v1.10.0 与最新 v1.11.2）的 model/ 仅有 OpenAI 原生实现（+hunyuan/deepseek/qwen Variant 特化），**无 anthropic/gemini 原生包**——自研协议客户端违背"框架组装"哲学且需独立维护流式/工具块/缓存语义。本轮落地：① `docs/PROVIDERS.md` 能力矩阵（对齐 Yao 的 connector matrix）；② factory 增强：`gemini` 类型别名（google 同路由）、deepseek 显式启用框架 VariantDeepSeek（reasoning content 特化此前未被使用）、`extra_headers`/`extra_fields` 配置逃生舱（provider 特有 header/请求体字段免改源码透传）；③ 升级路径记录在案：上游出现 model/anthropic 或 model/gemini 包时，切换成本为 factory 两处 switch 各一行。原生 Anthropic tool blocks/prompt cache、Gemini grounding 的缺失清单见矩阵文档 §3。
 6. **AG-UI 参考客户端** — 在 :8080 内置一个静态 Web 聊天页（消费自家 SSE），作为协议参考实现与项目门面。不造 SUI，成本约一周。
-7. **评测闭环** — `wukong eval run -i inputs.jsonl -v` + 结果提取（对齐 `yao agent test`），把 `internal/eval` 从库升级为工作流；同步补 `internal/cortex`（16 个源文件、0 个测试文件）单测。
+7. **评测闭环** — ⚠️ **实盘修正 + 测试债清偿（2026-09-03）**：实查发现 `wukong eval` 命令已存在（`internal/cli/eval.go`：evalset JSON 输入 + results 输出，本项的 CLI 部分在早期版本已落地，原计划低估了现状）；本项剩余的 `internal/cortex` 零测试缺口已开始清偿——新增 `cortex_test.go` 8 个用例（lexical store 端到端：FTS5 检索/会话隔离/per-session 上限/向量余弦检索（同步覆盖 P0-3 迁移路径）、VectorCache 计算缓存/逐出/命中统计、Reranker 降级）。**测试驱动出真实缺陷修复**：`Reranker.Rerank` 注释承诺"API 失败回退原始顺序"但实现直接返回错误——已按注释与仓库渐进式降级原则（ARCHITECTURE §15.5）修正。待办：memoryflow/graphflow/extractor 等依赖 cortexdb 或 LLM 的路径仍无单测，eval CLI 与 `yao agent test` 的 JSONL 逐条输入格式差异待对齐。
 
 ### P2 · 工程健康（持续）
 

@@ -13,11 +13,14 @@ const (
 	ProviderOpenAI    ProviderType = "openai"
 	ProviderAnthropic ProviderType = "anthropic"
 	ProviderGoogle    ProviderType = "google"
-	ProviderDeepSeek  ProviderType = "deepseek"
-	ProviderOllama    ProviderType = "ollama"
-	ProviderLMStudio  ProviderType = "lmstudio"
-	ProviderVLLM      ProviderType = "vllm"
-	ProviderACP       ProviderType = "acp"
+	// ProviderGemini is an alias of ProviderGoogle (the Gemini
+	// OpenAI-compatible endpoint).
+	ProviderGemini   ProviderType = "gemini"
+	ProviderDeepSeek ProviderType = "deepseek"
+	ProviderOllama   ProviderType = "ollama"
+	ProviderLMStudio ProviderType = "lmstudio"
+	ProviderVLLM     ProviderType = "vllm"
+	ProviderACP      ProviderType = "acp"
 )
 
 // ProviderConfig defines a connection to an LLM backend.
@@ -38,6 +41,16 @@ type ProviderConfig struct {
 	// to clamp prompts before sending — prevents 400 Bad Request
 	// when revision.max_context_tokens exceeds the actual model limit.
 	ContextWindow int `mapstructure:"context_window"`
+	// ExtraHeaders are injected verbatim into every LLM request —
+	// the escape hatch for provider-specific headers the
+	// OpenAI-compatible layer does not model natively (e.g.
+	// anthropic-version, enterprise proxies).
+	ExtraHeaders map[string]string `mapstructure:"extra_headers"`
+	// ExtraFields are merged into the root of every chat-completion
+	// request body — the escape hatch for provider-specific JSON
+	// fields (e.g. Gemini safety settings exposed through the
+	// compatibility endpoint).
+	ExtraFields map[string]interface{} `mapstructure:"extra_fields"`
 }
 
 // ExtensionConfig defines an MCP extension (built-in or external).

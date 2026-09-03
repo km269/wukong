@@ -11,10 +11,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/km269/wukong/internal/config"
+	"github.com/km269/wukong/internal/util"
 
 	"trpc.group/trpc-go/trpc-agent-go/log"
 )
@@ -72,7 +74,10 @@ type rerankResponse struct {
 
 // Rerank re-scores the given documents against the query and
 // returns indices sorted by relevance (descending). If the API
-// call fails, it returns the original order as a fallback.
+// call fails for any reason, it falls back to the original order
+// (neutral scores) — the reranker is a quality enhancement and its
+// failure must not break the retrieval chain (progressive
+// degradation, docs/ARCHITECTURE.md §15.5).
 func (r *Reranker) Rerank(
 	ctx context.Context,
 	query string,
@@ -108,30 +113,32 @@ func (r *Reranker) Rerank(
 
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return nil, nil, fmt.Errorf("rerank: http: %w", err)
+		return fallbackOrder(documents)
 	}
 	defer resp.Body.Close()
 
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, nil, fmt.Errorf("rerank: read response: %w", err)
+		return fallbackOrder(documents)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil, fmt.Errorf(
-			"rerank: status %d: %s",
-			resp.StatusCode,
-			truncatePreview(string(respBytes), 200),
-		)
+		util.Logger.Warn("rerank: API error, falling back to original order",
+			slog.Int("status", resp.StatusCode),
+			slog.String("body", truncatePreview(string(respBytes), 200)))
+		return fallbackOrder(documents)
 	}
 
 	var rr rerankResponse
 	if err := json.Unmarshal(respBytes, &rr); err != nil {
-		return nil, nil, fmt.Errorf("rerank: parse: %w", err)
+		util.Logger.Warn("rerank: unparseable response, falling back",
+			slog.String("error", err.Error()))
+		return fallbackOrder(documents)
 	}
 
 	if len(rr.Results) == 0 {
-		return nil, nil, fmt.Errorf("rerank: API returned 0 results")
+		util.Logger.Warn("rerank: API returned 0 results, falling back")
+		return fallbackOrder(documents)
 	}
 
 	indices := make([]int, len(rr.Results))
@@ -144,5 +151,19 @@ func (r *Reranker) Rerank(
 	log.Debugf("rerank: re-scored %d documents, top score=%.4f",
 		len(indices), scores[0])
 
+	return indices, scores, nil
+}
+
+// fallbackOrder returns the original document order with neutral
+// scores — the degraded result used whenever the rerank API is
+// unavailable or unparseable. The error is always nil: the fallback
+// itself is not a failure.
+func fallbackOrder(documents []string) ([]int, []float64, error) {
+	indices := make([]int, len(documents))
+	scores := make([]float64, len(documents))
+	for i := range documents {
+		indices[i] = i
+		scores[i] = 0
+	}
 	return indices, scores, nil
 }
