@@ -156,7 +156,11 @@ CLI 可直接调用：`yao run <process>`。
 
 8. **拆组合根** — `internal/cli/session.go`（约 1717 行）/ `internal/agent/loop.go`（约 2127 行）/ `internal/cli/tui/model.go`（约 1935 行）按 bootstrap 阶段拆分；解决 config 包反向依赖（config→gateway/server 嵌入结构体导致回调 workaround，见 `docs/ARCHITECTURE.md` §接口解耦）。
 9. **i18n 起步** — README / docs 英文版，降低外部贡献门槛。
-10. **发布卫生** — 清理仓库根 `github.com/` 词目录 hack（`.gitignore:9-12`，改构建期下载或 embed）、删 `_probe/`、版本号统一走 git tag（当前 `internal/util/version.go:10` 硬编码 0.3.3 而仅存在 v0.3.0 tag）、恢复 Homebrew/Scoop 发布（`.goreleaser.yaml:138-161` 已注释）。
+10. **发布卫生** — ✅ **核心已落地（2026-09-03）**：
+    - **版本链修复**：实盘发现 Makefile/Taskfile 的 ldflags 注入目标写成了不存在的 `internal/cli.Version`（静默失效），而 `util.Version` 硬编码 0.3.3 掩盖了一切。现已统一：`version.go` 默认空 + `debug.ReadBuildInfo` 回退链（`go install` 自动携带模块版本与 VCS 元数据，裸构建降级 `dev` + vcs revision/time，goreleaser 注入 tag 版本），Makefile/Taskfile 注入目标修正为 `internal/util.*`——版本从此完全由 git 驱动。
+    - **`_probe/` 已删除**（无跟踪文件）。
+    - **`.gitignore` 修正**：移除误加的 `.github/` 条目（ci.yml/release.yml 已被跟踪，该条目会让新增 workflow 静默失踪）；`github.com/` 词库 hack 注释补全机制说明——实盘定位：框架 memory 包经 `gse.LoadDict()`（runtime.Caller 编译期路径）加载字典，`-trimpath` 构建下退化为 CWD 相对路径，仓库根副本即为此服务；**跨机器分发下该机制无根治**（除非上游 gse 启用已注释的 embed 方案），已文档化为已知限制，`go install` 场景天然无此问题。
+    - **Homebrew/Scoop**：保持注释待启用——需用户先创建 tap 仓库（`homebrew-tap` / `scoop-bucket`），属仓库外的一次性动作。
 
 ### 产品取舍（明确不做）
 

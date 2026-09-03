@@ -2,11 +2,18 @@
 wukong.exe
 main.exe
 *.exe
-# gse Chinese dictionary workaround (see dict loading in gse module)
+
+# gse Chinese dictionary workaround: the framework's memory package
+# loads gse dictionaries via runtime.Caller (the gse source path from
+# build time). With -trimpath builds that path becomes relative to
+# the working directory, so a local copy of
+# github.com/go-ego/gse@vX.Y.Z/data/dict/ (from the module cache)
+# restores CJK word segmentation for `go run` / `go test` in the repo
+# root. Never committed; see docs/YAO_COMPARISON_AND_ROADMAP.md §5.
 github.com/
 cf_data/
 _probe/
-.github/
+
 # IDE
 .idea/
 .vscode/
