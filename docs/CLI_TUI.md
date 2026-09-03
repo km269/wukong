@@ -42,9 +42,11 @@ Wukong CLI/TUI 层是用户与 AI Agent 平台交互的主界面，采用 **Cobr
 cmd/wukong/
   └── main.go                              # 入口点，3 行核心逻辑
 
-internal/cli/                               # CLI 命令包（29 源文件 + shutdown）
-  ├── root.go                              # 根命令定义，30 个子命令注册
-  ├── session.go                           # 会话命令 + bootstrapSession() 启动引擎
+internal/cli/                               # CLI 命令包（31 源文件 + shutdown）
+  ├── root.go                              # 根命令定义，32 个子命令注册
+  ├── session.go                           # 会话命令 + TUI 入口 + BootstrapState
+  ├── bootstrap.go                         # bootstrapSession() 启动引擎（约 1300 行）
+  ├── bootstrap_helpers.go                 # 启动辅助（overrides/校验/adapter）
   ├── run.go                               # 单发/对话模式 + resolveInput()
   ├── server.go                            # 无头服务器模式
   ├── config.go                            # config validate/show（完整校验走 LoadAndValidate）
@@ -54,11 +56,15 @@ internal/cli/                               # CLI 命令包（29 源文件 + shu
   ├── env.go                               # 环境信息 + buildEnvInfo()
   ├── version.go                           # 版本输出
   ├── extension.go                         # MCP 扩展管理
+  ├── caps.go                              # 能力注册表 list/run（P0-1）
+  ├── migrate.go                           # schema 迁移应用（P0-3）
   ├── approval_adapter.go                  # ACP 人工审批适配（security.ApprovalBroker ↔ server.ApprovalSink）
   ├── shutdown.go                          # 统一幂等关闭（sync.Once + 15s 看门狗）
   ├── *_mgmt.go                            # 各子系统管理命令（11 个文件）
-  └── tui/                                 # Bubble Tea TUI 子包（3 源文件）
-      ├── model.go                         # Model 结构（~46 字段）+ StartTUI()
+  └── tui/                                 # Bubble Tea TUI 子包（5 源文件）
+      ├── model.go                         # Model 结构（~46 字段）+ Update/View + StartTUI()
+      ├── tui_render.go                    # Markdown 流式渲染 + 审计面板
+      ├── tui_commands.go                  # 斜杠命令 + 模态（会话/项目/设置）
       ├── update.go                        # 事件分发 + sendMessage() 流式管道
       └── view.go                          # Lipgloss 渲染 + ThemeType + ColorPalette
 ```
@@ -224,7 +230,7 @@ wukong
 
 | 分类 | 命令 | 对应文件 | 说明 |
 |------|------|----------|------|
-| **交互会话** | `session`, `server`, `run` | session.go, server.go, run.go | 三种运行模式，共享 `bootstrapSession()` |
+| **交互会话** | `session`, `server`, `run` | session.go, bootstrap.go, server.go, run.go | 三种运行模式，共享 `bootstrapSession()` |
 | **配置管理** | `config`, `configure`, `init` | config.go, configure.go, init.go | 校验/向导/初始化 |
 | **系统诊断** | `health`, `env`, `version`, `stats`, `docs`, `completion`, `system-check`, `backup` | health.go, env.go, version.go, utils.go, bench.go | 健康/环境/版本/统计 |
 | **项目管理** | `project`, `projects`, `bench` | project.go, bench.go | 项目追踪与基准 |
@@ -392,7 +398,7 @@ wukong apps
 
 ## 5. Bootstrap 启动引擎
 
-`bootstrapSession()` 是所有交互模式（`session`、`server`、`run`）共享的启动引擎，位于 [session.go](../internal/cli/session.go)，约 **1400 行**。
+`bootstrapSession()` 是所有交互模式（`session`、`server`、`run`）共享的启动引擎，位于 [bootstrap.go](../internal/cli/bootstrap.go)（自 session.go 拆出，P2-8），约 **1300 行**。
 
 ### 5.1 签名
 
@@ -541,7 +547,7 @@ TUI 位于 [internal/cli/tui/](../internal/cli/tui/)，采用 Elm 架构（Model
 
 ### 6.2 Model 结构（model.go）
 
-定义在 [model.go](../internal/cli/tui/model.go)，约 **46 个字段**：
+定义在 [model.go](../internal/cli/tui/model.go)（渲染与命令/模态已拆分至 [tui_render.go](../internal/cli/tui/tui_render.go) 与 [tui_commands.go](../internal/cli/tui/tui_commands.go)，P2-8），约 **46 个字段**：
 
 ```go
 type Model struct {

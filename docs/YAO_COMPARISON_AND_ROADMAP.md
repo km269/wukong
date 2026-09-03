@@ -154,7 +154,11 @@ CLI 可直接调用：`yao run <process>`。
 
 ### P2 · 工程健康（持续）
 
-8. **拆组合根** — `internal/cli/session.go`（约 1717 行）/ `internal/agent/loop.go`（约 2127 行）/ `internal/cli/tui/model.go`（约 1935 行）按 bootstrap 阶段拆分；解决 config 包反向依赖（config→gateway/server 嵌入结构体导致回调 workaround，见 `docs/ARCHITECTURE.md` §接口解耦）。
+8. **拆组合根** — ✅ **已落地（2026-09-03）**：三个巨型文件按关注点完成同包函数级拆分（零行为变化，纯代码搬移 + import 修剪）：
+   - `internal/agent/loop.go`（2321 行）→ **loop.go**（597：结构体/配置/构造/accessors/Close）+ **loop_run.go**（971：pre-step reject 流、Run/RunStream 事件循环、finalize 辅助）+ **loop_agent_build.go**（528：createSingleAgent、系统指令、上下文压缩选项、能力聚合 effectiveToolSets/SyncRecipeCapabilities）+ **loop_callbacks.go**（419：Guard 工具回调、命令校验三模式、模型回调、guardrail 插件）。
+   - `internal/cli/session.go`（1785 行）→ **session.go**（237：命令定义 + TUI 入口 + BootstrapState）+ **bootstrap.go**（1313：bootstrapSession 启动引擎）+ **bootstrap_helpers.go**（299：overrides/校验/adapter 辅助）。
+   - `internal/cli/tui/model.go`（1935 行）→ **model.go**（1047：Elm 核心 + Update/View + StartTUI）+ **tui_render.go**（317：Markdown 流式渲染/审计面板）+ **tui_commands.go**（698：斜杠命令 + 会话/项目/设置模态）。
+   - 深层重构（bootstrapSession 内部再拆阶段函数）留待按需进行——本轮以零风险文件重组达成可导航性目标。
 9. **i18n 起步** — README / docs 英文版，降低外部贡献门槛。
 10. **发布卫生** — ✅ **核心已落地（2026-09-03）**：
     - **版本链修复**：实盘发现 Makefile/Taskfile 的 ldflags 注入目标写成了不存在的 `internal/cli.Version`（静默失效），而 `util.Version` 硬编码 0.3.3 掩盖了一切。现已统一：`version.go` 默认空 + `debug.ReadBuildInfo` 回退链（`go install` 自动携带模块版本与 VCS 元数据，裸构建降级 `dev` + vcs revision/time，goreleaser 注入 tag 版本），Makefile/Taskfile 注入目标修正为 `internal/util.*`——版本从此完全由 git 驱动。

@@ -4,23 +4,18 @@
 package tui
 
 import (
-	"context"
 	"fmt"
-	"strings"
-	"sync"
-	"time"
-
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/google/uuid"
-	"trpc.group/trpc-go/trpc-agent-go/session"
-
 	"github.com/km269/wukong/internal/config"
-	"github.com/km269/wukong/internal/project"
 	"github.com/km269/wukong/internal/util"
+	"strings"
+	"sync"
+	"time"
 )
 
 // maxMessages limits the chat history retained in memory.
@@ -32,17 +27,24 @@ const maxMessages = 500
 // stream-delta-only content change to the viewport. The viewport's
 // internal SetContent is comparatively expensive, so batching deltas
 // here avoids thrashing the renderer during high-churn streaming.
+// streamDebounce is how long updateViewport waits before pushing a
+// stream-delta-only content change to the viewport. The viewport's
+// internal SetContent is comparatively expensive, so batching deltas
+// here avoids thrashing the renderer during high-churn streaming.
 const streamDebounce = 50 * time.Millisecond
 
 // maxCommandHistory limits the number of commands saved in history.
+// maxCommandHistory limits the number of commands saved in history.
 const maxCommandHistory = 100
 
+// chatEntry represents a single message in the conversation.
 // chatEntry represents a single message in the conversation.
 type chatEntry struct {
 	Role    string
 	Content string
 }
 
+// toolAuditEntry records a tool invocation for the audit panel.
 // toolAuditEntry records a tool invocation for the audit panel.
 type toolAuditEntry struct {
 	Name       string
@@ -56,6 +58,7 @@ type toolAuditEntry struct {
 const maxAuditEntries = 50
 
 // toolCallEntry tracks a running/completed tool call.
+// toolCallEntry tracks a running/completed tool call.
 type toolCallEntry struct {
 	Name      string
 	Args      string
@@ -65,6 +68,7 @@ type toolCallEntry struct {
 	StartTime time.Time
 }
 
+// ModalType defines the type of modal window.
 // ModalType defines the type of modal window.
 type ModalType int
 
@@ -78,6 +82,7 @@ const (
 )
 
 // modalState represents the state of a modal window.
+// modalState represents the state of a modal window.
 type modalState struct {
 	Type     ModalType
 	Title    string
@@ -87,6 +92,7 @@ type modalState struct {
 	Scroll   int // viewport offset for content taller than the modal
 }
 
+// Model is the Bubbletea model for the wukong TUI.
 // Model is the Bubbletea model for the wukong TUI.
 type Model struct {
 	viewport viewport.Model
@@ -205,6 +211,7 @@ type Model struct {
 }
 
 // ModelConfig holds dependencies for creating the TUI model.
+// ModelConfig holds dependencies for creating the TUI model.
 type ModelConfig struct {
 	Config     *config.WukongConfig
 	Loop       loopRunner
@@ -216,6 +223,7 @@ type ModelConfig struct {
 	Version    string
 }
 
+// NewModel creates a new Bubbletea TUI model.
 // NewModel creates a new Bubbletea TUI model.
 func NewModel(cfg ModelConfig) *Model {
 	ta := textarea.New()
@@ -286,6 +294,8 @@ func NewModel(cfg ModelConfig) *Model {
 
 // buildStartupSummary creates a human-readable config summary
 // displayed at the top of the chat on startup.
+// buildStartupSummary creates a human-readable config summary
+// displayed at the top of the chat on startup.
 func buildStartupSummary(cfg *config.WukongConfig) string {
 	summary := "🟢 Wukong Ready\n" +
 		"  Log:      " + cfg.LogLevel +
@@ -324,10 +334,19 @@ func buildStartupSummary(cfg *config.WukongConfig) string {
 }
 
 // Init implements tea.Model.
+// Init implements tea.Model.
 func (m *Model) Init() tea.Cmd {
 	return textarea.Blink
 }
 
+// requestExit initiates a clean exit sequence:
+// 1. Cancel any in-flight streaming request
+// 2. Wait for the streaming goroutine to finish
+// 3. Return tea.Quit to stop the Bubbletea program
+//
+// Note: loop.Close() is intentionally NOT called here — it is handled
+// by session.go's shutdownBootstrap which uses an independent context,
+// avoiding "context deadline exceeded" errors from in-flight events.
 // requestExit initiates a clean exit sequence:
 // 1. Cancel any in-flight streaming request
 // 2. Wait for the streaming goroutine to finish
@@ -344,6 +363,9 @@ func (m *Model) requestExit() tea.Cmd {
 	return tea.Quit
 }
 
+// stopStream cancels any in-flight streaming request and waits for the
+// streaming goroutine to finish. Safe to call multiple times (cancel
+// and wait are each guarded by sync.Once). Does NOT set quitRequested.
 // stopStream cancels any in-flight streaming request and waits for the
 // streaming goroutine to finish. Safe to call multiple times (cancel
 // and wait are each guarded by sync.Once). Does NOT set quitRequested.
@@ -368,10 +390,16 @@ func (m *Model) stopStream() {
 //
 // Note: loop.Close() is NOT called here — session.go's
 // shutdownBootstrap handles that with an independent context.
+// cleanup stops any running streams.
+// Safe to call multiple times (protected by sync.Once).
+//
+// Note: loop.Close() is NOT called here — session.go's
+// shutdownBootstrap handles that with an independent context.
 func (m *Model) cleanup() {
 	m.stopStream()
 }
 
+// Update implements tea.Model.
 // Update implements tea.Model.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -736,6 +764,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View implements tea.Model.
+// View implements tea.Model.
 func (m *Model) View() string {
 	if !m.ready {
 		return "\n  Initializing Wukong...\n"
@@ -799,6 +828,9 @@ func (m *Model) handleResize(msg tea.WindowSizeMsg) {
 	m.recalculateLayout()
 }
 
+// recalculateLayout computes and caches the viewport height
+// based on the current layout elements. Must be called after any
+// change to the layout that affects heights.
 // recalculateLayout computes and caches the viewport height
 // based on the current layout elements. Must be called after any
 // change to the layout that affects heights.
@@ -968,929 +1000,6 @@ func (m *Model) updateViewport() {
 	}
 }
 
-func (m *Model) renderAssistantMessage(content string) string {
-	content = util.RedactSecrets(content, m.secrets)
-	rendered := RenderAssistantMessage(content)
-	if m.mdRenderer == nil {
-		return rendered
-	}
-
-	md, err := m.mdRenderer.Render(content)
-	if err != nil {
-		return rendered
-	}
-	if md == "" {
-		return rendered
-	}
-	return assistantStyle.Render("Wukong: ") + md
-}
-
-// markdownStreamFlushThreshold: content below this size is rendered in
-// full every frame — the incremental machinery is not worth the book-
-// keeping for small messages (the render itself is fast).
-const markdownStreamFlushThreshold = 2 * 1024
-
-// markdownStreamReconcileEvery forces a full re-render every N deltas
-// so any subtle block-boundary approximation self-corrects within a
-// few frames.
-const markdownStreamReconcileEvery = 8
-
-// renderStreamedMarkdown renders assistant content during streaming.
-// It caches the rendered output of the stable document prefix (everything
-// up to the last blank-line boundary, at which point the markdown blocks
-// are independent) and only re-renders the still-growing final block.
-//
-// Safety: incremental reuse is ONLY attempted when the split point is
-// provably independent — an even number of code fences above the split
-// AND an even number inside the tail (no open block). Any other case
-// falls back to a full render, which is always correct. A periodic full
-// reconciliation further bounds any approximation.
-func (m *Model) renderStreamedMarkdown(content string) string {
-	if m.mdRenderer == nil {
-		m.invalidateStreamCache()
-		return RenderAssistantMessage(content)
-	}
-
-	// Not the active streaming message: full render.
-	if !m.streaming || m.currentStream != content {
-		m.invalidateStreamCache()
-		return m.renderAssistantMessage(content)
-	}
-
-	m.streamDeltas++
-
-	// Cache was invalidated (message replaced / /new / /clear / /resume).
-	if !m.streamCacheValid {
-		m.streamCachePrefixIdx = 0
-		m.streamCacheRendered = ""
-		m.streamCacheValid = true
-		return m.renderStreamedMarkdownFull(content)
-	}
-
-	if len(content) < markdownStreamFlushThreshold ||
-		m.streamCachePrefixIdx == 0 ||
-		m.streamDeltas%markdownStreamReconcileEvery == 0 {
-		return m.renderStreamedMarkdownFull(content)
-	}
-
-	// Fast path: only the final block changed since last frame. Verify
-	// the prefix is still valid, then render just the tail.
-	prefixEnd := m.streamCachePrefixIdx
-	if prefixEnd > len(content) ||
-		!strings.HasPrefix(content, content[:prefixEnd]) {
-		// Content was replaced: reset and render in full.
-		m.invalidateStreamCache()
-		return m.renderAssistantMessage(content)
-	}
-
-	tail := content[prefixEnd:]
-	if !safeIncrementalTail(tail) {
-		// Tail has an open code block or is empty: full render this
-		// frame (incremental reuse will resume at the next safe split).
-		m.invalidateStreamCache()
-		return m.renderAssistantMessage(content)
-	}
-
-	rendered := m.streamCacheRendered + "\n\n" + m.renderMarkdownBody(tail)
-	if rendered == "" {
-		m.invalidateStreamCache()
-		return m.renderAssistantMessage(content)
-	}
-	return assistantStyle.Render("Wukong: ") + rendered
-}
-
-// renderMarkdownBody renders a content fragment with the markdown
-// renderer and returns the body without the "Wukong: " prefix or
-// trailing newlines. Returns "" when the render fails.
-func (m *Model) renderMarkdownBody(content string) string {
-	if m.mdRenderer == nil {
-		return ""
-	}
-	md, err := m.mdRenderer.Render(content)
-	if err != nil || md == "" {
-		return ""
-	}
-	return strings.TrimRight(md, "\n")
-}
-
-// safeIncrementalTail reports whether the trailing block can be rendered
-// standalone and concatenated with the cached prefix without changing
-// markdown semantics. Since the split is at a blank line, blocks are
-// independent; the only risk is an odd number of fences (an open code
-// block) whose tail would render differently in isolation.
-func safeIncrementalTail(tail string) bool {
-	if tail == "" {
-		return false
-	}
-	return fenceCount(tail)%2 == 0
-}
-
-func fenceCount(s string) int {
-	n := 0
-	for _, line := range strings.Split(s, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "```") ||
-			strings.HasPrefix(strings.TrimSpace(line), "~~~") {
-			n++
-		}
-	}
-	return n
-}
-
-// renderStreamedMarkdownFull renders the whole document and re-baselines
-// the incremental cache at the last safe split point (if any).
-func (m *Model) renderStreamedMarkdownFull(content string) string {
-	full := m.renderAssistantMessage(content)
-
-	// Re-baseline: find the last safe blank-line split.
-	idx := lastSafeSplit(content)
-	if idx > 0 {
-		m.streamCachePrefixIdx = idx
-		m.streamCacheRendered = strings.TrimRight(
-			m.renderMarkdownBody(content[:idx]), "\n")
-	} else {
-		m.streamCachePrefixIdx = 0
-		m.streamCacheRendered = ""
-	}
-	m.streamCacheValid = true
-	return full
-}
-
-// lastSafeSplit returns the byte offset just after the last blank line
-// whose prefix and suffix both have an even fence count. A split with an
-// odd fence count anywhere would break rendering, so only provably safe
-// boundaries are returned (0 when none exist).
-func lastSafeSplit(content string) int {
-	lines := strings.Split(content, "\n")
-	// start[i] = byte offset where line i begins.
-	start := make([]int, len(lines))
-	pos := 0
-	for i, ln := range lines {
-		start[i] = pos
-		pos += len(ln) + 1
-	}
-	// Walk blank lines from the end; the split point is the byte just
-	// after the blank line (the start of the next line). Only accept a
-	// split whose prefix and tail both have an even fence count.
-	for i := len(lines) - 2; i >= 0; i-- {
-		if lines[i] != "" {
-			continue
-		}
-		split := start[i+1]
-		tail := content[split:]
-		if tail == "" {
-			continue
-		}
-		if fenceCount(tail)%2 != 0 {
-			continue
-		}
-		if fenceCount(content[:split])%2 != 0 {
-			continue
-		}
-		return split
-	}
-	return 0
-}
-
-// invalidateStreamCache forces the next render to re-baseline.
-func (m *Model) invalidateStreamCache() {
-	m.streamCachePrefixIdx = 0
-	m.streamCacheRendered = ""
-	m.streamCacheValid = false
-}
-
-// resetStreamCache invalidates the incremental streaming-render cache.
-// Called whenever currentStream is replaced or cleared.
-func (m *Model) resetStreamCache() {
-	m.invalidateStreamCache()
-}
-
-func (m *Model) addToHistory(input string) {
-	if len(m.cmdHistory) == 0 || m.cmdHistory[len(m.cmdHistory)-1] != input {
-		m.cmdHistory = append(m.cmdHistory, input)
-		if len(m.cmdHistory) > maxCommandHistory {
-			m.cmdHistory = m.cmdHistory[1:]
-		}
-	}
-}
-
-func (m *Model) setLog(msg string) {
-	if msg == "" {
-		return
-	}
-	m.logBuffer = append(m.logBuffer, msg)
-	if len(m.logBuffer) > 5 {
-		m.logBuffer = m.logBuffer[1:]
-	}
-}
-
-// recordAuditEntry logs a completed tool call into the bounded
-// audit ring buffer used by the /audit command.
-func (m *Model) recordAuditEntry(tc toolCallEntry) {
-	var durationMs int64
-	if !tc.StartTime.IsZero() {
-		durationMs = time.Since(tc.StartTime).Milliseconds()
-	}
-	entry := toolAuditEntry{
-		Name:       tc.Name,
-		ArgsSize:   len(tc.Args),
-		ResultSize: len(tc.Result),
-		DurationMs: durationMs,
-		IsError:    tc.Status == "error",
-		Timestamp:  time.Now().Format("15:04:05"),
-	}
-	if len(m.auditLog) >= maxAuditEntries {
-		m.auditLog = m.auditLog[1:]
-	}
-	m.auditLog = append(m.auditLog, entry)
-}
-
-// renderAuditPanel builds a string representation of the recent
-// audit entries for display in the chat area.
-func (m *Model) renderAuditPanel(limit int) string {
-	if len(m.auditLog) == 0 {
-		return "No tool audit entries yet."
-	}
-	if limit <= 0 || limit > len(m.auditLog) {
-		limit = len(m.auditLog)
-	}
-
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Tool Audit (last %d of %d):\n", limit, len(m.auditLog)))
-	sb.WriteString(strings.Repeat("─", 50) + "\n")
-
-	// Show most recent first
-	start := len(m.auditLog) - limit
-	for i := len(m.auditLog) - 1; i >= start; i-- {
-		e := m.auditLog[i]
-		statusIcon := "✓"
-		if e.IsError {
-			statusIcon = "✗"
-		}
-		sb.WriteString(fmt.Sprintf(
-			" %s %-20s | args: %5dB | result: %5dB | %6dms | %s\n",
-			statusIcon,
-			e.Name,
-			e.ArgsSize,
-			e.ResultSize,
-			e.DurationMs,
-			e.Timestamp,
-		))
-	}
-	return sb.String()
-}
-
-func (m *Model) handleCommand(input string) {
-	trimmed := strings.TrimSpace(input)
-	switch {
-	case trimmed == "/exit" || trimmed == "/quit":
-		m.cleanup()
-		m.status = "Goodbye!"
-		m.quitRequested = true
-
-	case trimmed == "/exts":
-		var extNames []string
-		if m.cfg != nil {
-			for _, ext := range m.cfg.Extensions {
-				if ext.Enabled {
-					extNames = append(extNames, ext.Name)
-				}
-			}
-		}
-		content := "No extensions loaded."
-		if len(extNames) > 0 {
-			content = "Loaded Extensions:\n  " +
-				strings.Join(extNames, "\n  ")
-		}
-		m.messages = append(m.messages, chatEntry{
-			Role:    "system",
-			Content: content,
-		})
-
-	case trimmed == "/projects":
-		m.showProjects()
-
-	case trimmed == "/sessions":
-		m.openSessionsModal()
-
-	case trimmed == "/resume":
-		m.messages = append(m.messages, chatEntry{
-			Role: "system",
-			Content: "Usage: /resume <session-id> to resume a saved " +
-				"session. Session context (conversation, memory " +
-				"recall) is restored from the server-side store.",
-		})
-
-	case strings.HasPrefix(trimmed, "/resume "):
-		sid := strings.TrimSpace(strings.TrimPrefix(trimmed, "/resume "))
-		if sid == "" {
-			break
-		}
-		m.sessionID = sid
-		m.messages = nil
-		m.toolCalls = nil
-		m.auditLog = nil
-		m.currentStream = ""
-		m.streaming = false
-		m.instrRecorded = false
-		m.resetStreamCache()
-		m.autoScroll = true
-		m.cachedMessages = ""
-		m.cachedTools = ""
-		m.cachedMsgCount = 0
-		m.cachedToolCount = 0
-		m.cachedToolStatus = nil
-		m.cachedToolCollapsed = nil
-		m.cachedToolSelected = -1
-		m.viewport.SetContent("")
-		m.status = "Resumed session " + sid[:min(len(sid), 12)]
-		m.messages = append(m.messages, chatEntry{
-			Role: "system",
-			Content: "[Session resumed: " + sid + "]\nThe agent's " +
-				"server-side session store restores context on the " +
-				"next message.",
-		})
-
-	case trimmed == "/new":
-		m.sessionID = generateSessionID()
-		m.messages = nil
-		m.toolCalls = nil
-		m.auditLog = nil
-		m.currentStream = ""
-		m.instrRecorded = false
-		m.resetStreamCache()
-		m.autoScroll = true
-		m.status = "New session started"
-		m.cachedMessages = ""
-		m.cachedTools = ""
-		m.cachedMsgCount = 0
-		m.cachedToolCount = 0
-		m.cachedToolStatus = nil
-		m.cachedToolCollapsed = nil
-		m.cachedToolSelected = -1
-
-	case trimmed == "/clear":
-		m.messages = nil
-		m.toolCalls = nil
-		m.currentStream = ""
-		m.resetStreamCache()
-		m.autoScroll = true
-		m.cachedMessages = ""
-		m.cachedTools = ""
-		m.cachedMsgCount = 0
-		m.cachedToolCount = 0
-		m.cachedToolStatus = nil
-		m.cachedToolCollapsed = nil
-		m.cachedToolSelected = -1
-		m.viewport.SetContent("")
-		m.status = "Cleared"
-
-	case trimmed == "/model":
-		// Show current model/provider info
-		p := m.cfg.DefaultProviderConfig()
-		modelName := ""
-		if p != nil {
-			modelName = p.Model
-		}
-		m.messages = append(m.messages, chatEntry{
-			Role: "system",
-			Content: fmt.Sprintf(
-				"Current: %s / %s\n"+
-					"Usage: /model <model-name> to switch models",
-				m.cfg.DefaultProvider, modelName,
-			),
-		})
-
-	case strings.HasPrefix(trimmed, "/model "):
-		// Switch to a different model
-		newModel := strings.TrimSpace(
-			strings.TrimPrefix(trimmed, "/model"),
-		)
-		p := m.cfg.DefaultProviderConfig()
-		if p != nil {
-			oldModel := p.Model
-			p.Model = newModel
-			m.modelName = newModel
-			m.status = "Ready"
-			m.messages = append(m.messages, chatEntry{
-				Role: "system",
-				Content: fmt.Sprintf(
-					"Switched model: %s -> %s",
-					oldModel, newModel,
-				),
-			})
-		} else {
-			m.messages = append(m.messages, chatEntry{
-				Role:    "system",
-				Content: "No provider configured to switch models.",
-			})
-		}
-
-	case trimmed == "/commands":
-		m.openCommandsModal()
-
-	case trimmed == "/skills":
-		m.openSkillsModal()
-
-	case trimmed == "/settings":
-		m.openSettingsModal()
-
-	case trimmed == "/audit":
-		m.messages = append(m.messages, chatEntry{
-			Role:    "system",
-			Content: m.renderAuditPanel(10),
-		})
-
-	case strings.HasPrefix(trimmed, "/audit "):
-		limitStr := strings.TrimSpace(
-			strings.TrimPrefix(trimmed, "/audit"),
-		)
-		limit := 10
-		if n, err := fmt.Sscanf(limitStr, "%d", &limit); err != nil || n != 1 {
-			limit = 10
-		}
-		m.messages = append(m.messages, chatEntry{
-			Role:    "system",
-			Content: m.renderAuditPanel(limit),
-		})
-
-	case trimmed == "/theme":
-		m.messages = append(m.messages, chatEntry{
-			Role: "system",
-			Content: fmt.Sprintf(
-				"Theme: %s\nAvailable: dark (default), light, classic\nUsage: /theme [name]",
-				GetTheme().String(),
-			),
-		})
-
-	case strings.HasPrefix(trimmed, "/theme "):
-		themeName := strings.TrimSpace(
-			strings.TrimPrefix(trimmed, "/theme"),
-		)
-		newTheme := ParseTheme(themeName)
-		SetTheme(newTheme)
-		m.cachedMessages = ""
-		m.cachedTools = ""
-		m.cachedMsgCount = 0
-		m.cachedToolCount = 0
-		m.cachedToolStatus = nil
-		m.cachedToolCollapsed = nil
-		m.cachedToolSelected = -1
-		m.lastRenderTime = time.Time{}
-		m.resetStreamCache()
-		m.messages = append(m.messages, chatEntry{
-			Role: "system",
-			Content: fmt.Sprintf(
-				"Theme changed: %s",
-				newTheme.String(),
-			),
-		})
-
-	case strings.HasPrefix(trimmed, "/help"):
-		help := `Wukong Commands:
-  /new        Start a new session
-  /clear      Clear screen
-  /help       Show this help
-  /exts       List extensions
-  /model      Show or switch model (usage: /model [name])
-  /theme      Show or switch theme (usage: /theme [dark|light|classic])
-  /commands   Open command menu
-  /skills     Open skills browser
-  /settings   Open settings panel
-  /projects   Recover a tracked project session
-  /sessions   List and manage sessions
-  /exit       Quit wukong
-  Ctrl+D      Send message
-  Ctrl+C      Quit
-
-Built-in Extensions:
-` + m.builtinExtensionHelp() + `
-Platform Extensions:
-  todo_*               Task management & tracking
-  recall_*             Cross-session history search
-  tom_*                Persistent instruction injection
-  code_*               JavaScript code execution
-  app_*                Custom HTML app management`
-
-		m.messages = append(m.messages, chatEntry{
-			Role:    "system",
-			Content: help,
-		})
-
-	default:
-		m.messages = append(m.messages, chatEntry{
-			Role: "system",
-			Content: "Unknown command: " + trimmed +
-				". Type /help for available commands.",
-		})
-	}
-}
-
-// builtinExtensionHelp builds the "Built-in Extensions" section of the
-// /help output from the ACTUAL enabled extensions in config, so newly
-// added extensions appear automatically instead of being hardcoded.
-func (m *Model) builtinExtensionHelp() string {
-	if m.cfg == nil {
-		return "  (no extensions loaded)"
-	}
-	var lines []string
-	for _, ext := range m.cfg.Extensions {
-		if !ext.Enabled {
-			continue
-		}
-		desc := extensionDescriptions[ext.Name]
-		if desc == "" {
-			desc = "type: " + ext.Type
-		}
-		line := fmt.Sprintf("  %-22s %s", ext.Name, desc)
-		lines = append(lines, line)
-	}
-	if len(lines) == 0 {
-		return "  (no extensions loaded)"
-	}
-	return strings.Join(lines, "\n")
-}
-
-// extensionDescriptions maps known builtin extension names to a short
-// description shown in /help. Unknown names fall back to their type.
-var extensionDescriptions = map[string]string{
-	"developer":           "File ops, commands, code search",
-	"computer_controller": "Web fetch, file cache",
-	"memory":              "Remember preferences & knowledge",
-	"auto_visualiser":     "Charts, diagrams, tables",
-	"tutorial":            "Interactive tutorials",
-}
-
-func (m *Model) openCommandsModal() {
-	commands := []string{
-		"/new        - Start a new session",
-		"/clear      - Clear screen",
-		"/exts       - List extensions",
-		"/model      - Show or switch model",
-		"/theme      - Show or switch theme",
-		"/audit      - Show tool audit log",
-		"/skills     - Browse available skills",
-		"/settings   - Open settings",
-		"/projects   - Recover a tracked project session",
-		"/sessions   - List and manage sessions",
-		"/help       - Show help",
-		"/exit       - Quit wukong",
-	}
-	m.modal = &modalState{
-		Type:     ModalCommands,
-		Title:    "Available Commands",
-		Selected: 0,
-		Items:    commands,
-	}
-	m.layoutModal(len(commands))
-}
-
-func (m *Model) openSkillsModal() {
-	var skills []string
-	if m.cfg != nil {
-		for _, ext := range m.cfg.Extensions {
-			if ext.Enabled {
-				skills = append(skills, ext.Name)
-			}
-		}
-	}
-	if len(skills) == 0 {
-		skills = []string{"No skills loaded"}
-	}
-	m.modal = &modalState{
-		Type:     ModalSkills,
-		Title:    "Loaded Skills",
-		Selected: 0,
-		Items:    skills,
-	}
-	m.layoutModal(len(skills))
-}
-
-func (m *Model) openSettingsModal() {
-	content := fmt.Sprintf(`Provider: %s
-Model:    %s
-Log Level: %s
-Memory:   %s
-Recall:   %s
-Session:  %s
-
-Press ESC to close`,
-		m.providerName,
-		m.modelName,
-		m.cfg.LogLevel,
-		m.cfg.Memory.Backend,
-		map[bool]string{true: "on", false: "off"}[m.cfg.Recall.Enabled],
-		m.cfg.Session.Backend,
-	)
-	m.modal = &modalState{
-		Type:    ModalSettings,
-		Title:   "Settings",
-		Content: content,
-	}
-	m.layoutModal(strings.Count(content, "\n") + 1)
-}
-
-// layoutModal computes adaptive modal dimensions that fit the screen.
-// Height is derived from content but capped so tall content becomes
-// scrollable instead of overflowing; width adapts to the terminal.
-func (m *Model) layoutModal(contentLines int) {
-	// Title line + blank separator + rows + bottom padding.
-	needed := contentLines + 3
-	maxH := m.height - 8
-	if maxH < 6 {
-		maxH = 6
-	}
-	m.modalHeight = needed
-	if m.modalHeight > maxH {
-		m.modalHeight = maxH
-	}
-
-	w := m.width - 8
-	if w > 60 {
-		w = 60
-	}
-	if w < 40 {
-		w = 40
-	}
-	m.modalWidth = w
-}
-
-// followModalSelection keeps the modal's scroll offset aligned with the
-// selected item after an up/down movement.
-func (m *Model) followModalSelection() {
-	if m.modal == nil {
-		return
-	}
-	maxVisible := m.modalHeight - 3
-	if maxVisible < 1 {
-		maxVisible = 1
-	}
-	if m.modal.Selected < m.modal.Scroll {
-		m.modal.Scroll = m.modal.Selected
-	}
-	if m.modal.Selected >= m.modal.Scroll+maxVisible {
-		m.modal.Scroll = m.modal.Selected - maxVisible + 1
-	}
-}
-
-// projectLister is the subset of project.Manager used by the TUI.
-// The field holds `any` to keep ModelConfiguration decoupled; the
-// runtime value is *project.Manager from the CLI layer.
-type projectLister interface {
-	ListProjects() []project.ProjectRecord
-}
-
-// sessionLister is the subset of session.Service used by the TUI for
-// the multi-session tab (C1). The field holds `any` to keep the TUI
-// decoupled from the concrete wksession.SessionService.
-type sessionLister interface {
-	ListSessions(ctx context.Context, userKey session.UserKey) ([]*session.Session, error)
-	DeleteSession(ctx context.Context, key session.Key) error
-}
-
-// sessionsModalItem describes one entry in the sessions modal. The
-// first item is the "new session" action; the last is "back". Session
-// rows also carry their full ID so deletion/selection doesn't rely on
-// the truncated display string.
-type sessionsModalItem struct {
-	Label     string
-	SessionID string // "" for action rows
-}
-
-func (m *Model) sessionsModalItems() ([]sessionsModalItem, string) {
-	svc, ok := m.sessionMgr.(sessionLister)
-	if !ok || svc == nil {
-		return nil, "Session management is not available in this session."
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	sessions, err := svc.ListSessions(ctx, session.UserKey{
-		AppName: "wukong-app",
-		UserID:  m.userID,
-	})
-	if err != nil {
-		return nil, "Failed to list sessions: " + err.Error()
-	}
-
-	items := make([]sessionsModalItem, 0, len(sessions)+1)
-	items = append(items, sessionsModalItem{Label: "+ New session"})
-	for _, s := range sessions {
-		items = append(items, sessionsModalItem{
-			Label:     fmt.Sprintf("%s  %s", s.ID, formatSessionTime(s.UpdatedAt)),
-			SessionID: s.ID,
-		})
-	}
-	items = append(items, sessionsModalItem{Label: "— Back"})
-	return items, ""
-}
-
-// openSessionsModal opens the multi-session tab (C1): New + existing
-// sessions + delete action, so switching is a single Enter.
-func (m *Model) openSessionsModal() {
-	items, errMsg := m.sessionsModalItems()
-	if errMsg != "" {
-		m.messages = append(m.messages, chatEntry{
-			Role:    "system",
-			Content: errMsg,
-		})
-		return
-	}
-	labels := make([]string, len(items))
-	for i, it := range items {
-		labels[i] = it.Label
-	}
-	m.modal = &modalState{
-		Type:     ModalSessions,
-		Title:    "Sessions",
-		Selected: 0,
-		Items:    labels,
-	}
-	// Stash the full session IDs on the model; the Items slice only
-	// holds display text.
-	m.sessionModalItems = items
-	m.layoutModal(len(labels))
-}
-
-// deleteSelectedSession deletes the session under the cursor in the
-// sessions tab (C1). The modal is refreshed afterwards; the active
-// session is left untouched.
-func (m *Model) deleteSelectedSession() {
-	if m.modal == nil {
-		return
-	}
-	sel := m.modal.Selected
-	if m.modal.Selected < 0 || m.modal.Selected >= len(m.sessionModalItems) {
-		return
-	}
-	item := m.sessionModalItems[sel]
-	if item.SessionID == "" {
-		return // action row (New / Back)
-	}
-
-	svc, ok := m.sessionMgr.(sessionLister)
-	if !ok || svc == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := svc.DeleteSession(ctx, session.Key{
-		AppName:   "wukong-app",
-		UserID:    m.userID,
-		SessionID: item.SessionID,
-	}); err != nil {
-		m.status = "Delete failed: " + err.Error()
-		// Refresh anyway (row may already be gone).
-	}
-	// Refresh the modal list after deletion.
-	m.removeSessionFromModal(sel)
-}
-
-// removeSessionFromModal drops the deleted row and, if the modal became
-// empty (no sessions left), closes it with a notice.
-func (m *Model) removeSessionFromModal(deletedSel int) {
-	if m.modal == nil || m.modal.Type != ModalSessions {
-		return
-	}
-	if deletedSel >= 0 && deletedSel < len(m.sessionModalItems) {
-		m.sessionModalItems = append(
-			m.sessionModalItems[:deletedSel],
-			m.sessionModalItems[deletedSel+1:]...,
-		)
-	}
-	// After removing a session row the "+ New session" header stays and
-	// "— Back" stays; if nothing but the actions remain, close the modal.
-	if len(m.sessionModalItems) <= 2 {
-		m.modal = nil
-		m.sessionModalItems = nil
-		m.status = "No stored sessions"
-		return
-	}
-	// Rebuild display items.
-	labels := make([]string, len(m.sessionModalItems))
-	for i, it := range m.sessionModalItems {
-		labels[i] = it.Label
-	}
-	m.modal.Items = labels
-	if m.modal.Selected >= len(labels) {
-		m.modal.Selected = len(labels) - 1
-	}
-	m.followModalSelection()
-}
-
-// formatSessionTime renders a session timestamp compactly.
-func formatSessionTime(t time.Time) string {
-	if t.IsZero() {
-		return "unknown time"
-	}
-	return t.Format("01-02 15:04")
-}
-
-// openProjectsModal shows tracked projects as a selectable modal.
-// Selecting an entry resumes that project's session (via /resume),
-// replacing the old plain-text listing.
-func (m *Model) openProjectsModal() {
-	mgr, ok := m.projectMgr.(projectLister)
-	if !ok || mgr == nil {
-		m.messages = append(m.messages, chatEntry{
-			Role:    "system",
-			Content: "Project tracking is not available in this session.",
-		})
-		return
-	}
-	records := mgr.ListProjects()
-	items := make([]string, 0, len(records))
-	for _, r := range records {
-		sID := r.SessionID
-		if len(sID) > 8 {
-			sID = sID[:8]
-		}
-		inst := r.LastInstruction
-		if len(inst) > 24 {
-			inst = inst[:21] + "..."
-		}
-		items = append(items, fmt.Sprintf("%-28s %s  %s", r.Path, sID, inst))
-	}
-	if len(items) == 0 {
-		m.messages = append(m.messages, chatEntry{
-			Role: "system",
-			Content: "No tracked projects found. Start a " +
-				"'wukong session' in any directory to begin " +
-				"tracking.",
-		})
-		return
-	}
-	m.modal = &modalState{
-		Type:     ModalProjects,
-		Title:    "Tracked Projects — Enter to resume",
-		Selected: 0,
-		Items:    items,
-	}
-	m.layoutModal(len(items))
-}
-
-// showProjects lists tracked projects; C3: now opens the selectable
-// ModalProjects rather than appending a plain-text chat reply.
-func (m *Model) showProjects() {
-	m.openProjectsModal()
-}
-
-func (m *Model) handleModalSelection() {
-	if m.modal == nil {
-		return
-	}
-
-	switch m.modal.Type {
-	case ModalCommands:
-		selected := m.modal.Items[m.modal.Selected]
-		// Extract command from selection
-		if strings.HasPrefix(selected, "/") {
-			cmd := strings.Split(selected, " ")[0]
-			m.modal = nil
-			m.handleCommand(cmd)
-		}
-	case ModalSkills:
-		if m.modal.Selected >= 0 && m.modal.Selected < len(m.modal.Items) {
-			m.skillName = m.modal.Items[m.modal.Selected]
-			m.status = "Skill: " + m.skillName
-		}
-		m.modal = nil
-	case ModalSettings:
-		m.modal = nil
-	case ModalSessions:
-		// C1 multi-session tab: New / resume / delete / back.
-		sel := m.modal.Selected
-		items := m.sessionModalItems
-		m.modal = nil
-		m.sessionModalItems = nil
-		if sel < 0 || sel >= len(items) {
-			return
-		}
-		item := items[sel]
-		switch {
-		case item.Label == "+ New session":
-			m.handleCommand("/new")
-		case item.Label == "— Back":
-			// just close
-		case item.SessionID != "":
-			m.handleCommand("/resume " + item.SessionID)
-		}
-	case ModalProjects:
-		// Selecting a project resumes its tracked session. The
-		// shortened session id shown in the item is only a display
-		// prefix, so re-query the underlying record for the full id.
-		mgr, ok := m.projectMgr.(projectLister)
-		sel := m.modal.Selected
-		if ok && mgr != nil && sel >= 0 && sel < len(m.modal.Items) {
-			records := mgr.ListProjects()
-			if sel < len(records) {
-				m.modal = nil
-				m.handleCommand("/resume " + records[sel].SessionID)
-			}
-		}
-	}
-}
-
 // StartTUI initializes and runs the Bubbletea TUI.
 func StartTUI(
 	cfg *config.WukongConfig,
@@ -1927,6 +1036,9 @@ func StartTUI(
 	return nil
 }
 
+// generateSessionID creates a new unique session identifier.
+// Uses a timestamp-based prefix for sortability followed by random
+// bytes for uniqueness.
 // generateSessionID creates a new unique session identifier.
 // Uses a timestamp-based prefix for sortability followed by random
 // bytes for uniqueness.

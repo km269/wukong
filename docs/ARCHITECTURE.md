@@ -154,7 +154,7 @@
 
 ## 3. 启动流程
 
-`session`、`server`、`run` 三个命令都通过同一个核心函数 `bootstrapSession()` 完成系统初始化（约 1400 行，位于 [session.go](../internal/cli/session.go)）。
+`session`、`server`、`run` 三个命令都通过同一个核心函数 `bootstrapSession()` 完成系统初始化（约 1300 行，位于 [bootstrap.go](../internal/cli/bootstrap.go)，自 session.go 拆出，P2-8）。
 
 ### 3.1 初始化时序
 
@@ -241,7 +241,7 @@ shutdownBootstrap(ctx, state, loop)
 
 ## 4. CoreLoop — 编排引擎核心
 
-CoreLoop 是整个系统的**心脏**，封装了单次 Agent 交互的完整生命周期。定义于 [loop.go](../internal/agent/loop.go)。
+CoreLoop 是整个系统的**心脏**，封装了单次 Agent 交互的完整生命周期。定义于 [loop.go](../internal/agent/loop.go)（运行时在 [loop_run.go](../internal/agent/loop_run.go)、agent 构建在 [loop_agent_build.go](../internal/agent/loop_agent_build.go)、安全回调在 [loop_callbacks.go](../internal/agent/loop_callbacks.go)，P2-8 拆分）。
 
 Wukong 采用**双层循环设计**：
 
