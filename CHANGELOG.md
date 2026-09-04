@@ -4,6 +4,51 @@ All changes after v0.1.14 baseline.
 
 ---
 
+## [0.4.0] — 2026-09-04
+
+### P0 架构地基（Yao 对比路线图，详见 docs/YAO_COMPARISON_AND_ROADMAP.md）
+
+**统一能力总线（P0-1，Phase A/B/C）**
+
+- 新增 `internal/capability`：一切工具按 `<ns>.<name>[.<tool>]` 统一寻址（tools.* / mcp.* / recipe.* / flow.* / script.*），并发安全 Registry + trpc 工具双向适配层
+- builtin 构造器自注册表（`builtin/constructors.go`），factory 退化为委托；CoreLoop 经 `effectiveToolSets` 以 registry 为聚合单一来源（`Capabilities==nil` 保留旧路径回滚）
+- Guard 命令校验接缝描述符优先：`agent.command_validation_mode`（hybrid/descriptor/heuristic），scope 声明来自 `builtin/scopes.go` 与 `extensions[].tool_scopes`
+- 新命令 `wukong caps list/run`：按地址查看与直接调用任意能力
+
+**声明式 Flow DSL v1（P0-2）**
+
+- `.wukong/flows/*.yaml`（`agent.flow_enabled` 开启）：agent 节点（LLM 步骤，复用 recipe 的 agenttool/retry/timeout）+ capability 节点（能力地址 + `{{.node.field}}` 模板）+ 条件边（`when` 模板），拓扑排序 + 环检测，fsnotify 热重载
+
+**SQLite 迁移版本化（P0-3）**
+
+- 新增 `internal/migration`：事务化 Apply + `wukong_schema_migrations` 版本簿记表，Optional 语义承载 FTS5 宽松行为；8 处散建表收敛为各子系统 `migrations.go`
+- 新命令 `wukong migrate`；存量库零干预升级（SQL 保留 IF NOT EXISTS 首跑补记）
+
+### P1 扩展性与生态
+
+- **用户 JS 脚本 hook**（P1-4）：`.wukong/hooks/*.js` 的 `beforeStep`/`beforeTool` + `tool()` 注册脚本工具（`script.*` 能力）；goja 每调用全新 VM + Interrupt 超时；hook fail-open
+- **Provider 能力矩阵与逃生舱**（P1-5）：`docs/PROVIDERS.md`；`gemini` 类型别名；deepseek 启用框架 VariantDeepSeek；`extra_headers`/`extra_fields` 协议逃生舱
+- **AG-UI 内置参考客户端**（P1-6）：`:8080/` 自包含 Web 聊天控制台（go:embed），SSE 全协议 + 会话连续 + 可选 X-API-Key
+- **cortex 测试清偿**（P1-7）：lexical/向量检索/Reranker/VectorCache/MemoryFlow/GraphFlow 共 15 用例；**修复两个真实缺陷**：Reranker API 失败不降级（违背渐进式降级原则）、BuildGraph 将 entities 请求错发 `ingest_document` 工具且未兜底启发式抽取空 Summary（启发式路径自引入不可用）
+
+### P2 工程健康
+
+- **三大巨型文件拆分**（P2-8，零行为变化）：loop.go 2321→4 文件、session.go 1785→3 文件、tui/model.go 1935→3 文件
+- **i18n 起步**（P2-9）：`README_EN.md` 完整英文版，双语互链
+- **发布卫生**（P2-10）：版本链修复（Makefile/Taskfile 注入目标错包 + 硬编码 0.3.3 → ldflags 优先 + buildinfo 回退，版本完全由 git 驱动）；`.gitignore` 修正（`.github/` 误忽略、gse 字典 hack 机制文档化）；删 `_probe/`
+
+### 框架升级
+
+- trpc-agent-go v1.10.0 → **v1.11.2**（memory/sqlite、session/sqlite → v1.11.0；DDL 无变化，存量 DB 兼容）
+- 唯一 breaking：toolsearch 插件改 deferred-tools 模型——function tools 为 preset 常驻，工具集平铺为 deferred 候选（`buildToolsearchCandidates` 保证两集合互斥去重）
+- 修复迁移缺陷：deferred 集合误含 preset 工具导致注册期 ERROR 刷屏
+
+### 配置警告增强
+
+- 云类型 provider 的 api_key 展开为空 → 专项警告（default provider 用加强文案）——现场排查"请求未带 Authorization"时发现的检查盲区
+
+---
+
 ## [0.3.3] — 2026-08-29
 
 ### 配置体系重构（tag 驱动，消除三份默认值体系与 120 行样板）

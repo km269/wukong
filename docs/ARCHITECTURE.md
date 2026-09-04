@@ -32,7 +32,7 @@
 
 | 框架 | 版本 | 用途 |
 |------|------|------|
-| `trpc-agent-go` | v1.10.0 | Agent 核心引擎（LLMAgent / Runner / Planner / Session / Memory / Tool） |
+| `trpc-agent-go` | v1.11.2 | Agent 核心引擎（LLMAgent / Runner / Planner / Session / Memory / Tool） |
 | `trpc-mcp-go` | v0.0.16 | MCP（Model Context Protocol）工具协议 |
 | `trpc-a2a-go` | v0.2.5 | A2A（Agent-to-Agent）通信协议 |
 

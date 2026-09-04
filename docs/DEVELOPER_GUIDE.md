@@ -46,9 +46,9 @@ go 1.26
 
 | 框架 | 版本 | 用途 |
 |------|------|------|
-| `trpc.group/trpc-go/trpc-agent-go` | v1.10.0 | Agent 循环、Runner、LLMAgent、Planner、Tool |
+| `trpc.group/trpc-go/trpc-agent-go` | v1.11.2 | Agent 循环、Runner、LLMAgent、Planner、Tool |
 | `trpc.group/trpc-go/trpc-mcp-go` | v0.0.16 | MCP 协议客户端 / Broker |
-| `trpc.group/trpc-go/trpc-a2a-go` | v0.2.5（间接） | Agent-to-Agent 互操作 |
+| `trpc.group/trpc-go/trpc-a2a-go` | v0.2.6-pre（间接） | Agent-to-Agent 互操作 |
 | `github.com/spf13/cobra` | v1.9.1 | CLI 命令框架 |
 | `github.com/charmbracelet/bubbletea` | v1.3.10 | TUI 框架 |
 | `modernc.org/sqlite` | v1.38.2 | 纯 Go SQLite（**零 CGO**） |
