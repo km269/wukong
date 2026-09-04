@@ -719,6 +719,31 @@ func (c *WukongConfig) Warnings() []string {
 					"LLM requests will fail. Set the environment variable "+
 					"or configure base_url directly in config.yaml")
 		}
+		// Warn when a cloud-type provider resolves to an empty API key
+		// (unset env var, name mismatch, or literal blank): the request
+		// goes out without an Authorization header and the gateway
+		// rejects it with a generic auth error that is hard to trace
+		// back to the config. Local backends legitimately need no key.
+		if p.APIKey == "" {
+			switch ProviderType(p.Type) {
+			case ProviderOllama, ProviderLMStudio, ProviderVLLM, ProviderACP:
+				// No key required.
+			default:
+				hint := "Set providers[" + p.Name + "].api_key directly " +
+					"or via ${ENV_VAR} (watch for env name mismatches)."
+				if p.Name == c.DefaultProvider {
+					warnings = append(warnings,
+						"default provider "+p.Name+" has an empty api_key; "+
+							"requests will be sent without Authorization "+
+							"and fail. "+hint)
+				} else {
+					warnings = append(warnings,
+						"providers["+p.Name+"].api_key is empty; "+
+							"requests will be sent without Authorization "+
+							"and fail. "+hint)
+				}
+			}
+		}
 		// Warn when context_window is not set for local inference
 		// servers. Their actual n_ctx varies by model and is easy
 		// to misconfigure; the conservative default (8K) may be
