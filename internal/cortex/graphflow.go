@@ -102,10 +102,17 @@ func (g *GraphFlowService) BuildGraph(
 	entities := make(
 		[]cortexdb.ToolEntityInput, 0, len(result.Nodes))
 	for _, node := range result.Nodes {
+		description := node.Summary
+		// The heuristic extractor does not fill Summary; persisting an
+		// empty description is rejected by cortexdb ("empty text
+		// provided"), so fall back to the label.
+		if strings.TrimSpace(description) == "" {
+			description = node.Label
+		}
 		ent := cortexdb.ToolEntityInput{
 			Name:        node.Label,
 			Type:        node.Type,
-			Description: node.Summary,
+			Description: description,
 		}
 		if node.ID != "" {
 			ent.ID = node.ID
@@ -139,7 +146,7 @@ func (g *GraphFlowService) BuildGraph(
 				"graphflow: marshal entities: %w", err)
 		}
 		if _, err := toolbox.Call(
-			ctx, "ingest_document", payload,
+			ctx, "upsert_entities", payload,
 		); err != nil {
 			return fmt.Errorf(
 				"graphflow: persist entities: %w", err)
