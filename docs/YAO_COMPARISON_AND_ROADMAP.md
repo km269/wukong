@@ -154,11 +154,11 @@ CLI 可直接调用：`yao run <process>`。
 
 ### P2 · 工程健康（持续）
 
-8. **拆组合根** — ✅ **已落地（2026-09-03）**：三个巨型文件按关注点完成同包函数级拆分（零行为变化，纯代码搬移 + import 修剪）：
+8. **拆组合根** — ✅ **已落地（2026-09-03 文件级 + 2026-09-04 函数级与解耦，两轮）**：三个巨型文件按关注点完成同包函数级拆分（零行为变化，纯代码搬移 + import 修剪），第二轮追加函数级阶段化与反向依赖解耦：
    - `internal/agent/loop.go`（2321 行）→ **loop.go**（597：结构体/配置/构造/accessors/Close）+ **loop_run.go**（971：pre-step reject 流、Run/RunStream 事件循环、finalize 辅助）+ **loop_agent_build.go**（528：createSingleAgent、系统指令、上下文压缩选项、能力聚合 effectiveToolSets/SyncRecipeCapabilities）+ **loop_callbacks.go**（419：Guard 工具回调、命令校验三模式、模型回调、guardrail 插件）。
    - `internal/cli/session.go`（1785 行）→ **session.go**（237：命令定义 + TUI 入口 + BootstrapState）+ **bootstrap.go**（1313：bootstrapSession 启动引擎）+ **bootstrap_helpers.go**（299：overrides/校验/adapter 辅助）。
    - `internal/cli/tui/model.go`（1935 行）→ **model.go**（1047：Elm 核心 + Update/View + StartTUI）+ **tui_render.go**（317：Markdown 流式渲染/审计面板）+ **tui_commands.go**（698：斜杠命令 + 会话/项目/设置模态）。
-   - 深层重构（bootstrapSession 内部再拆阶段函数）留待按需进行——本轮以零风险文件重组达成可导航性目标。
+   - 深层重构（第二轮，2026-09-04）：`bootstrapSession` 从 1260 行单函数阶段化为 **430 行编排 + 12 个阶段函数**（bootstrap_phases.go：initTelemetry / initSessionStack / initMemoryStack / buildGuardCheck / initARDStack / initRecallStack / initMemoryFlow / initRecallManagers / initGraphAndImportStack / initSkillStack / initSummonStack / startProtocolServers），warn-continue 与 fatal 语义逐段保留；**config→gateway/server 反向依赖消除**——GatewayConfig/FeishuChannelConfig/Server 安全配置四类型定义下沉 internal/config（gateway/server 持类型别名；server 的 ApplySecurity 方法改为显式适配器 `server.SecurityConfigApplier`），`go list -deps ./internal/config` 中 gateway/server 依赖计数归零。
 9. **i18n 起步** — ✅ **v1 已落地（2026-09-03）**：新增 `README_EN.md` 完整英文版（含语言切换互链 `English | 简体中文`），作为外部贡献者的英文前门——能力矩阵、快速开始、技术栈、子系统亮点全量翻译，并同步了本轮演进的新能力（Flow DSL、`wukong migrate`、AG-UI 内置控制台、版本化迁移存储）与升级后的框架版本（tRPC-Agent-Go v1.11.2）。中文 README 保持第一语言身份不变，仅加语言切换行并同步 Flow DSL 能力行与框架版本号。docs/ 全量英文翻译为长期工作，未在本项范围内；英文 README 的文档索引已明确标注各文档当前语言。
 10. **发布卫生** — ✅ **核心已落地（2026-09-03）**：
     - **版本链修复**：实盘发现 Makefile/Taskfile 的 ldflags 注入目标写成了不存在的 `internal/cli.Version`（静默失效），而 `util.Version` 硬编码 0.3.3 掩盖了一切。现已统一：`version.go` 默认空 + `debug.ReadBuildInfo` 回退链（`go install` 自动携带模块版本与 VCS 元数据，裸构建降级 `dev` + vcs revision/time，goreleaser 注入 tag 版本），Makefile/Taskfile 注入目标修正为 `internal/util.*`——版本从此完全由 git 驱动。

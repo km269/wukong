@@ -858,7 +858,7 @@ wukong/
 
 1. **Composition Root 集中化**：`bootstrapSession()` 是唯一的组装点，1400+ 行完成全部依赖注入，无全局单例。
 
-2. **接口解耦防循环**：gateway→agent 经 `AgentRunner` 接口；server→security 经 `ToolGuardCheck` 回调。
+2. **接口解耦防循环**：gateway→agent 经 `AgentRunner` 接口；server→security 经 `ToolGuardCheck` 回调；配置类型统一定义在 internal/config（gateway/server 持类型别名），依赖方向恒为 gateway/server → config，无反向依赖。
 
 3. **多层存储共享**：同一 `wukong.db` 通过 `MultiPool.Shared()` 在 session/memory/todo/recall/cortex 间共享 `*sql.DB`，避免 SQLite 多连接冲突。子系统可经 `MultiPool.GetOrCreate()` 使用独立数据库文件。
 
