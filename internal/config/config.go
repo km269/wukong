@@ -67,7 +67,6 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/km269/wukong/internal/gateway"
 	"github.com/spf13/viper"
 )
 
@@ -218,8 +217,7 @@ type WukongConfig struct {
 
 	// Gateway configures the messaging gateway
 	// (Feishu, etc.). Each channel owns its own inbound transport.
-	// The type lives in internal/gateway; the root config embeds it.
-	Gateway gateway.GatewayConfig `mapstructure:"gateway"`
+	Gateway GatewayConfig `mapstructure:"gateway"`
 
 	// A2AServer configures the local A2A protocol server.
 	A2AServer A2AServerConfig `mapstructure:"a2a_server"`

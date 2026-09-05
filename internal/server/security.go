@@ -12,38 +12,24 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/km269/wukong/internal/config"
 )
 
-type ServerTLSConfig struct {
-	Enabled    bool   `mapstructure:"enabled"`
-	CertFile   string `mapstructure:"cert_file"`
-	KeyFile    string `mapstructure:"key_file"`
-	CACertFile string `mapstructure:"ca_cert_file"`
-}
+// The server security configuration types (ServerTLSConfig,
+// ServerAuthConfig, ServerRateLimitConfig, ServerSecurityConfig) live
+// in internal/config/types_server.go — the root WukongConfig embeds
+// them, so keeping the definitions here made internal/config depend
+// on internal/server. Type aliases keep every existing reference in
+// this package (and in external call sites) compiling unchanged.
 
-type ServerAuthConfig struct {
-	Type string `mapstructure:"type"`
-	// APIKey and JWTSecret support ${ENV_VAR} expansion; the tag is
-	// consumed by the config package's tag-driven expandSecrets walk.
-	APIKey    string `mapstructure:"api_key" envexpand:"true"`
-	JWTSecret string `mapstructure:"jwt_secret" envexpand:"true"`
-}
+type ServerTLSConfig = config.ServerTLSConfig
 
-type ServerRateLimitConfig struct {
-	Enabled      bool          `mapstructure:"enabled"`
-	MaxPerMinute int           `mapstructure:"max_per_minute"`
-	Window       time.Duration `mapstructure:"window"`
-}
+type ServerAuthConfig = config.ServerAuthConfig
 
-type ServerSecurityConfig struct {
-	TLS       ServerTLSConfig       `mapstructure:"tls"`
-	Auth      ServerAuthConfig      `mapstructure:"auth"`
-	RateLimit ServerRateLimitConfig `mapstructure:"rate_limit"`
-}
+type ServerRateLimitConfig = config.ServerRateLimitConfig
 
-func (c ServerTLSConfig) IsEnabled() bool {
-	return c.Enabled && c.CertFile != "" && c.KeyFile != ""
-}
+type ServerSecurityConfig = config.ServerSecurityConfig
 
 func BuildTLSConfig(cfg ServerTLSConfig) (*tls.Config, error) {
 	if !cfg.IsEnabled() {
@@ -266,13 +252,20 @@ func ApplySecurity(h http.Handler, secCfg ServerSecurityConfig) (http.Handler, *
 	return h, tlsCfg
 }
 
-// ApplySecurity is a method form of the package-level ApplySecurity
-// function, allowing ServerSecurityConfig to satisfy the
-// extension.securityApplier interface without creating a cyclic
-// import. The second return is tls config as interface{} to match
-// the opaque signature expected by extension.NewMCPServerWithSecurity.
-func (s ServerSecurityConfig) ApplySecurity(h http.Handler) (http.Handler, interface{}) {
-	return ApplySecurity(h, s)
+// SecurityConfigApplier adapts a ServerSecurityConfig to the opaque
+// securityApplier interface accepted by
+// extension.NewMCPServerWithSecurity. (The ApplySecurity method used
+// to be defined directly on ServerSecurityConfig, but that type moved
+// into internal/config, and the method needs this package's
+// ApplySecurity implementation — so it became this wrapper.)
+type SecurityConfigApplier struct {
+	Cfg ServerSecurityConfig
+}
+
+// ApplySecurity wraps the handler with TLS, authentication, and
+// rate-limiting middleware derived from the config.
+func (a SecurityConfigApplier) ApplySecurity(h http.Handler) (http.Handler, interface{}) {
+	return ApplySecurity(h, a.Cfg)
 }
 
 func BuildHTTPServer(addr string, handler http.Handler, secCfg ServerSecurityConfig) (*http.Server, error) {

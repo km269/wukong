@@ -1,14 +1,53 @@
 package config
 
-import (
-	"github.com/km269/wukong/internal/server"
-)
+import "time"
 
-// ServerSecurityConfig is a type alias to the server package's
-// ServerSecurityConfig. This keeps the dependency direction clean
-// (config → server) while avoiding circular imports. The nested
-// TLS/Auth/RateLimit types are used through this alias directly.
-type ServerSecurityConfig = server.ServerSecurityConfig
+// This file defines the protocol-server security configuration types.
+// They lived in internal/server (as real definitions) while
+// internal/config only aliased them — but the root WukongConfig
+// embeds these types, which made internal/config depend on
+// internal/server. The definitions now live here (dependency
+// direction: server → config); the server package keeps type aliases
+// so all existing references compile unchanged.
+
+// ServerTLSConfig configures optional TLS for a protocol server.
+type ServerTLSConfig struct {
+	Enabled    bool   `mapstructure:"enabled"`
+	CertFile   string `mapstructure:"cert_file"`
+	KeyFile    string `mapstructure:"key_file"`
+	CACertFile string `mapstructure:"ca_cert_file"`
+}
+
+// IsEnabled reports whether TLS should be negotiated (enabled with a
+// certificate/key pair configured).
+func (c ServerTLSConfig) IsEnabled() bool {
+	return c.Enabled && c.CertFile != "" && c.KeyFile != ""
+}
+
+// ServerAuthConfig configures endpoint authentication
+// (none / api_key / jwt).
+type ServerAuthConfig struct {
+	Type string `mapstructure:"type"`
+	// APIKey and JWTSecret support ${ENV_VAR} expansion; the tag is
+	// consumed by the config package's tag-driven expandSecrets walk.
+	APIKey    string `mapstructure:"api_key" envexpand:"true"`
+	JWTSecret string `mapstructure:"jwt_secret" envexpand:"true"`
+}
+
+// ServerRateLimitConfig configures per-endpoint rate limiting.
+type ServerRateLimitConfig struct {
+	Enabled      bool          `mapstructure:"enabled"`
+	MaxPerMinute int           `mapstructure:"max_per_minute"`
+	Window       time.Duration `mapstructure:"window"`
+}
+
+// ServerSecurityConfig bundles TLS, authentication, and rate-limiting
+// settings for a protocol server.
+type ServerSecurityConfig struct {
+	TLS       ServerTLSConfig       `mapstructure:"tls"`
+	Auth      ServerAuthConfig      `mapstructure:"auth"`
+	RateLimit ServerRateLimitConfig `mapstructure:"rate_limit"`
+}
 
 // ============================================================================
 // Service Endpoint Configuration

@@ -36,9 +36,9 @@ type BrowserConfig struct {
 	// languages, Accept-Language) to the proxy exit region: one of
 	// cn, us-east, us-west, us-central, gb, de, fr, jp, kr, sg.
 	// Empty = infer from the proxy URL when possible, else random.
-	GeoRegion string `mapstructure:"geo_region"`
-	Search    SearchConfig       `mapstructure:"search"`
-	Proxy     ProxyConfig        `mapstructure:"proxy"`
+	GeoRegion string       `mapstructure:"geo_region"`
+	Search    SearchConfig `mapstructure:"search"`
+	Proxy     ProxyConfig  `mapstructure:"proxy"`
 }
 
 // ProxyConfig defines proxy settings for browser automation.

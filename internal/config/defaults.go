@@ -12,8 +12,6 @@
 // documented key should have a corresponding SetDefault entry.
 package config
 
-import "github.com/km269/wukong/internal/gateway"
-
 // setDefaults registers all built-in default values with Viper.
 // These are used when no config file or environment variable
 // provides a value.
@@ -514,10 +512,26 @@ func (l *Loader) setObservabilityDefaults() {
 }
 
 // setGatewayDefaults registers Gateway and channel defaults. The
-// concrete defaults live in the gateway package (which owns the config
-// types); here we delegate to gateway.SetDefaults.
+// gateway config types live in types_gateway.go (dependency direction:
+// gateway → config), and the defaults are inlined here so the config
+// package does not import the gateway package.
 func (l *Loader) setGatewayDefaults() {
-	gateway.SetDefaults(l.v)
+	// Gateway
+	l.v.SetDefault("gateway.enabled", false)
+	l.v.SetDefault("gateway.default_timeout", "900s")
+	l.v.SetDefault("gateway.max_concurrent_sessions", 100)
+	l.v.SetDefault("gateway.message_dedup_ttl", "5m")
+	l.v.SetDefault("gateway.rate_limit_per_user", 20)
+	l.v.SetDefault("gateway.rate_limit_window", "60s")
+
+	// Feishu channel
+	l.v.SetDefault("gateway.feishu.enabled", false)
+	l.v.SetDefault("gateway.feishu.api_base",
+		"https://open.feishu.cn/open-apis")
+	l.v.SetDefault("gateway.feishu.stream_card_enabled", true)
+	l.v.SetDefault("gateway.feishu.stream_card_update_interval", "500ms")
+	l.v.SetDefault("gateway.feishu.max_message_length", 4096)
+	l.v.SetDefault("gateway.feishu.enable_file_receive", false)
 }
 
 // setOKFDefaults registers Open Knowledge Format (OKF)

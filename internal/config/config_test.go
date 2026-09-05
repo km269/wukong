@@ -6,8 +6,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/km269/wukong/internal/gateway"
 )
 
 func TestResolvePath(t *testing.T) {
@@ -524,9 +522,9 @@ func TestWarnings_NoProviders(t *testing.T) {
 // the Feishu channel is enabled without an app_id.
 func TestWarnings_FeishuMissingAppID(t *testing.T) {
 	cfg := &WukongConfig{
-		Gateway: gateway.GatewayConfig{
+		Gateway: GatewayConfig{
 			Enabled: true,
-			Feishu:  gateway.FeishuChannelConfig{Enabled: true}, // AppID empty
+			Feishu:  FeishuChannelConfig{Enabled: true}, // AppID empty
 		},
 	}
 	warnings := cfg.Warnings()
